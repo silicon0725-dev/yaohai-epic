@@ -1,0 +1,6 @@
+[gd_scene load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://debug/items_ui_check.gd" id="1_iu"]
+
+[node name="ItemsUiCheck" type="Node"]
+script = ExtResource("1_iu")

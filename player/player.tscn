@@ -1,0 +1,22 @@
+[gd_scene load_steps=4 format=3]
+
+[ext_resource type="Script" path="res://player/player_controller.gd" id="1_pc"]
+[ext_resource type="Script" path="res://player/crosshair.gd" id="2_ch"]
+
+[sub_resource type="CapsuleShape3D" id="CapsuleShape3D_1"]
+radius = 0.4
+height = 2.0
+
+[node name="Player" type="CharacterBody3D"]
+script = ExtResource("1_pc")
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="."]
+shape = SubResource("CapsuleShape3D_1")
+
+[node name="Camera" type="Camera3D" parent="."]
+
+[node name="HUD" type="CanvasLayer" parent="."]
+
+[node name="Crosshair" type="Control" parent="HUD"]
+script = ExtResource("2_ch")
+

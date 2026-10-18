@@ -1,0 +1,6 @@
+[gd_scene load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://debug/capture_items.gd" id="1_ci"]
+
+[node name="CaptureItems" type="Node"]
+script = ExtResource("1_ci")

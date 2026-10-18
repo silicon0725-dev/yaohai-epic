@@ -1,0 +1,13 @@
+# Godot 4 生成目录（导入缓存、全局类缓存等）
+.godot/
+
+# 翻译与临时文件
+*.translation
+*.tmp
+
+# 运行时截图（debug 检查输出，不入库）
+debug/*.png
+debug/*.png.import
+
+# 本地 Conquest 材质暂存（许可禁止再分发，绝不入库；见 assets/textures/CREDITS.md）
+assets/textures/conquest_local/

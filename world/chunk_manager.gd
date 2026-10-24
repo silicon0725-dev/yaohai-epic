@@ -20,6 +20,11 @@ extends Node
 
 ## 视距（水平，区块半径）。
 @export var view_distance := 5
+## 碰撞圈（水平，区块半径）：超出该圈的区块只建网格不建碰撞
+## 顶点汤（Concave 形状构建/内存大头，观景视距下绝大部分区块
+## 玩家永远物理接触不到）。玩家跨列进入碰撞圈时补建（见
+## _update_streaming 的 center_moved 分支）。
+@export var collision_radius := 4
 ## 超出视距多少后卸载（防止来回横跳的缓冲）。
 @export var unload_padding := 2
 ## 在途任务上限（生成+网格合计）。
@@ -68,6 +73,14 @@ var _gen_by_coord := {}    # coord -> task_id（防重复提交）
 var _mesh_by_coord := {}   # coord -> task_id（防重复提交）
 var _camera: Camera3D
 var _autosave_accumulator := 0.0
+# 调度缓存（避免每帧重算）：焦点列未变时跳过卸载扫描；列排序
+# 仅在焦点列变化或视线偏转 >~30° 时重建；已完整列由游标永久跳过
+#（曾每帧 desired_columns 全量生成 + O(n log n) 排序，800 列视距
+# 下每帧上万次比较）
+var _stream_center := Vector2i(-2147483648, -2147483648)
+var _stream_dir := Vector2.ZERO
+var _sorted_columns: Array[Vector2i] = []
+var _stream_cursor := 0
 
 
 func setup(
@@ -244,24 +257,39 @@ static func priority_score(
 
 func _update_streaming() -> void:
 	var center := _focus_column()
-	# 1) 卸载（.keys() 取副本，避免遍历中修改）
-	for coord in world.chunks.keys():
-		if should_unload_column(coord, center, view_distance, unload_padding):
-			_unload_chunk(coord)
-	# 2) 按优先级补齐缺失区块（预算不足则下帧继续）
+	var center_moved := center != _stream_center
+	if center_moved:
+		# 1) 卸载（.keys() 取副本，避免遍历中修改）。焦点列未变时
+		# 跳过——新增区块全部来自视距内的任务提交，不会触发卸载
+		for coord in world.chunks.keys():
+			if should_unload_column(coord, center, view_distance, unload_padding):
+				_unload_chunk(coord)
+		_stream_center = center
+		_ensure_collision_ring(center)
+	# 2) 列排序缓存：焦点列变化或视线偏转 >~30° 才重建（cos 阈值）
 	var view_dir := _view_direction()
-	var columns := desired_columns(center, view_distance)
-	var compare := func(a: Vector2i, b: Vector2i) -> bool:
-		return priority_score(a, center, view_dir, view_bias) \
-				< priority_score(b, center, view_dir, view_bias)
-	columns.sort_custom(compare)
-	for column in columns:
-		if in_flight_count() >= max_in_flight:
-			break
-		for y in world.config.chunks_y:
+	if center_moved or _sorted_columns.is_empty() \
+			or view_dir == Vector2.ZERO \
+			or _stream_dir.dot(view_dir) < 0.866:
+		var columns := desired_columns(center, view_distance)
+		var compare := func(a: Vector2i, b: Vector2i) -> bool:
+			return priority_score(a, center, view_dir, view_bias) \
+					< priority_score(b, center, view_dir, view_bias)
+		columns.sort_custom(compare)
+		_sorted_columns = columns
+		_stream_dir = view_dir
+		_stream_cursor = 0
+	# 3) 补缺（游标推进：已完整列永久跳过，in_flight 满则停在缺口处）
+	var size_y: int = world.config.chunks_y
+	while _stream_cursor < _sorted_columns.size() \
+			and in_flight_count() < max_in_flight:
+		var column: Vector2i = _sorted_columns[_stream_cursor]
+		var all_present := true
+		for y in size_y:
 			var coord := Vector3i(column.x, y, column.y)
 			if world.has_chunk(coord) or _gen_by_coord.has(coord):
 				continue
+			all_present = false
 			if _dormant.has(coord):
 				_restore_dormant(coord)
 				renderer.register_chunk(coord)
@@ -269,6 +297,26 @@ func _update_streaming() -> void:
 			else:
 				# 磁盘存档由生成任务在工作线程内优先读取（见 _generate_job）
 				_enqueue_generation(coord)
+		if all_present:
+			_stream_cursor += 1
+
+
+## 玩家跨列后：把新进入碰撞圈的已激活区块标脏补建碰撞（初建时
+## 在圈外被跳过）。出圈方向不拆——碰撞保留到区块卸载（内存换
+## 稳定，避免边界横跳重建）。
+func _ensure_collision_ring(center: Vector2i) -> void:
+	if renderer == null or not renderer.has_method("has_collision"):
+		return
+	var r2 := collision_radius * collision_radius
+	for coord in world.chunks:
+		var chunk: ChunkData = world.chunks[coord]
+		if chunk.state != ChunkState.State.ACTIVE:
+			continue
+		if Vector2i(coord.x, coord.z).distance_squared_to(center) > r2:
+			continue
+		if renderer.has_collision(coord):
+			continue
+		chunk.collision_dirty = true
 
 
 func _poll_jobs() -> void:
@@ -297,12 +345,15 @@ func _poll_jobs() -> void:
 		_mesh_by_coord.erase(job["coord"])
 		if _commit_mesh(job):
 			mesh_committed += 1
-	# 脏区块网格任务（首次网格化与修改重建共用该路径）
+	# 脏区块网格任务（首次网格化与修改重建共用该路径）；
+	# collision_dirty 单独触发（玩家进入碰撞圈的补建路径——重网格
+	# 产出同 arrays，提交时按圈半径决定建碰撞）
 	for coord in world.chunks:
 		if in_flight_count() >= max_in_flight:
 			break
 		var chunk: ChunkData = world.chunks[coord]
-		if chunk.mesh_dirty and not _mesh_by_coord.has(coord):
+		if (chunk.mesh_dirty or chunk.collision_dirty) \
+				and not _mesh_by_coord.has(coord):
 			_enqueue_mesh(coord)
 
 
@@ -406,8 +457,14 @@ func _commit_mesh(job: Dictionary) -> bool:
 			chunk.mesh_dirty = true
 			return false
 	# 碰撞是否需要重建：纯水位变化（affects_collision=false）只标了
-	# mesh_dirty，提交时跳过碰撞形状重建（水无碰撞体）
-	renderer.apply_mesh(coord, mesh_arrays, chunk.collision_dirty)
+	# mesh_dirty，跳过碰撞形状重建（水无碰撞体）；碰撞圈外的区块
+	# 不建顶点汤（观景视距下远区块玩家接触不到——Concave 构建/内存
+	# 大头），进入圈时由 _ensure_collision_ring 补建
+	var want_collision := Vector2i(coord.x, coord.z) \
+			.distance_squared_to(_stream_center) \
+			<= collision_radius * collision_radius
+	renderer.apply_mesh(coord, mesh_arrays,
+			chunk.collision_dirty and want_collision)
 	chunk.mesh_dirty = false
 	chunk.collision_dirty = false
 	chunk.state = ChunkState.State.ACTIVE

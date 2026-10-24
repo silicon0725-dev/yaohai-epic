@@ -39,6 +39,48 @@ func run() -> void:
 	arrays = _mesh(world, Vector3i(0, 0, 0))
 	check_eq(arrays["indices"].size(), 60, "相邻方块共享面被剔除")
 
+	# 树叶面走 cutout 桶（独立 alpha 裁刻表面）：不进不透明索引，
+	# 孤立叶方块 6 面全进 cutout；石头面数不变
+	chunk.set_block_raw(Vector3i(3, 2, 1), VoxelTypes.LEAVES_ID)
+	arrays = _mesh(world, Vector3i(0, 0, 0))
+	check_eq(arrays["indices"].size(), 60, "叶面不进不透明桶")
+	check_eq(arrays["cutout_indices"].size(), 36, "孤立树叶 6 面全进 cutout 桶")
+	check_eq(arrays["vertices"].size(), 40 + 24, "叶面顶点与不透明共享同一数组（石头 10 面 + 叶 6 面）")
+
+	# 材质必须挂在“刚添加的表面”上（surface 条件添加，序号随前面
+	# 表面有无而变）——无水区块叶 surface 是 1 号，写死 3 号曾越界
+	# 失效，树叶渲染成整块白
+	var mat_opaque := StandardMaterial3D.new()
+	var mat_cutout := StandardMaterial3D.new()
+	var built_mesh := MeshBuilder.arrays_to_mesh(
+			arrays.duplicate(true), mat_opaque, null, null, mat_cutout)
+	check_eq(built_mesh.get_surface_count(), 2, "无水区块两表面（不透明+cutout）")
+	check_eq(built_mesh.surface_get_material(1), mat_cutout,
+			"cutout 材质挂在叶 surface 上（非默认白材质）")
+
+	# 图集必须保留 alpha（RGBA8）——曾建 RGB8 并 convert 丢弃透明
+	# 通道，树叶贴图的孔洞被压成不透明黑点，镂空失效
+	var atlas := TextureAtlasLoader.generate_atlas_image()
+	check(atlas.get_format() == Image.FORMAT_RGBA8, "图集保留 alpha 通道（RGBA8）")
+	var ts: int = TextureAtlasLoader.TILE_SIZE
+	# 全部 tile 必须有内容——blit_rect 要求源与图集同格式，RGB8 源
+	# 曾 blit 失败变全透明空位（树干贴图消失被 scissor 裁没）
+	for tile_name in TextureAtlasLoader.TILES:
+		var g := TextureAtlasLoader.tile_grid(tile_name)
+		var opaque := 0
+		for py in ts:
+			for px in ts:
+				if atlas.get_pixel(g.x * ts + px, g.y * ts + py).a > 0.5:
+					opaque += 1
+		check(opaque > 100, "tile %s 非空（%d 不透明像素）" % [tile_name, opaque])
+	var lt := TextureAtlasLoader.tile_grid("leaves")
+	var holes := 0
+	for py in ts:
+		for px in ts:
+			if atlas.get_pixel(lt.x * ts + px, lt.y * ts + py).a < 0.5:
+				holes += 1
+	check(holes > 50, "树叶 tile 含透明孔（%d 像素）" % holes)
+
 	# 实心 3x3x3：被完全包裹的中心方块不贡献任何面 -> 54 面。
 	# 区域放在 y=1..3，避开世界底部策略（y<0 视为实心）对面数的影响。
 	var world2 := _make_world(1)

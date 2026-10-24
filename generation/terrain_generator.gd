@@ -13,6 +13,9 @@
 class_name TerrainGenerator
 extends RefCounted
 
+## C# 原生地形桥（preload 避开新 class_name 的全局类缓存坑）
+const NativeTerrainBridge := preload("res://meshing/native_terrain_bridge.gd")
+
 ## 生成算法版本。
 const GENERATOR_VERSION := 6
 
@@ -174,8 +177,15 @@ func block_for_column(
 		profile: Dictionary, world_x: int, world_y: int,
 		world_z: int, height: int
 ) -> int:
-	var rocky: bool = profile["rocky"]
-	var sandy: bool = profile["sandy"]
+	return _block_for_column(profile, profile["rocky"], profile["sandy"],
+			world_x, world_y, world_z, height)
+
+
+## 内联版：rocky/sandy 由调用方解包（生成热循环免每格字符串键取值）。
+func _block_for_column(
+		profile: Dictionary, rocky: bool, sandy: bool,
+		world_x: int, world_y: int, world_z: int, height: int
+) -> int:
 	if world_y > height:
 		return VoxelTypes.AIR_ID
 	if world_y == 0:
@@ -224,46 +234,91 @@ func generate_chunk(chunk_coord: Vector3i) -> ChunkData:
 	)
 	chunk.state = ChunkState.State.GENERATING
 	var origin := VoxelCoords.chunk_origin(chunk_coord, size)
+	# C# 优先（等价测试 native_terrain 多种子逐字节保证）：列剖面+方块
+	# 填充主体走原生；树重放留 GDScript（hash/RNG 等价风险长尾），
+	# 复用 C# 输出的列剖面数组免重复噪声采样。不可用回退 GD 全程
+	var native := NativeTerrainBridge.generate_chunk(
+			config.world_seed, config.world_height_blocks(),
+			chunk_coord, size)
+	if not native.is_empty():
+		chunk.block_ids = native["ids"]
+		_scatter_trees(chunk, native)
+	else:
+		_fill_columns_gd(chunk, origin, size)
+		_scatter_trees(chunk, {})
+	chunk.state = ChunkState.State.DATA_READY
+	return chunk
+
+
+## GDScript 列填充回退路径（与 C# NativeTerrain.GenerateChunk 等价，
+## 等价测试保证；直写 block_ids 布局 x + y*s + z*s²）。
+func _fill_columns_gd(chunk: ChunkData, origin: Vector3i, size: int) -> void:
+	var ids := chunk.block_ids
 	for lz in size:
+		var z_off := lz * size * size
 		for lx in size:
 			var world_x := origin.x + lx
 			var world_z := origin.z + lz
 			var profile := column_profile(world_x, world_z)
 			var height: int = profile["height"]
+			var rocky: bool = profile["rocky"]
+			var sandy: bool = profile["sandy"]
+			var col := z_off + lx
 			for ly in size:
 				var world_y := origin.y + ly
-				# 海平面填充：地表之上的空气低于海平面即为水
-				#（v1 静态水，无流动模拟）
+				var block_id: int
+				# 海平面填充：地表之上的空气低于海平面即为水（v1 静态水）
 				if world_y > height and world_y <= SEA_LEVEL:
-					chunk.set_block_raw(Vector3i(lx, ly, lz),
-							VoxelTypes.WATER_ID)
-					continue
-				chunk.set_block_raw(Vector3i(lx, ly, lz),
-						block_for_column(profile, world_x, world_y,
-								world_z, height))
-	# v6 动态树撒种（确定性哈希）：草地且上方空气、距 chunk 边 >=3 格
-	#（树冠半径 2 + 主干倾斜余量，避免跨 chunk 截断），草地密度约 5%。
-	# v6.1 影响范围重放（修"树顶被生成层顶切断"）：每层 chunk 对
-	# 水平范围内可能影响本层的所有树（根在 ±TREE_REACH 列内、
-	# 树根的地表任意层）确定性重放生长（同 rng 同树形），只写入
-	# 落在本层的格——跨层树在每层各写各的部分，完整无截断。
+					block_id = VoxelTypes.WATER_ID
+				else:
+					block_id = _block_for_column(profile, rocky, sandy,
+							world_x, world_y, world_z, height)
+				ids[col + ly * size] = block_id
+
+
+## v6 动态树撒种（确定性哈希）：草地且上方空气、距 chunk 边 >=3 格
+##（树冠半径 2 + 主干倾斜余量，避免跨 chunk 截断），草地密度约 5%。
+## v6.1 影响范围重放（修"树顶被生成层顶切断"）：每层 chunk 对
+## 水平范围内可能影响本层的所有树（根在 ±TREE_REACH 列内、
+## 树根的地表任意层）确定性重放生长（同 rng 同树形），只写入
+## 落在本层的格——跨层树在每层各写各的部分，完整无截断。
+## profiles 非空时（C# 路径）界内列直接查 height/sandy/rocky 数组，
+## 界外列（±TREE_REACH 圈）回退 column_profile——每树 1-2 次，量小。
+func _scatter_trees(chunk: ChunkData, profiles: Dictionary) -> void:
+	var origin := Vector3i(chunk.chunk_coord.x * chunk.dimensions.x,
+			chunk.chunk_coord.y * chunk.dimensions.y,
+			chunk.chunk_coord.z * chunk.dimensions.z)
+	var size: int = chunk.dimensions.x
+	var has_profiles := not profiles.is_empty()
+	var heights: PackedInt32Array = profiles.get("heights", PackedInt32Array())
+	var sandy_arr: PackedByteArray = profiles.get("sandy", PackedByteArray())
+	var rocky_arr: PackedByteArray = profiles.get("rocky", PackedByteArray())
 	for wx in range(origin.x - TREE_REACH, origin.x + size + TREE_REACH):
 		for wz in range(origin.z - TREE_REACH, origin.z + size + TREE_REACH):
 			if not TreeGenerator.has_tree_at(config.world_seed,
 					Vector2i(wx, wz)):
 				continue
-			var surf := column_height(wx, wz)
+			var surf := 0
+			var is_sandy := false
+			var is_rocky := false
+			var lx := wx - origin.x
+			var lz := wz - origin.z
+			if has_profiles and lx >= 0 and lx < size and lz >= 0 and lz < size:
+				var pidx := lz * size + lx
+				surf = heights[pidx]
+				is_sandy = sandy_arr[pidx] == 1
+				is_rocky = rocky_arr[pidx] == 1
+			else:
+				var profile := column_profile(wx, wz)
+				surf = profile["height"]
+				is_sandy = profile.get("sandy", false)
+				is_rocky = profile.get("rocky", false)
 			if surf <= SEA_LEVEL:
 				continue  # 水域/滩涂不种树
-			# 草地判定（荒漠/裸岩不种）：按气候与高度推导表面方块
-			var profile := column_profile(wx, wz)
-			if not profile.get("sandy", false) and profile.get("rocky", false):
-				continue
-			if profile.get("sandy", false):
+			# 草地判定（荒漠/裸岩不种）
+			if is_sandy or is_rocky:
 				continue
 			_grow_tree_into_chunk(chunk, Vector3i(wx, surf + 1, wz))
-	chunk.state = ChunkState.State.DATA_READY
-	return chunk
 
 ## 确定性重放一棵树并只把落在本 chunk 的枝干/树叶格写入占位
 ##（跨层/跨区块树由各层重放补齐，树系统 v2 接口）。

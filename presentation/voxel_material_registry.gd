@@ -10,6 +10,12 @@ var _materials := {}
 
 func _init(atlas_texture: Texture2D) -> void:
 	_materials["opaque"] = _create_atlas_material(atlas_texture)
+	# 树叶镂空（cutout）：alpha 裁切让贴图的透明孔洞成真洞——叶簇
+	# 观感；其余全不透明贴图不受 scissor 影响
+	var cutout := _create_atlas_material(atlas_texture)
+	cutout.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA_SCISSOR
+	cutout.alpha_scissor_threshold = 0.5
+	_materials["cutout"] = cutout
 
 
 func material_for(render_type: String) -> Material:

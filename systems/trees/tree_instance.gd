@@ -77,11 +77,14 @@ func register_branch(node: BranchNode) -> void:
 
 
 ## 局部切割（P0-3）：切断枝段内部的体素后拆分剩余结构。
-## 三种情形：
-## - cell == start：断开与父的连接边（parent 置 -1）；
+## 四种情形：
+## - cell == start 且为根段：断地——段首前移（find_supported 以
+##   根段首格贴地为支撑前提，整树随后失支撑倒伏）；
+## - cell == start（非根）：断开与父的连接边（parent 置 -1）；
 ## - cell == end：段缩短一格（末格被挖）；
 ## - 中间格：段分裂为 A（start..cell-1，保留 parent）与
 ##   B（cell+1..end，新 id，原段的子枝挂到 B）。
+## 任何情形下，挂点在被切格上的子枝脱钩（挂点格没了）。
 ## 不在此判断支撑——那是随后的连通性分析（find_supported）。
 ## 返回 {changed: bool, new_tail_id: int}（中间格分裂时 B 的 id）。
 func split_branch_at_cell(cell: Vector3i) -> Dictionary:
@@ -95,13 +98,25 @@ func split_branch_at_cell(cell: Vector3i) -> Dictionary:
 
 	# 清除被切格的索引
 	cell_to_branch.erase(cell)
+	# 挂点在被切格上的子枝脱钩（顶切的冠心、末切的翘枝——
+	# 不脱钩则按图遍历仍"受支撑"，悬空不掉）
+	_detach_children_forked_at(node, cell)
 
 	if idx == 0:
-		# 断连接边：与父脱钩（parent 的 child 列表移除本段）
-		if node.parent_id >= 0 and branches.has(node.parent_id):
-			var parent: BranchNode = branches[node.parent_id]
-			parent.child_ids.erase(node.id)
-		node.parent_id = -1
+		if node.id == root_branch_id:
+			# 砍根段首格 = 断地：段首前移一格（单格根段则整段移除）。
+			# 曾只置 parent=-1（对根无意义），整树仍被视作受支撑：
+			# 底格被挖树不倒、存档重放后树原地复活。
+			if cells.size() >= 2:
+				node.start_cell = cells[1]
+			else:
+				branches.erase(node.id)
+		else:
+			# 断连接边：与父脱钩（parent 的 child 列表移除本段）
+			if node.parent_id >= 0 and branches.has(node.parent_id):
+				var parent: BranchNode = branches[node.parent_id]
+				parent.child_ids.erase(node.id)
+			node.parent_id = -1
 		revision += 1
 		return {"changed": true, "new_tail_id": -1}
 
@@ -136,11 +151,34 @@ func split_branch_at_cell(cell: Vector3i) -> Dictionary:
 	return {"changed": true, "new_tail_id": tail.id}
 
 
+## 挂点（子枝 start 回退一步）落在指定格上的子枝脱钩——被切格上
+## 的附着物随之失支撑（BFS 不可达 → 倒伏/重放裁剪）。
+func _detach_children_forked_at(node: BranchNode, cell: Vector3i) -> void:
+	if node.child_ids.is_empty():
+		return
+	var keep: Array[int] = []
+	for cid in node.child_ids:
+		if not branches.has(cid):
+			continue
+		var ch: BranchNode = branches[cid]
+		if ch.start_cell - ch.axis_step() == cell:
+			ch.parent_id = -1
+		else:
+			keep.append(cid)
+	node.child_ids = keep
+
+
 ## 连通性分析（P0-4 前半）：从根段 BFS，返回仍受支撑的 branch_id 集。
+## 支撑前提：根段（主干）首格仍贴地（== origin）——底格被切后段首
+## 前移，整树失支撑。曾无条件视根段为受支撑，砍树底格树不倒、
+## 存档重放后树原地复活。
 ## 队列头索引版（避免 pop_front 的 O(n) 移动）。
 func find_supported() -> Dictionary:
 	var supported := {}
 	if not branches.has(root_branch_id):
+		return supported
+	var root: BranchNode = branches[root_branch_id]
+	if root.start_cell != origin:
 		return supported
 	var queue: Array[int] = [root_branch_id]
 	var head := 0

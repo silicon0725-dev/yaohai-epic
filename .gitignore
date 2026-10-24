@@ -18,3 +18,12 @@ node_modules/
 # 本地工具产物与会话目录
 .mimosa/
 .zcode/
+
+# 调试运行日志（脚本本身入库，输出不入）
+debug/*.log
+
+# 第三方专有许可素材（禁止再分发，同 conquest_local 先例）
+EmacEArtStylizedGrass/
+
+# Godot/工具写入的临时文件（~ 前缀，如 addons 构建的中间 dll）
+~*

@@ -9,6 +9,7 @@ const TMP_SAVE_ROOT := "user://tmp_drops_test"
 func run() -> void:
 	var ctx := _make_world()
 	_test_physics(ctx)
+	_test_tree_collision(ctx)
 	_test_spin(ctx)
 	_test_pickup_rules(ctx)
 	_test_serialize(ctx)
@@ -98,6 +99,71 @@ func _test_physics(ctx: Dictionary) -> void:
 	_step(off, world, 200)
 	check(off.grounded, "掉出边缘后停在虚拟世界底（y<0 实心）")
 	check(absf(off.position.y - 0.18) <= 0.001, "虚拟底落点 = 0 + 半高")
+
+
+## 树干碰撞（混合方案回归）：掉落物体素点碰撞感知不到树的
+## StaticBody——经 trunk_solid_probe 探针把主干占位格补为实心
+##（TreeManager.is_solid_for_items 实时注入；测试用 mock）。
+## 枝格（探针不含）穿透——枝无碰撞与玩家一致；无探针场景穿透；
+## 树叶走注册表 collision:true（物品落树冠，玩家区块碰撞同源）。
+func _test_tree_collision(ctx: Dictionary) -> void:
+	var world: VoxelWorld = ctx["world"]
+	var blocks = ctx["blocks"]
+	check(bool(blocks.definition_for_id(
+			VoxelTypes.LEAVES_ID).get("collision", false)),
+			"树叶注册表 collision 保持 true（落树冠/玩家区块碰撞依赖）")
+
+	# 主干占位列 (12,3..5,12)：世界数据是 BRANCH（collision:false），
+	# 实心完全来自探针——与真实树的占位写法一致
+	for y in 3:
+		world.set_block(Vector3i(12, 3 + y, 12), VoxelTypes.BRANCH_ID)
+	var trunk_cells := {}
+	for y in 3:
+		trunk_cells[Vector3i(12, 3 + y, 12)] = true
+	var probe := func(cell: Vector3i) -> bool:
+		return trunk_cells.has(cell)
+
+	# 有探针：掉落被树干接住，落在干顶（顶格 y=5 顶面 6.0）
+	var drop := ItemDrop.new()
+	drop.item_id = ctx["items"].id_for_name("core:dirt")
+	drop.count = 1
+	drop.position = Vector3(12.5, 7.0, 12.5)
+	for i in 80:
+		drop.physics_step(world, 0.05, probe)
+	check(drop.grounded, "掉落被树干接住（grounded）")
+	check(absf(drop.position.y - 6.18) <= 0.001,
+			"落点 = 树干顶格 + 半高（不再穿树）")
+
+	# 无探针（未接线场景）：同一列穿透落平台（旧混合方案行为）
+	var plain := ItemDrop.new()
+	plain.item_id = drop.item_id
+	plain.count = 1
+	plain.position = Vector3(12.5, 7.0, 12.5)
+	_step(plain, world, 80)
+	check(absf(plain.position.y - 3.18) <= 0.001,
+			"无探针时穿树干占位落平台（BRANCH collision:false）")
+
+	# 水平：扔向树干被拦停（贴在干侧顺干滑落到地面）
+	var slider := ItemDrop.new()
+	slider.item_id = drop.item_id
+	slider.count = 1
+	slider.position = Vector3(13.6, 4.18, 12.5)
+	slider.velocity = Vector3(-12.0, 0.0, 0.0)
+	for i in 60:
+		slider.physics_step(world, 0.05, probe)
+	check(absf(slider.position.x - 13.6) <= 0.001,
+			"扔向树干被拦停（贴干侧，%.3f）" % slider.position.x)
+	check(slider.grounded, "拦停后顺干滑落落地")
+
+	# 枝格不在探针内：穿透（枝干无碰撞，与玩家一致）
+	world.set_block(Vector3i(14, 4, 14), VoxelTypes.BRANCH_ID)
+	var thru := ItemDrop.new()
+	thru.item_id = drop.item_id
+	thru.count = 1
+	thru.position = Vector3(14.5, 6.0, 14.5)
+	for i in 80:
+		thru.physics_step(world, 0.05, probe)
+	check(absf(thru.position.y - 3.18) <= 0.001, "枝格穿透（探针不含枝）")
 
 
 # ---- 拾取规则（无磁吸：MC/BDIR 均无此机制）----

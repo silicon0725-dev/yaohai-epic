@@ -11,11 +11,18 @@ static func build_collision_shape(mesh_arrays: Dictionary) -> ConcavePolygonShap
 			"vertices", PackedVector3Array())
 	var indices: PackedInt32Array = mesh_arrays.get(
 			"indices", PackedInt32Array())
+	# 树叶面在 cutout 桶（独立渲染表面）——碰撞仍同源：合并两桶
+	#（叶碰撞不能丢：玩家要能站树冠、掉落物落树冠）
+	var cutout: PackedInt32Array = mesh_arrays.get(
+			"cutout_indices", PackedInt32Array())
 	# ConcavePolygonShape3D.faces 为三角形顶点汤（3 顶点一组，无索引）
 	var faces := PackedVector3Array()
-	faces.resize(indices.size())
+	faces.resize(indices.size() + cutout.size())
 	for i in indices.size():
 		faces[i] = vertices[indices[i]]
+	var off: int = indices.size()
+	for i in cutout.size():
+		faces[off + i] = vertices[cutout[i]]
 	var shape := ConcavePolygonShape3D.new()
 	# 注：faces 属性在 4.7 不可直接赋值，需经 set_faces()
 	shape.set_faces(faces)

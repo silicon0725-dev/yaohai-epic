@@ -93,6 +93,19 @@ func get_tree_at(cell: Vector3i) -> TreeInstance:
 	return _trees[tid]["instance"]
 
 
+## 掉落物碰撞探针（main 接线给 DropManager.trunk_solid_probe）：
+## 该格是否属于活树的**主干段**。混合方案下掉落物走体素点碰撞，
+## 感知不到树的 StaticBody，主干占位格又是 collision:false——
+## "对着树丢东西穿树"由此而来；靠本查询把主干格补为实心。
+## 实时读 cell_to_branch：切割/缩短/倒树后格自动失效，无状态同步。
+func is_solid_for_items(cell: Vector3i) -> bool:
+	var tid = _cell_lookup.get(cell, -1)
+	if tid == -1 or not _trees.has(tid):
+		return false
+	var tree: TreeInstance = _trees[tid]["instance"]
+	return tree.cell_to_branch.get(cell) == tree.root_branch_id
+
+
 func tree_count() -> int:
 	return _trees.size()
 
@@ -183,6 +196,17 @@ func _build_visual(tree_id: int) -> void:
 	mi.position = Vector3(tree.origin)
 	add_child(mi)
 	entry["mesh_node"] = mi
+	_build_crown_shadow(tree, mi)
+	# 木质阴影代理：漂亮网格的收尾缩格/分叉桥在阴影通道有周期性
+	# 漏光缝（枝影带规律亮斑）——SHADOWS_ONLY 满格盒代理密封补光
+	var shadow_mesh := TreeMeshBuilder.build_shadow_mesh(tree)
+	if shadow_mesh != null:
+		var wmi := MeshInstance3D.new()
+		wmi.name = "WoodShadow"
+		wmi.mesh = shadow_mesh
+		wmi.material_override = _crown_shadow_material()
+		wmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_SHADOWS_ONLY
+		mi.add_child(wmi)
 	# 碰撞：简化盒（主干段区域，一个 BoxShape）
 	var body := StaticBody3D.new()
 	body.name = "TreeBody_%d" % tree_id
@@ -239,6 +263,16 @@ func on_branch_broken(cell: Vector3i) -> void:
 		var cells := tree.cells_of_branches(unsup)
 		# 脱落分量的叶格（倒树视觉跟随——先收集再清除）
 		var fallen_leaves := _collect_leaves_near(cells)
+		# 转刚体（或超限直接结算）。**先于结构移除**——刚体网格
+		# build_mesh(tree, unsup) 依赖 unsup 分支仍在 tree.branches：
+		# 曾先 erase 再 spawn，子集永远为空 → 网格 null → 倒伏体
+		# 只剩碰撞盒与叶盒，木段本体隐形（"碰撞还在枝干不见"）。
+		# 阈值 ≥2：砍一半的 2 格短段也要有倒伏表现
+		if _falling.size() < MAX_FALLING_TREES and cells.size() >= 2:
+			_spawn_falling_rigid(tree, unsup, cells, fallen_leaves)
+		else:
+			_settle_drop(cells.size(),
+					Vector3(cells[0]) + Vector3(0.5, 0.5, 0.5))
 		# 从结构中移除失支撑分支
 		for bid in unsup:
 			if tree.branches.has(bid):
@@ -250,7 +284,7 @@ func on_branch_broken(cell: Vector3i) -> void:
 		for bid in tree.branches:
 			var node: TreeInstance.BranchNode = tree.branches[bid]
 			node.child_ids = node.child_ids.filter(
-					func(cid): return tree.branches.has(cid))
+				func(cid): return tree.branches.has(cid))
 		# 占位清除（set_block AIR 走区块管线；会再次触发本信号但
 		# get_tree_at 已返回 null，无递归）
 		for c in cells:
@@ -260,12 +294,6 @@ func on_branch_broken(cell: Vector3i) -> void:
 		for leaf_cell in fallen_leaves:
 			if world.get_block(leaf_cell) == VoxelTypes.LEAVES_ID:
 				world.set_block(leaf_cell, VoxelTypes.AIR_ID, false)
-		# 转刚体（或超限直接结算）
-		if _falling.size() < MAX_FALLING_TREES and cells.size() >= 3:
-			_spawn_falling_rigid(tree, unsup, cells, fallen_leaves)
-		else:
-			_settle_drop(cells.size(),
-					Vector3(cells[0]) + Vector3(0.5, 0.5, 0.5))
 
 	# 重建保留树视觉
 	tree.revision += 1
@@ -307,30 +335,29 @@ func _spawn_falling_rigid(tree: TreeInstance,
 		# 顶点以树根为原点——刚体在 pivot，需要偏移
 		mi.position = Vector3(tree.origin) - pivot
 		body.add_child(mi)
-	# **叶视觉**（叶球盒，绿色材质——不做精确叶网格）
+	# **叶视觉**（叶盒 + 树叶贴图 alpha 裁切镂空——与区块叶面同观感；
+	# 曾纯色绿盒。复用 TreeMeshBuilder._box：满格面=满图块不拉伸）
 	if not leaves.is_empty():
 		var leaf_holder := MeshInstance3D.new()
 		var leaf_arrays := []
 		leaf_arrays.resize(Mesh.ARRAY_MAX)
 		var lv := PackedVector3Array()
+		var ln := PackedVector3Array()
+		var lu := PackedVector2Array()
 		var li := PackedInt32Array()
+		var tile := TextureAtlasLoader.tile_grid("leaves")
+		var inv_c := 1.0 / TextureAtlasLoader.COLS
+		var inv_r := 1.0 / TextureAtlasLoader.ROWS
+		var uv_leaf := Vector2(float(tile.x) * inv_c, float(tile.y) * inv_r)
 		for lc in leaves:
 			var c := Vector3(lc) + Vector3(0.5, 0.5, 0.5) - pivot
-			var b0 := lv.size()
-			for corner in [
-				c + Vector3(-0.5,-0.5,-0.5), c + Vector3(0.5,-0.5,-0.5),
-				c + Vector3(0.5,0.5,-0.5), c + Vector3(-0.5,0.5,-0.5),
-				c + Vector3(-0.5,-0.5,0.5), c + Vector3(0.5,-0.5,0.5),
-				c + Vector3(0.5,0.5,0.5), c + Vector3(-0.5,0.5,0.5),
-			]:
-				lv.append(corner)
-			for tri in [
-				[b0,b0+2,b0+1],[b0,b0+3,b0+2],[b0+4,b0+5,b0+6],[b0+4,b0+6,b0+7],
-				[b0,b0+1,b0+5],[b0,b0+5,b0+4],[b0+3,b0+7,b0+6],[b0+3,b0+6,b0+2],
-				[b0+1,b0+2,b0+6],[b0+1,b0+6,b0+5],[b0,b0+4,b0+7],[b0,b0+7,b0+3],
-			]:
-				li.append_array(PackedInt32Array(tri))
+			for f in 6:
+				TreeMeshBuilder._box(lv, ln, lu, li,
+						c - Vector3(0.5, 0.5, 0.5), c + Vector3(0.5, 0.5, 0.5),
+						f, uv_leaf, inv_c, inv_r)
 		leaf_arrays[Mesh.ARRAY_VERTEX] = lv
+		leaf_arrays[Mesh.ARRAY_NORMAL] = ln
+		leaf_arrays[Mesh.ARRAY_TEX_UV] = lu
 		leaf_arrays[Mesh.ARRAY_INDEX] = li
 		var lm := ArrayMesh.new()
 		lm.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, leaf_arrays)
@@ -356,6 +383,67 @@ func _spawn_falling_rigid(tree: TreeInstance,
 
 var _leaf_mat: StandardMaterial3D = null
 var _wood_mat: StandardMaterial3D = null
+var _crown_shadow_mat: StandardMaterial3D = null
+
+
+## 隐形实心冠投影。两层问题实测归因（用户世界 t3 视图分级关闭 +
+## 无影参考帧差分）：① 叶球生成空隙（末梢密度 0.85/沿途 0.5）——
+## 空隙格整格漏光；② 叶面 cutout 贴图的透明纹素在阴影通道被
+## discard，每个叶面自身漏"纹素孔"。故投影必须覆盖**满密度冠的
+## 每一格**（含已有叶格）：纹素孔后面有实心盒兜底，光线穿不过。
+## SHADOWS_ONLY 只进阴影贴图；与真实叶面同格共面（同深度，bias
+## 把接收面向光源侧推，不自暗）。树被砍/重建/倒伏随 mesh_node
+## 释放重建。
+## 面邻接剔除：格集合的内部面被邻格共面覆盖，不发射（暴露面集与
+## 逐格全盒逐像素一致——阴影深度图不变），构建顶点数与阴影 pass
+## 光栅量降 ~2/3（满密度冠 ~300 格曾全发 6 面）。曾逐格 _box 全
+## 六面 + leaf_shadow_cells O(n²) 去重，单棵树构建 ~15ms，走动
+## hitch 显著（walk p95 100ms→剔除后实测见 perf_tree_bench）。
+const FACE_DIRS: Array[Vector3i] = [
+	Vector3i(1, 0, 0), Vector3i(-1, 0, 0),
+	Vector3i(0, 1, 0), Vector3i(0, -1, 0),
+	Vector3i(0, 0, 1), Vector3i(0, 0, -1),
+]
+
+
+func _build_crown_shadow(tree: TreeInstance, parent: MeshInstance3D) -> void:
+	var cells := {}
+	for c in TreeGenerator.leaf_shadow_cells(tree):
+		cells[c] = true
+	var verts := PackedVector3Array()
+	var norms := PackedVector3Array()
+	var dummy_uvs := PackedVector2Array()
+	var idx := PackedInt32Array()
+	for c: Vector3i in cells:
+		var mn := Vector3(float(c.x - tree.origin.x),
+				float(c.y - tree.origin.y), float(c.z - tree.origin.z))
+		for f in 6:
+			if cells.has(c + FACE_DIRS[f]):
+				continue
+			TreeMeshBuilder._face(verts, norms, dummy_uvs, idx,
+					mn, mn + Vector3.ONE, f, Vector2.ZERO, 0.0, 0.0)
+	if idx.is_empty():
+		return
+	var arrays := []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = verts
+	arrays[Mesh.ARRAY_NORMAL] = norms
+	arrays[Mesh.ARRAY_INDEX] = idx
+	var am := ArrayMesh.new()
+	am.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+	var smi := MeshInstance3D.new()
+	smi.name = "CrownShadow"
+	smi.mesh = am
+	smi.material_override = _crown_shadow_material()
+	smi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_SHADOWS_ONLY
+	parent.add_child(smi)
+
+
+func _crown_shadow_material() -> StandardMaterial3D:
+	# 纯白不透明：仅阴影 pass 消费，颜色无意义
+	if _crown_shadow_mat == null:
+		_crown_shadow_mat = StandardMaterial3D.new()
+	return _crown_shadow_mat
 
 
 func _wood_material() -> StandardMaterial3D:
@@ -365,26 +453,40 @@ func _wood_material() -> StandardMaterial3D:
 	return _wood_mat
 
 func _leaf_material() -> StandardMaterial3D:
+	# 树叶贴图材质（图集 + alpha 裁切镂空，与区块叶面同观感；
+	# 曾纯色绿。双面：贴图孔洞透出背面内壁，叶盒看起来更饱满）
 	if _leaf_mat == null:
-		_leaf_mat = StandardMaterial3D.new()
-		_leaf_mat.albedo_color = Color(0.18, 0.38, 0.13)
+		_leaf_mat = DropVisuals.atlas_material().duplicate()
+		_leaf_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
 	return _leaf_mat
 
 
-## 收集枝干格周围 2 格内的叶格（倒树跟随用）。
+## 倒树清叶半径：叶球生成半径 2（球判 d<=2.3），冠心球落格用
+## dy+1 而距离判定用 dy（生成器 off-by-one），顶层叶实际可达 3.0
+## ——收集取 3.1 覆盖之。曾只扫 12 个邻域偏移（水平±1），222 叶
+## 残留 101（46%）倒树后悬浮
+const LEAF_CLEAR_RADIUS := 3.1
+
+var _leaf_scan_offsets: Array[Vector3i] = []
+
+
+## 收集枝干格周围 LEAF_CLEAR_RADIUS 球内的叶格（倒树跟随清除用）。
 func _collect_leaves_near(cells: Array[Vector3i]) -> Array[Vector3i]:
+	if _leaf_scan_offsets.is_empty():
+		for dy in range(-4, 5):
+			for dx in range(-4, 5):
+				for dz in range(-4, 5):
+					if Vector3(dx, dy, dz).length() <= LEAF_CLEAR_RADIUS:
+						_leaf_scan_offsets.append(Vector3i(dx, dy, dz))
+	var seen := {}
 	var out: Array[Vector3i] = []
 	for cell in cells:
-		for d in [
-			Vector3i(1, 0, 0), Vector3i(-1, 0, 0),
-			Vector3i(0, 1, 0), Vector3i(0, -1, 0),
-			Vector3i(0, 0, 1), Vector3i(0, 0, -1),
-			Vector3i(1, 1, 0), Vector3i(-1, 1, 0),
-			Vector3i(0, 1, 1), Vector3i(0, 1, -1),
-			Vector3i(1, 1, 1), Vector3i(-1, 1, -1),
-		]:
+		for d in _leaf_scan_offsets:
 			var p: Vector3i = cell + d
-			if world.get_block(p) == VoxelTypes.LEAVES_ID and not out.has(p):
+			if seen.has(p):
+				continue
+			seen[p] = true
+			if world.get_block(p) == VoxelTypes.LEAVES_ID:
 				out.append(p)
 	return out
 
@@ -426,3 +528,10 @@ func apply_save_state(data: Dictionary) -> void:
 		push_warning("未知树存档算法版本，跳过树事件重放")
 		return
 	_cut_events = trees_data.get("events", [])
+	# JSON 回读的坐标是浮点（27.0）——规整回 int（Vector3i 构造与
+	# _apply_cuts 的 origin 数组比较都要精确整数）
+	for event in _cut_events:
+		for key in ["cell", "tree"]:
+			var arr: Array = event.get(key, [])
+			for i in arr.size():
+				arr[i] = int(arr[i])

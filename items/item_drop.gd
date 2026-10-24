@@ -84,10 +84,19 @@ var floats := false
 ## 对应 ItemPhysic 实体自身的 Y 朝向）。
 var spin_angle := 0.0
 var spin_phase := 0.0
+## 树干实心探针（physics_step 每帧由管理器注入；见其注释）。
+## 不序列化——恢复后管理器重接线。
+var trunk_solid_probe: Callable = Callable()
 
 
 ## 推进一帧物理。age 不在此推进（冻结语义归管理器）。
-func physics_step(world: VoxelWorld, delta: float) -> void:
+## trunk_probe：树干实心查询（混合方案——掉落物体素点碰撞感知
+## 不到树的 StaticBody，主干占位格又 collision:false；由
+## TreeManager.is_solid_for_items 经 DropManager 注入，掉落物才
+## 撞得上树干。无树/测试场景缺省无效 Callable = 穿透）。
+func physics_step(world: VoxelWorld, delta: float,
+		trunk_probe: Callable = Callable()) -> void:
+	trunk_solid_probe = trunk_probe
 	var wet := world.get_block(_cell(position)) == VoxelTypes.WATER_ID
 	if wet and not in_water and velocity.y < -1.5:
 		splash_pending = true  # 落水冲击（涟漪注入方消费）
@@ -323,13 +332,20 @@ static func _cell(pos: Vector3) -> Vector3i:
 
 ## 实心判定：y < 0 视为实心（世界底）；世界顶以上空气；其余查注册表
 ## collision 字段（空气/未加载区块均非实心——冻结门禁在管理器）。
-static func _solid_at(world: VoxelWorld, cell: Vector3i) -> bool:
+## 树干占位格（BRANCH，collision:false）追加探针询问——主干段实心
+##（掉落物撞得上树），枝干段仍穿透（枝无碰撞，与玩家一致）。
+## 非 BRANCH 格不问探针（空气等大宗查询短路，Callable 调用有开销）。
+func _solid_at(world: VoxelWorld, cell: Vector3i) -> bool:
 	if cell.y < 0:
 		return true
 	if cell.y >= world.config.world_height_blocks():
 		return false
-	return world.registry.definition_for_id(
-			world.get_block(cell)).get("collision", false)
+	var id := world.get_block(cell)
+	if world.registry.definition_for_id(id).get("collision", false):
+		return true
+	if id != VoxelTypes.BRANCH_ID:
+		return false
+	return trunk_solid_probe.is_valid() and trunk_solid_probe.call(cell)
 
 
 # ---- 序列化（稳定名称，与背包同一原则 §2.2）----

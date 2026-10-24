@@ -15,19 +15,24 @@ extends RefCounted
 
 ## 输出 { vertices, normals, uvs, uv2, indices, quads }。
 ## 与 ChunkMesher.build_mesh_arrays 同签名、同线程安全约定。
+## C# 优先（等价测试保证）：干区块 BuildGreedy；含水区块
+## BuildGreedy + BuildWater 组合（水不参与贪心合并，独立半透明
+## 表面——与 GD 路径同构）。C# 不可用自动回退 GDScript。
 static func build_mesh_arrays(
 		registry: VoxelRegistry,
 		chunk: ChunkData,
 		neighbors: Array
 ) -> Dictionary:
-	# C# 原生路径（阶段 E）：可用时优先，不可用自动回退 GDScript。
-	# A/B 基准（192 区块，本机 2 核）：62.2 → 25.9 ms/区块，C# 胜 2.4×，
-	# 算法足够重，收益盖过跨语言装箱开销（面剔除则相反，走 GDScript）。
-	# C# 实现不认识水（v4）：含水区块回退 GD 路径补水面通道
-	if not chunk.block_ids.has(VoxelTypes.WATER_ID):
-		var native_result := NativeMeshBridge.build(true, registry, chunk, neighbors)
-		if not native_result.is_empty():
-			return native_result
+	var native := NativeMeshBridge.build(true, registry, chunk, neighbors)
+	if not native.is_empty():
+		if chunk.block_ids.has(VoxelTypes.WATER_ID):
+			var water := NativeMeshBridge.build_water(chunk, neighbors)
+			if water.is_empty():
+				return _build_gd(registry, chunk, neighbors)
+			native.merge(water)
+		return native
+	# C# 原生路径（阶段 E）：含水区块也由 C# 水通道补齐（上方已处理），
+	# 走到这里的只剩 C# 不可用——GDScript 回退
 	return _build_gd(registry, chunk, neighbors)
 
 
@@ -55,6 +60,9 @@ static func _build_gd(
 	var uv2s := PackedVector2Array()
 	var indices := PackedInt32Array()
 	var quads := 0
+	# 无状态区块走纯查表快路径（_face_tile 内的 get_state 分支与
+	# is_empty 查询在 4096 格 × 6 面主循环里是纯开销）
+	var has_states := not chunk.sparse_block_states.is_empty()
 
 	# 轴循环：U/V 取循环序（x: u=y,v=z；y: u=z,v=x；z: u=x,v=y），
 	# 保证 cross(U, V) 恒指向 +axis（绕序规则见 _emit_quad）
@@ -63,6 +71,13 @@ static func _build_gd(
 	for axis in 3:
 		var u_axis := (axis + 1) % 3
 		var v_axis := (axis + 2) % 3
+		# padded 一维布局 stride（曾 _padded_index 每格分配 Array[3]
+		# ——4096 格 × 17 边界 × 3 轴 × 2 端是贪心网格的最大 GC 源）
+		var strides := [1, ps, ps * ps]
+		var stride_axis: int = strides[axis]
+		var stride_u: int = strides[u_axis]
+		var stride_v: int = strides[v_axis]
+		var tile_rows: Array = tile_lookup
 		for boundary in s + 1:
 			# boundary k：padded 位置 k（内侧/下方单元）与 k+1（外侧/上方单元）
 			# 之间的面，四边形位于块坐标平面 k
@@ -71,33 +86,48 @@ static func _build_gd(
 			# 单元（含 y<0 的虚拟基岩）只作为遮挡源，不产生面
 			var a_real := boundary >= 1
 			var b_real := boundary <= s - 1
+			var base_a := boundary * stride_axis
+			var base_b := (boundary + 1) * stride_axis
 			for v in s:
+				var row := v * s
+				var v_off := (v + 1) * stride_v
 				for u in s:
-					var idx_a := _padded_index(ps, axis, boundary, u_axis, v_axis, u, v)
-					var idx_b := _padded_index(ps, axis, boundary + 1, u_axis, v_axis, u, v)
+					var idx_a := base_a + v_off + (u + 1) * stride_u
+					var idx_b := base_b + v_off + (u + 1) * stride_u
 					var a: int = padded[idx_a]
 					var b: int = padded[idx_b]
 					var encoded := 0
 					# 水不进不透明贪心网格（独立半透明表面，见文末水通道）
 					if a == VoxelTypes.WATER_ID or b == VoxelTypes.WATER_ID:
-						mask[u + v * s] = 0
+						mask[row + u] = 0
 						continue
-					if a_real and solid_by_id[a] == 1 and occludes_by_id[b] == 0:
+					# 枝占位不作发射方（区块无枝几何，渲染走树实体——与
+					# 面剔除同语义；占位对邻居透明由 occludes 表承担）。
+					# 曾缺此判定：贪心模式下 BRANCH 占位被渲染成实心块
+					if a_real and a != VoxelTypes.BRANCH_ID \
+							and solid_by_id[a] == 1 and occludes_by_id[b] == 0:
 						# a 的 +axis 面（状态感知贴图，§4.3）
-						var local_a := Vector3i.ZERO
-						local_a[axis] = boundary - 1
-						local_a[u_axis] = u
-						local_a[v_axis] = v
-						encoded = _face_tile(chunk, textures_by_id, tile_lookup,
-								a, local_a, axis, true) + 1
-					elif b_real and solid_by_id[b] == 1 and occludes_by_id[a] == 0:
-						var local_b := Vector3i.ZERO
-						local_b[axis] = boundary
-						local_b[u_axis] = u
-						local_b[v_axis] = v
-						encoded = -(_face_tile(chunk, textures_by_id, tile_lookup,
-								b, local_b, axis, false) + 1)
-					mask[u + v * s] = encoded
+						if has_states:
+							var local_a := Vector3i.ZERO
+							local_a[axis] = boundary - 1
+							local_a[u_axis] = u
+							local_a[v_axis] = v
+							encoded = _face_tile(chunk, textures_by_id,
+									tile_rows, a, local_a, axis, true) + 1
+						else:
+							encoded = int(tile_rows[a][axis * 2]) + 1
+					elif b_real and b != VoxelTypes.BRANCH_ID \
+							and solid_by_id[b] == 1 and occludes_by_id[a] == 0:
+						if has_states:
+							var local_b := Vector3i.ZERO
+							local_b[axis] = boundary
+							local_b[u_axis] = u
+							local_b[v_axis] = v
+							encoded = -(_face_tile(chunk, textures_by_id,
+									tile_rows, b, local_b, axis, false) + 1)
+						else:
+							encoded = -(int(tile_rows[b][axis * 2 + 1]) + 1)
+					mask[row + u] = encoded
 					if encoded != 0:
 						has_any = true
 			if not has_any:
@@ -151,10 +181,9 @@ static func _build_gd(
 	return result
 
 
-## padded 一维布局：x + ps*y + ps*ps*z。
-## axis_pos / u / v 均为填充坐标（0..s+1 / 1..s），调用方直接传位置。
-## 面的图集 tile 下标：无状态方块走预查表（快路径）；
-## 带 axis 状态的方块按朝向解析端面/侧面（与面剔除实现共用规则）。
+## 面的图集 tile 下标：无状态方块走预查表（快路径——主循环已内联，
+## 本函数仅服务稀疏状态区块）；带 axis 状态的方块按朝向解析端面/侧面
+##（与面剔除实现共用规则）。
 static func _face_tile(
 		chunk: ChunkData, textures_by_id: Array, tile_lookup: Array,
 		block_id: int, local: Vector3i, face_axis: int, positive: bool
@@ -167,17 +196,6 @@ static func _face_tile(
 			return TextureAtlasLoader.TILES.find(ChunkMesher.effective_tile_name(
 					textures_by_id[block_id], state, normal))
 	return tile_lookup[block_id][face_axis * 2 + (0 if positive else 1)]
-
-
-static func _padded_index(
-		ps: int, axis: int, axis_pos: int,
-		u_axis: int, v_axis: int, u: int, v: int
-) -> int:
-	var coords := [0, 0, 0]
-	coords[axis] = axis_pos
-	coords[u_axis] = u + 1
-	coords[v_axis] = v + 1
-	return coords[0] + ps * coords[1] + ps * ps * coords[2]
 
 
 static func _build_tile_lookup(textures_by_id: Array) -> Array:
@@ -246,7 +264,9 @@ static func _emit_quad(
 			uvs.append(Vector2(pv - v0, u1 - pu))
 		else:
 			uvs.append(Vector2(pu - u0, v1 - pv))
-	indices.append_array(PackedInt32Array([
-		base, base + 2, base + 1,
-		base, base + 3, base + 2,
-	]))
+	indices.append(base)
+	indices.append(base + 2)
+	indices.append(base + 1)
+	indices.append(base)
+	indices.append(base + 3)
+	indices.append(base + 2)

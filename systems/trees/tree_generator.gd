@@ -125,19 +125,35 @@ static func generate(species: TreeSpecies, world_seed: int,
 ## 叶冠格列表（世界坐标）：每根末梢枝（无子）末端叶球 + 冠心大球。
 ## 不覆盖非空气判断由调用方负责（这里只算格）。
 static func leaf_cells(tree: TreeInstance) -> Array[Vector3i]:
+	return _collect_leaf_cells(tree, false)
+
+
+## 实心冠格（满密度无随机跳过）：与 leaf_cells 同几何同种子，且为
+## 其超集。供隐形实心冠投影网格补树冠空隙——视觉保持稀疏镂空、
+## 树影实心（叶球随机空隙曾让阳光穿冠、树影漏成斜条纹）
+static func leaf_shadow_cells(tree: TreeInstance) -> Array[Vector3i]:
+	return _collect_leaf_cells(tree, true)
+
+
+static func _collect_leaf_cells(tree: TreeInstance, full: bool) -> Array[Vector3i]:
 	var rng := RandomNumberGenerator.new()
 	rng.seed = tree.random_seed + 777
 	var out: Array[Vector3i] = []
+	# 去重走 Dictionary（O(1) 查询）——曾用 out.has(p) 线性扫描，
+	# 满密度冠 ~300 格时 O(n²) 比较，单棵 2ms+ 纯去重开销
+	var seen := {}
 	var r_ball: int = tree.species.leaf_ball_radius
+	var d_tip: float = 1.0 if full else 0.85
+	var d_trail: float = 1.0 if full else 0.5
 	for bid in tree.branches:
 		var node: TreeInstance.BranchNode = tree.branches[bid]
 		if not node.child_ids.is_empty():
 			continue
-		_ball_cells(out, node.end_cell, r_ball, rng, 0.85)
+		_ball_cells(out, seen, node.end_cell, r_ball, rng, d_tip)
 		# 沿末梢段每格补一个小球（沿途叶簇，树冠有体积）
 		for c in node.cells():
 			if c != node.end_cell:
-				_ball_cells(out, c, maxi(1, r_ball - 1), rng, 0.5)
+				_ball_cells(out, seen, c, maxi(1, r_ball - 1), rng, d_trail)
 	# 冠心（主干顶收尾段末端）
 	if tree.branches.has(tree.root_branch_id):
 		var trunk: TreeInstance.BranchNode = tree.branches[tree.root_branch_id]
@@ -150,13 +166,16 @@ static func leaf_cells(tree: TreeInstance) -> Array[Vector3i]:
 					if d > float(tree.species.crown_radius) + 0.5:
 						continue
 					var p := top + Vector3i(dx, dy + 1, dz)
-					if not out.has(p):
-						out.append(p)
+					if seen.has(p):
+						continue
+					seen[p] = true
+					out.append(p)
 	return out
 
 
-static func _ball_cells(out: Array[Vector3i], center: Vector3i,
-		radius: int, rng: RandomNumberGenerator, density: float) -> void:
+static func _ball_cells(out: Array[Vector3i], seen: Dictionary,
+		center: Vector3i, radius: int, rng: RandomNumberGenerator,
+		density: float) -> void:
 	for dy in range(-1, 2):
 		for dx in range(-radius, radius + 1):
 			for dz in range(-radius, radius + 1):
@@ -166,8 +185,10 @@ static func _ball_cells(out: Array[Vector3i], center: Vector3i,
 				if d > 0.5 and rng.randf() > density:
 					continue
 				var p := center + Vector3i(dx, dy, dz)
-				if not out.has(p):
-					out.append(p)
+				if seen.has(p):
+					continue
+				seen[p] = true
+				out.append(p)
 
 
 ## 主干某格的插值半径（占位写入用；mesh_builder 同公式）。

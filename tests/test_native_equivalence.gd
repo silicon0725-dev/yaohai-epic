@@ -83,10 +83,78 @@ func run() -> void:
 			if greedy:
 				check(native_result["uv2"] == gd_result["uv2"],
 					"%s 贪心：UV2 一致" % label)
-				check(native_result["quads"] == gd_result["quads"],
-					"%s 贪心：四边形数一致" % label)
+			check(native_result["quads"] == gd_result["quads"],
+				"%s 贪心：四边形数一致" % label)
 
-	print("[INFO] 等价测试覆盖 %d 个世界 x 2 种网格器" % worlds.size())
+	# ---- 水世界用例：C# BuildWater 与 GDScript append_water_faces 的
+	# water_* 8 数组逐字节等价（角点高度/岸衰减/双通道分流/组合门面）----
+	var w5 := _make_world()
+	var c5: ChunkData = w5.get_chunk(Vector3i.ZERO)
+	# 源水（无状态）+ 流动级 + 下落柱（8）+ 邻固体 + 区块边界角点
+	c5.set_block_raw(Vector3i(0, 1, 0), VoxelTypes.WATER_ID)
+	c5.set_block_raw(Vector3i(1, 1, 0), VoxelTypes.WATER_ID)
+	c5.set_block_state(Vector3i(1, 1, 0), "level", 2)
+	c5.set_block_raw(Vector3i(1, 2, 0), VoxelTypes.WATER_ID)
+	c5.set_block_state(Vector3i(1, 2, 0), "level", 8)
+	c5.set_block_raw(Vector3i(2, 1, 0), VoxelTypes.STONE_ID)
+	c5.set_block_raw(Vector3i(0, 1, 1), VoxelTypes.WATER_ID)
+	c5.set_block_state(Vector3i(0, 1, 1), "level", 3)
+	c5.set_block_raw(Vector3i(3, 1, 3), VoxelTypes.WATER_ID)
+	c5.set_block_state(Vector3i(3, 1, 3), "level", 1)
+	var water_cases: Array[Dictionary] = [
+		{"world": w5, "coord": Vector3i.ZERO, "label": "水世界(4³)"},
+	]
+	# 真实含水 16³（自然海岸：跨邻域角点/岸衰减全覆盖）
+	var w6_config := WorldConfig.new()
+	w6_config.world_seed = 77
+	var w6 := VoxelWorld.new(w6_config, registry)
+	var gen6 := TerrainGenerator.new(w6_config)
+	for r in range(80):
+		var cc := Vector3i(r * 4, 0, r * 4)
+		var cand: ChunkData = gen6.generate_chunk(cc)
+		if cand.block_ids.has(VoxelTypes.WATER_ID):
+			w6.add_chunk(cand)
+			water_cases.append({"world": w6, "coord": cc, "label": "真实含水(16³)"})
+			break
+	for entry in water_cases:
+		var wworld: VoxelWorld = entry["world"]
+		var wcoord: Vector3i = entry["coord"]
+		var wlabel: String = entry["label"]
+		var wchunk: ChunkData = wworld.get_chunk(wcoord)
+		var wneigh := wworld.collect_neighbors(wcoord)
+		var cs_water: Dictionary = NativeMeshBridge.build_water(wchunk, wneigh)
+		var gd_naive := ChunkMesher._build_gd(registry, wchunk, wneigh)
+		check(not cs_water.is_empty(), "%s：水 C# 结果非空" % wlabel)
+		if cs_water.is_empty():
+			continue
+		var wkeys := ["water_vertices", "water_normals", "water_indices",
+				"water_colors", "water_side_vertices", "water_side_normals",
+				"water_side_indices", "water_side_colors"]
+		var any_water := false
+		for wkey in wkeys:
+			var gd_arr = gd_naive.get(wkey, PackedInt32Array())
+			if gd_arr.size() > 0:
+				any_water = true
+			check(cs_water[wkey] == gd_arr,
+					"%s：%s 一致（%d vs %d）" % [
+						wlabel, wkey, cs_water[wkey].size(), gd_arr.size()])
+		check(any_water, "%s：GD 水面非空（用例有效性）" % wlabel)
+		# 组合门面：整体输出（C# opaque+water vs GD 全程）等价
+		var cs_combo := ChunkMesher.build_mesh_arrays(registry, wchunk, wneigh)
+		for wkey in wkeys:
+			check(cs_combo.get(wkey, PackedInt32Array()) == gd_naive.get(
+					wkey, PackedInt32Array()),
+					"%s：门面组合 %s 一致" % [wlabel, wkey])
+		# 贪心门面组合（贪心 opaque 不含水，水全来自 build_water）
+		var cs_greedy := GreedyMesher.build_mesh_arrays(registry, wchunk, wneigh)
+		var gd_greedy := GreedyMesher._build_gd(registry, wchunk, wneigh)
+		for wkey in wkeys:
+			check(cs_greedy.get(wkey, PackedInt32Array()) == gd_greedy.get(
+					wkey, PackedInt32Array()),
+					"%s：贪心门面组合 %s 一致" % [wlabel, wkey])
+
+	print("[INFO] 等价测试覆盖 %d 个世界 x 2 种网格器 + %d 个水通道用例" % [
+		worlds.size(), water_cases.size()])
 
 
 func _make_world() -> VoxelWorld:

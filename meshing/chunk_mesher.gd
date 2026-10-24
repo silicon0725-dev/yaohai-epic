@@ -172,15 +172,29 @@ static func effective_tile_name(
 ## neighbors 为 VoxelWorld.collect_neighbors 的 27 元素快照
 ##（index = (dz+1)*9 + (dy+1)*3 + (dx+1)，缺失为 null）。
 ## 当前仅支持立方体区块（配置使用 16^3 候选值，§4.1）。
+## C# 优先（等价测试 test_native_equivalence 保证逐字节一致；
+## A/B 干区块 4.6ms vs GD 20.6ms，湿区块 C# opaque+水通道组合）。
+## 水侧 C# 不可用时整体回退 GD（水/不透明必须同源实现，避免混搭
+## 出两套等价面）。无 C# 环境（未 dotnet build）自动回退。
 static func build_mesh_arrays(
 		registry: VoxelRegistry,
 		chunk: ChunkData,
 		neighbors: Array
 ) -> Dictionary:
-	# 面剔除固定走 GDScript：A/B 基准显示 C# 路径因跨语言装箱开销
-	# 反而慢 2.3×（12.9 → 29.3 ms/区块）；算法本身太轻，收益盖不过桥接成本。
-	# （Greedy 网格器走 C#，见 greedy_mesher.gd；C# 实现保留用于等价测试。）
+	var native := NativeMeshBridge.build(false, registry, chunk, neighbors)
+	if not native.is_empty():
+		if chunk.block_ids.has(VoxelTypes.WATER_ID):
+			var water := NativeMeshBridge.build_water(chunk, neighbors)
+			if water.is_empty():
+				return _build_gd(registry, chunk, neighbors)
+			native.merge(water)
+		return native
 	return _build_gd(registry, chunk, neighbors)
+
+
+## 共享只读空状态（热循环 per-block 曾构造 {} 4096 次/区块——
+## 仅 is_empty() 判断与 effective_tile_name 只读消费，共享安全）
+const EMPTY_STATE := {}
 
 
 static func _build_gd(
@@ -233,6 +247,9 @@ static func _build_gd(
 	var normals := PackedVector3Array()
 	var uvs := PackedVector2Array()
 	var indices := PackedInt32Array()
+	# 树叶面单独成桶（cutout 表面：alpha 裁切镂空材质）；顶点/UV
+	# 与不透明网格共享，仅索引分流——碰撞构建合并两桶
+	var cutout_indices := PackedInt32Array()
 
 	for z in s:
 		for y in s:
@@ -245,14 +262,14 @@ static func _build_gd(
 				if block_id == VoxelTypes.AIR_ID or block_id == VoxelTypes.WATER_ID 						or block_id == VoxelTypes.BRANCH_ID 						or solid_by_id[block_id] == 0:
 					continue
 				var textures: Dictionary = textures_by_id[block_id]
-				var state: Dictionary = {}
+				var state: Dictionary = EMPTY_STATE
 				if has_states:
 					state = chunk.get_state(Vector3i(x, y, z))
 				for f in FACES.size():
 					if occludes_by_id[padded[pidx + neighbor_offsets[f]]] == 1:
 						continue
 					var corners: Array = face_corners[f]
-					var corner_uvs: Array = FACES[f]["corner_uvs"]
+					var corner_uvs: Array = face_corner_uvs[f]
 					var normal_vec := face_normal_vecs[f]
 					var base_index := vertices.size()
 					# tile 原点：无状态走缓存（键 "block:face"，免字符串查找/除法）
@@ -286,16 +303,30 @@ static func _build_gd(
 						uvs.append(Vector2(
 								tile_origin.x + cuv.x * inv_cols,
 								tile_origin.y + cuv.y * inv_rows))
-					# 索引绕序与角点顺序相反：Godot 正面 = 面外侧看顺时针
-					indices.append_array(PackedInt32Array([
-						base_index, base_index + 2, base_index + 1,
-						base_index, base_index + 3, base_index + 2,
-					]))
+					# 索引绕序与角点顺序相反：Godot 正面 = 面外侧看顺时针。
+					# 树叶面进 cutout 桶（独立渲染表面），其余进不透明桶。
+					# 直接 append 六索引——曾 append_array(PackedInt32Array([...]))
+					# 每面分配临时数组，数千面/区块纯 GC 压力
+					if block_id == VoxelTypes.LEAVES_ID:
+						cutout_indices.append(base_index)
+						cutout_indices.append(base_index + 2)
+						cutout_indices.append(base_index + 1)
+						cutout_indices.append(base_index)
+						cutout_indices.append(base_index + 3)
+						cutout_indices.append(base_index + 2)
+					else:
+						indices.append(base_index)
+						indices.append(base_index + 2)
+						indices.append(base_index + 1)
+						indices.append(base_index)
+						indices.append(base_index + 3)
+						indices.append(base_index + 2)
 	var result := {
 		"vertices": vertices,
 		"normals": normals,
 		"uvs": uvs,
 		"indices": indices,
+		"cutout_indices": cutout_indices,
 	}
 	var c := chunk.chunk_coord
 	var d := chunk.dimensions
@@ -378,6 +409,15 @@ static func append_water_faces(
 	var side_colors: PackedColorArray = out.get(
 			"water_side_colors", PackedColorArray())
 	var size := ps - 2
+	# FACES 预展开（曾每面 FACES[f] 字典查找 + face["normal"]/["corners"]
+	# 两次键查询——水通道是湿区块 79% 耗时的大头）
+	var normals_flat := [
+		Vector3(1, 0, 0), Vector3(-1, 0, 0), Vector3(0, 1, 0),
+		Vector3(0, -1, 0), Vector3(0, 0, 1), Vector3(0, 0, -1),
+	]
+	var corners_flat: Array = []
+	for f2 in FACES.size():
+		corners_flat.append(FACES[f2]["corners"])
 	for z in size:
 		for y in size:
 			for x in size:
@@ -385,12 +425,11 @@ static func append_water_faces(
 				if padded[pidx] != VoxelTypes.WATER_ID:
 					continue
 				for f in FACES.size():
-					var face: Dictionary = FACES[f]
 					if padded[pidx + neighbor_offsets[f]] != VoxelTypes.AIR_ID:
 						continue
-					var normal: Vector3 = face["normal"]
-					var is_side: bool = normal.y == 0
-					var corners: Array = face["corners"]
+					var normal: Vector3 = normals_flat[f]
+					var is_side: bool = normal.y == 0.0
+					var corners: Array = corners_flat[f]
 					var base: int = (side_vertices.size()
 							if is_side else vertices.size())
 					for c in 4:
@@ -416,14 +455,23 @@ static func append_water_faces(
 							vertices.append(v)
 							normals.append(normal)
 							colors.append(fade_color)
-					var tri := PackedInt32Array([
-						base, base + 2, base + 1,
-						base, base + 3, base + 2,
-					])
+					# 索引在角点循环外发射（每面一次 ×6——曾误入
+					# for c 循环体，每面 ×4 索引，水测试面数全 ×4）
+					var bi2 := base
 					if is_side:
-						side_indices.append_array(tri)
+						side_indices.append(bi2)
+						side_indices.append(bi2 + 2)
+						side_indices.append(bi2 + 1)
+						side_indices.append(bi2)
+						side_indices.append(bi2 + 3)
+						side_indices.append(bi2 + 2)
 					else:
-						indices.append_array(tri)
+						indices.append(bi2)
+						indices.append(bi2 + 2)
+						indices.append(bi2 + 1)
+						indices.append(bi2)
+						indices.append(bi2 + 3)
+						indices.append(bi2 + 2)
 	if indices.size() > 0:
 		out["water_vertices"] = vertices
 		out["water_normals"] = normals
@@ -440,17 +488,20 @@ static func append_water_faces(
 ## y+1 层）中的固体格数直接决定——任何紧邻固体 -> 强衰减。
 ## 关键性质：只依赖单圈 padded 内的数据，跨区块边界的角点在两侧
 ## 区块的 padded 里数据相同 -> 算出同值 -> 波浪位移一致不裂缝。
+## 展开双循环（曾 [0,1]/[cx-1,cx] 数组字面量：水通道每角点一次
+## 调用 ×3 数组分配，含水区块实测 47ms/块的大头之一）
 static func _corner_shore_fade(
 		padded: PackedInt32Array, ps: int, cx: int, cy: int, cz: int
 ) -> float:
 	var stride_y := ps
 	var stride_z := ps * ps
 	var solid := 0
-	for layer in [0, 1]:
-		for gx in [cx - 1, cx]:
-			for gz in [cz - 1, cz]:
-				var nid: int = padded[(gz + 1) * stride_z
-						+ (cy + 1 + layer) * stride_y + (gx + 1)]
+	for layer in 2:
+		var row0 := (cy + 1 + layer) * stride_y
+		for gz_off in 2:
+			var zbase := (cz + gz_off) * stride_z + row0
+			for gx_off in 2:
+				var nid: int = padded[zbase + cx + gx_off]
 				if nid != VoxelTypes.AIR_ID and nid != VoxelTypes.WATER_ID:
 					solid += 1
 	return 1.0 - clampf(float(solid) * 0.5, 0.0, 0.85)
@@ -467,15 +518,21 @@ static func _corner_water_height(
 ) -> float:
 	var stride_y := ps
 	var stride_z := ps * ps
+	var row := (y + 1) * stride_y
+	var above := row + stride_y
 	var best := 0.0
-	for gx in [cx - 1, cx]:
-		for gz in [cz - 1, cz]:
-			var p: int = (gz + 1) * stride_z + (y + 1) * stride_y + (gx + 1)
+	for gz_off in 2:
+		var zbase := (cz + gz_off) * stride_z
+		for gx_off in 2:
+			var gx := cx + gx_off
+			var p: int = zbase + row + gx
 			if padded[p] != VoxelTypes.WATER_ID:
 				continue
 			var h := 1.0
 			if padded[p + stride_y] != VoxelTypes.WATER_ID:
-				var lvl: int = levels_world.get(origin + Vector3i(gx, y, gz), 0)
+				# levels 键是逻辑格坐标（padded 坐标 - 1）
+				var lvl: int = levels_world.get(
+						origin + Vector3i(gx - 1, y, cz + gz_off - 1), 0)
 				h = water_surface_height(lvl)
 			if h > best:
 				best = h

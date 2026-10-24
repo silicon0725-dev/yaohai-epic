@@ -11,10 +11,13 @@ extends RefCounted
 ## 下落水柱四个侧面都朝空气，双面材质会从一侧看到远侧背面，
 ## 半透明双层叠加成"浮空背面"；侧面只出正面，顶/底面保持双面
 ## 供潜水视角从下往上看水面）。
+## cutout_indices 非空且 cutout_material 非空时追加镂空表面（树叶：
+## alpha 裁切，顶点/UV 与不透明表面共享）。
 static func arrays_to_mesh(
 		mesh_arrays: Dictionary, material: Material,
 		water_material: Material = null,
-		water_side_material: Material = null
+		water_side_material: Material = null,
+		cutout_material: Material = null
 ) -> ArrayMesh:
 	var arrays := []
 	arrays.resize(Mesh.ARRAY_MAX)
@@ -35,8 +38,11 @@ static func arrays_to_mesh(
 	var sv: PackedVector3Array = mesh_arrays.get("water_side_vertices", PackedVector3Array())
 	if not sc.is_empty() and sc.size() != sv.size():
 		push_error("SIDE COLOR MISMATCH: colors %d verts %d" % [sc.size(), sv.size()])
-	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
-	mesh.surface_set_material(0, material)
+	# 不透明表面仅在有索引时添加——纯树冠区块 indices 空（叶面在
+	# cutout 桶），空数组 add_surface 会报错且不加表面
+	if mesh_arrays.get("indices", PackedInt32Array()).size() > 0:
+		mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+		mesh.surface_set_material(0, material)
 	if water_material != null and mesh_arrays.get("water_indices",
 			PackedInt32Array()).size() > 0:
 		var water_arrays := []
@@ -50,7 +56,10 @@ static func arrays_to_mesh(
 		water_arrays[Mesh.ARRAY_COLOR] = mesh_arrays.get(
 				"water_colors", PackedColorArray())
 		mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, water_arrays)
-		mesh.surface_set_material(1, water_material)
+		# 材质挂“刚添加的表面”（surface 是条件添加的，序号随前面
+		# 表面有无而变——写死索引在无水区块越界失效，树叶曾因此
+		# 挂不上材质渲染成整块白）
+		mesh.surface_set_material(mesh.get_surface_count() - 1, water_material)
 	if water_side_material != null and mesh_arrays.get("water_side_indices",
 			PackedInt32Array()).size() > 0:
 		var side_arrays := []
@@ -64,7 +73,22 @@ static func arrays_to_mesh(
 		side_arrays[Mesh.ARRAY_COLOR] = mesh_arrays.get(
 				"water_side_colors", PackedColorArray())
 		mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, side_arrays)
-		mesh.surface_set_material(2, water_side_material)
+		mesh.surface_set_material(mesh.get_surface_count() - 1, water_side_material)
+	if cutout_material != null and mesh_arrays.get("cutout_indices",
+			PackedInt32Array()).size() > 0:
+		# 树叶镂空表面：与不透明表面共享顶点/法线/UV，仅索引分流
+		var cutout_arrays := []
+		cutout_arrays.resize(Mesh.ARRAY_MAX)
+		cutout_arrays[Mesh.ARRAY_VERTEX] = mesh_arrays.get(
+				"vertices", PackedVector3Array())
+		cutout_arrays[Mesh.ARRAY_NORMAL] = mesh_arrays.get(
+				"normals", PackedVector3Array())
+		cutout_arrays[Mesh.ARRAY_TEX_UV] = mesh_arrays.get(
+				"uvs", PackedVector2Array())
+		cutout_arrays[Mesh.ARRAY_INDEX] = mesh_arrays.get(
+				"cutout_indices", PackedInt32Array())
+		mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, cutout_arrays)
+		mesh.surface_set_material(mesh.get_surface_count() - 1, cutout_material)
 	return mesh
 
 

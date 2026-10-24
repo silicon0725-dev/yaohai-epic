@@ -10,15 +10,17 @@ MC 式水位流动/扩散（挖沟引水、拆坝放水、断供回退）。
 
 ## 引擎版本锁定
 
-- **Godot 4.7.2.stable.mono.official**（官网构建，安装于 `~/godot/godot`；
-  早期使用的 snap 包 `godot-4` 缺少 .NET 数据通道，已弃用）
-- 脚本语言：GDScript + C#（Greedy 网格器走 C# 原生路径，见"网格管线 C# 迁移"一节）
+- **Godot 4.7.2.stable.mono.official**（官网构建；开发已迁至 Windows 机器，
+  原 Linux 的 `~/godot/godot` 路径不可用。**本机禁跑 `--import`**——会卡死；
+  新 `class_name` 的全局类缓存不刷新，新类一律 `preload` 引用）
+- 脚本语言：GDScript + C#（网格器与地形生成走 C# 原生路径，
+  见"网格管线 C# 迁移"一节）
 - **C# 运行前提**：系统 .NET SDK（本项目面向 net8.0，`voxel-terrain.csproj`
   设置了 `RollForward=LatestMajor`，仅有 .NET 9/10 运行时的机器也能跑）。
-  修改 `native/NativeMesher.cs` 后需 `dotnet build voxel-terrain.csproj`
-- **渲染器**：项目锁定 `gl_compatibility`。本机 GT 610（Fermi）无 Vulkan
-  支持，llvmpipe 软渲染的 Vulkan JIT 会生成 BMI2 指令（本机 2014 年
-  赛扬不支持），导致 SIGILL 崩溃；OpenGL 4.3 走这块卡硬件加速，稳定。
+  修改 `native/*.cs` 后需 `dotnet build voxel-terrain.csproj`
+- **渲染器**：桌面 **Forward+**（光照阶段 1 起启用，LightManager 的
+  阴影预算调度依赖其能力），mobile 锁 `gl_compatibility`。
+  历史注：原 Linux 机器（GT 610，无 Vulkan）曾锁 `gl_compatibility`。
 
 ## 运行
 

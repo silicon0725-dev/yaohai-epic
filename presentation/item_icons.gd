@@ -48,8 +48,8 @@ static func sprite_image_for(
 		item_id: int, item_registry: ItemRegistry) -> Image:
 	var definition := item_registry.definition_for_id(item_id)
 	var image := _render(definition)
+	# 画布已 RGBA8（与图集同格式），无需再转
 	if definition.get("icon", {}).has("pixel_art"):
-		image.convert(Image.FORMAT_RGBA8)
 		_apply_background_alpha(image)
 	return image
 
@@ -70,8 +70,10 @@ static func _apply_background_alpha(image: Image) -> void:
 
 static func _render(definition: Dictionary) -> Image:
 	var icon: Dictionary = definition.get("icon", {})
+	# RGBA8 与图集同格式——blit_rect 要求源/目标一致（图集为树叶镂空
+	# 改 RGBA8 后，RGB8 画布 blit 失败，存档恢复背包图标全黑）
 	var image := Image.create_empty(
-			ICON_SIZE, ICON_SIZE, false, Image.FORMAT_RGB8)
+			ICON_SIZE, ICON_SIZE, false, Image.FORMAT_RGBA8)
 	if icon.has("tile") and _atlas_image != null:
 		var grid := TextureAtlasLoader.tile_grid(String(icon["tile"]))
 		var source := _atlas_image.get_region(Rect2i(

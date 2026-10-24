@@ -37,6 +37,23 @@ var _hud_accumulator := 0.0
 var _wave_clock := 0.0
 const OceanWavesScript := preload("res://presentation/ocean_waves.gd")
 
+## 加载阶段（预生成 + 预加载 + 加载界面）：进入游戏前把初始视距
+## 全部生成并网格化（预算放宽），is_idle 达成后淡出释放玩家——
+## 消除"进游戏头几秒边走边卡"
+const LoadingOverlayScript := preload("res://presentation/loading_overlay.gd")
+## 加载期放宽的管线预算（无游戏渲染压力，提交可以放开吃）
+const LOAD_GEN_BUDGET := 32
+const LOAD_MESH_BUDGET := 12
+const LOAD_MAX_IN_FLIGHT := 64
+## 最短展示时长（防闪屏）与总超时（防卡死进不去）
+const LOAD_MIN_TIME := 0.8
+const LOAD_TIMEOUT := 45.0
+
+var _loading := false
+var _loading_time := 0.0
+var _loading_target := 1
+var _loading_overlay = null  # LoadingOverlay（preload 无类型）
+
 
 func _ready() -> void:
 	registry = VoxelTypes.build_default_registry()
@@ -80,6 +97,7 @@ func _ready() -> void:
 	chunk_renderer.setup(world, terrain_material)
 	chunk_renderer.water_material = materials.create_water_material()
 	chunk_renderer.water_side_material = materials.create_water_side_material()
+	chunk_renderer.cutout_material = materials.material_for("cutout")
 
 	chunk_manager = ChunkManager.new()
 	add_child(chunk_manager)
@@ -101,6 +119,9 @@ func _ready() -> void:
 	tree_manager.apply_save_state(meta)
 	tree_manager.drop_spawner = func(item_id: int, count: int, pos: Vector3) -> void:
 		drop_manager.spawn_drop(item_id, count, pos)
+	# 掉落物撞得上树干：掉落走体素碰撞感知不到树 StaticBody，
+	# 主干实心由树管理器实时查询补齐（枝干无碰撞，与玩家一致）
+	drop_manager.trunk_solid_probe = tree_manager.is_solid_for_items
 	chunk_manager.on_chunk_active_cb = tree_manager.on_chunk_active
 	chunk_manager.on_chunk_unloaded_cb = tree_manager.on_chunk_unloaded
 	chunk_manager.extra_meta_provider = _tree_and_drops_bundle
@@ -141,6 +162,64 @@ func _ready() -> void:
 	chunk_manager.player_state_provider = player.get_save_state
 	chunk_manager.focus = player
 	_setup_hud()
+	_begin_loading()
+
+
+## 进入加载阶段：冻结玩家（输入/物理停摆，渲染保持），放宽管线
+## 预算预生成+预网格初始视距，进度条由 _loading_tick 驱动。
+func _begin_loading() -> void:
+	_loading = true
+	_loading_time = 0.0
+	var spawn_col := Vector2i(
+			VoxelCoords.floordiv(
+					int(player.global_position.x), config.chunk_size),
+			VoxelCoords.floordiv(
+					int(player.global_position.z), config.chunk_size))
+	var columns := ChunkManager.desired_columns(
+			spawn_col, chunk_manager.view_distance)
+	_loading_target = maxi(1, columns.size() * config.chunks_y)
+	chunk_manager.gen_commit_budget = LOAD_GEN_BUDGET
+	chunk_manager.mesh_commit_budget = LOAD_MESH_BUDGET
+	chunk_manager.max_in_flight = LOAD_MAX_IN_FLIGHT
+	player.process_mode = Node.PROCESS_MODE_DISABLED
+	_loading_overlay = LoadingOverlayScript.new()
+	add_child(_loading_overlay)
+
+
+## 加载推进：统计已激活区块占比；is_idle 且超过最短展示时长即完成。
+## 超时兜底强制进入（带告警——单任务卡死不应锁死玩家）。
+func _loading_tick(delta: float) -> void:
+	_loading_time += delta
+	var active := 0
+	for coord in world.chunks:
+		if world.chunks[coord].state == ChunkState.State.ACTIVE:
+			active += 1
+	var pct := clampf(float(active) / float(_loading_target), 0.0, 1.0)
+	var phase := "生成地形与构建网格…  %d / %d" % [active, _loading_target]
+	if chunk_manager.in_flight_count() == 0 and active >= _loading_target:
+		phase = "即将进入世界…"
+	_loading_overlay.set_progress(pct, phase)
+	var idle_reached: bool = chunk_manager.in_flight_count() == 0 \
+			and active >= _loading_target
+	if (idle_reached and _loading_time >= LOAD_MIN_TIME) \
+			or _loading_time >= LOAD_TIMEOUT:
+		if not idle_reached:
+			push_warning("加载超时（%.1fs，就绪 %d/%d），强制进入" % [
+				_loading_time, active, _loading_target])
+		_finish_loading()
+
+
+## 加载完成：恢复管线预算、释放玩家、淡出界面。
+func _finish_loading() -> void:
+	_loading = false
+	chunk_manager.gen_commit_budget = 8
+	chunk_manager.mesh_commit_budget = 3
+	chunk_manager.max_in_flight = 32
+	player.process_mode = Node.PROCESS_MODE_INHERIT
+	var overlay = _loading_overlay
+	_loading_overlay = null
+	if overlay != null:
+		overlay.finish()
 
 
 func _process(delta: float) -> void:
@@ -155,6 +234,8 @@ func _process(delta: float) -> void:
 						OceanWavesScript.storm_scale)
 	_update_ripples(delta)
 	_hud_accumulator += delta
+	if _loading:
+		_loading_tick(delta)
 
 
 ## 涟漪：窗口中心跟随玩家；玩家与掉落物在水中移动/入水注入冲量
@@ -221,6 +302,12 @@ func _setup_environment() -> void:
 	sun.rotation_degrees = Vector3(-55.0, -35.0, 0.0)
 	sun.light_energy = 1.2
 	sun.shadow_enabled = true
+	# 阴影偏置：默认 bias 0.1 / normal_bias 2.0 会把细窄枝段的投影
+	# "推穿"，树影断成一节一节、节间漏光（俯拍对照：地面亮区
+	# 13.2%→5.1%）。调低后无自阴影痤疮（体素面是平面，深度偏置
+	# 0.02 已够兜底）
+	sun.shadow_bias = 0.02
+	sun.shadow_normal_bias = 0.0
 	add_child(sun)
 	# 水面波纹 shader 的太阳方向（UNSHADED 光照不进 shader，手动传）
 	var sun_dir: Vector3 = -sun.global_transform.basis.z.normalized()

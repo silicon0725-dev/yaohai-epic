@@ -15,7 +15,7 @@ static var _tile_cache := {}  # registry_id -> {top, side, bottom: PackedInt32Ar
 const TILE_NAMES := [
 	"grass_top", "grass_side", "dirt", "stone", "bedrock",
 	"log_top", "log_side", "planks", "cobblestone", "bricks",
-	"sand", "sandstone", "gravel", "coal_ore", "iron_ore",
+	"sand", "sandstone", "gravel", "coal_ore", "iron_ore", "leaves",
 ]
 
 
@@ -52,10 +52,33 @@ static func _tile_tables(registry: VoxelRegistry) -> Dictionary:
 	return tables
 
 
+## 拼装 27 邻域扁平数组（build / build_water 共用）。
+## append_array 批拷——曾逐元素 27×4096 次循环写，110k 次/任务的
+## 纯 GDScript 桥接开销，A/B 里全算在 C# 头上。
+static func _pack_neighbors(chunk: ChunkData, neighbors: Array) -> Dictionary:
+	var s := chunk.dimensions.x
+	var volume := s * s * s
+	var neighbor_ids := PackedInt32Array()
+	var neighbor_exists := PackedByteArray()
+	neighbor_exists.resize(27)
+	for i in 27:
+		var nb: ChunkData = neighbors[i]
+		if nb != null:
+			neighbor_exists[i] = 1
+			neighbor_ids.append_array(nb.block_ids)
+		else:
+			neighbor_ids.resize(neighbor_ids.size() + volume)
+	return {
+		"ids": neighbor_ids,
+		"exists": neighbor_exists,
+		"volume": volume,
+	}
+
+
 ## 拼装并调用 C# 原生网格器。返回空字典 = 原生不可用或失败。
 ## 本层保持中立；是否走原生由各网格器门面按基准结论决定：
-## A/B（192 区块，本机 2 核）：Greedy 62.2→25.9 ms/块（C# 胜 2.4×），
-## 面剔除 12.9→29.3 ms/块（GDScript 胜 2.3×，跨语言装箱开销超过计算收益）。
+## A/B（192 区块，本机 2 核，桥批拷后）：面剔除 4.6 vs 20.6ms、
+## 贪心 6.0 vs 24.0ms（C# 4-4.5×，含桥接成本）。
 ## 等价测试仍直调本层覆盖两条 C# 路径。
 static func build(
 		greedy: bool,
@@ -65,20 +88,9 @@ static func build(
 ) -> Dictionary:
 	if not available():
 		return {}
-	var s := chunk.dimensions.x
-	var volume := s * s * s
-
-	# 27 邻域扁平化
-	var neighbor_ids := PackedInt32Array()
-	neighbor_ids.resize(27 * volume)
-	var neighbor_exists := PackedByteArray()
-	neighbor_exists.resize(27)
-	for i in 27:
-		var nb: ChunkData = neighbors[i]
-		if nb != null:
-			neighbor_exists[i] = 1
-			for j in volume:
-				neighbor_ids[i * volume + j] = nb.block_ids[j]
+	var packed := _pack_neighbors(chunk, neighbors)
+	var neighbor_ids: PackedInt32Array = packed["ids"]
+	var neighbor_exists: PackedByteArray = packed["exists"]
 
 	var tables := _tile_tables(registry)
 	var lookup := ChunkMesher.build_lookup_tables(registry)
@@ -88,20 +100,57 @@ static func build(
 	var result: Variant
 	if greedy:
 		result = _native.BuildGreedy(
-			chunk.chunk_coord, s,
+			chunk.chunk_coord, chunk.dimensions.x,
 			chunk.block_ids, neighbor_ids, neighbor_exists,
 			solid, occl,
 			tables["top"], tables["side"], tables["bottom"],
 			chunk.sparse_block_states,
-			TextureAtlasLoader.COLS, TextureAtlasLoader.ROWS)
+			TextureAtlasLoader.COLS, TextureAtlasLoader.ROWS,
+			VoxelTypes.BRANCH_ID)
 	else:
 		result = _native.BuildNaive(
-			chunk.chunk_coord, s,
+			chunk.chunk_coord, chunk.dimensions.x,
 			chunk.block_ids, neighbor_ids, neighbor_exists,
 			solid, occl,
 			tables["top"], tables["side"], tables["bottom"],
 			chunk.sparse_block_states,
-			TextureAtlasLoader.COLS, TextureAtlasLoader.ROWS)
+			TextureAtlasLoader.COLS, TextureAtlasLoader.ROWS,
+			VoxelTypes.BRANCH_ID, VoxelTypes.LEAVES_ID)
+	if result == null:
+		return {}
+	return result
+
+
+## C# 水通道（water_* 8 数组；与 GDScript append_water_faces 等价，
+## 等价测试水世界用例保证）。levels_world 打包为扁平数组避开 C# 侧
+## Variant Dictionary 查询。返回空字典 = 原生不可用。
+static func build_water(chunk: ChunkData, neighbors: Array) -> Dictionary:
+	if not available():
+		return {}
+	var levels := ChunkMesher.collect_water_levels_world(chunk, neighbors)
+	var lx := PackedInt32Array()
+	var ly := PackedInt32Array()
+	var lz := PackedInt32Array()
+	var lv := PackedInt32Array()
+	lx.resize(levels.size())
+	ly.resize(levels.size())
+	lz.resize(levels.size())
+	lv.resize(levels.size())
+	var i := 0
+	for k: Vector3i in levels:
+		lx[i] = k.x
+		ly[i] = k.y
+		lz[i] = k.z
+		lv[i] = levels[k]
+		i += 1
+	var packed := _pack_neighbors(chunk, neighbors)
+	var wc := chunk.chunk_coord
+	var wd := chunk.dimensions
+	var result: Variant = _native.BuildWater(
+			wc, wd.x,
+			chunk.block_ids, packed["ids"], packed["exists"],
+			lx, ly, lz, lv,
+			wc.x * wd.x, wc.y * wd.y, wc.z * wd.z)
 	if result == null:
 		return {}
 	return result

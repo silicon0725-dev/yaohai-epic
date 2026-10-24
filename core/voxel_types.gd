@@ -176,7 +176,7 @@ static func build_default_registry() -> VoxelRegistry:
 	})
 	registry.register_block({
 		"id": "core:leaves",
-		"render_type": "opaque",
+		"render_type": "cutout",
 		"textures": {"top": "leaves", "side": "leaves", "bottom": "leaves"},
 		"collision": true,
 		"occludes_neighbors": false,

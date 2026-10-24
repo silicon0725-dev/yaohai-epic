@@ -57,18 +57,24 @@ static func packed_tile_count() -> int:
 
 
 static func generate_atlas_image() -> Image:
+	# RGBA8：树叶等镂空贴图依赖 alpha 通道（cutout 材质裁切成孔）；
+	# 不透明贴图 alpha 恒 1 不受影响。曾建 RGB8 并把贴图 convert
+	# 成 RGB8"统一丢弃 alpha"——透明像素被压成不透明黑点，镂空失效
 	var image := Image.create_empty(
-			COLS * TILE_SIZE, ROWS * TILE_SIZE, false, Image.FORMAT_RGB8)
+			COLS * TILE_SIZE, ROWS * TILE_SIZE, false, Image.FORMAT_RGBA8)
 	var rng := RandomNumberGenerator.new()
 	for i in TILES.size():
 		var grid := tile_grid(TILES[i])
 		var origin := Vector2i(grid.x * TILE_SIZE, grid.y * TILE_SIZE)
 		var packed := _packed_image(TILES[i])
 		if packed != null:
-			# 统一尺寸与格式；丢弃 alpha（不透明方块按 RGB 处理）
+			# 统一尺寸与格式到图集格式（RGBA8）——blit_rect 要求源与
+			# 目标同格式（RGB8 源贴 RGBA8 图集会失败，tile 变全透明
+			# 空位，曾致树干贴图消失）。convert 无损：RGB8 源自动补
+			# alpha=1，RGBA8 源保留透明
 			if packed.get_size() != Vector2i(TILE_SIZE, TILE_SIZE):
 				packed.resize(TILE_SIZE, TILE_SIZE, Image.INTERPOLATE_NEAREST)
-			packed.convert(Image.FORMAT_RGB8)
+			packed.convert(image.get_format())
 			image.blit_rect(packed, Rect2i(Vector2i.ZERO,
 					Vector2i(TILE_SIZE, TILE_SIZE)), origin)
 		else:

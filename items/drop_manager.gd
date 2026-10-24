@@ -43,6 +43,10 @@ var item_registry: ItemRegistry
 var pickup_target: Node3D
 ## 拾取背包（放不下时掉落留在原地，腾出空间后自动拾取）
 var pickup_inventory: Inventory
+## 树干实心探针（TreeManager.is_solid_for_items；main 接线）——
+## 掉落物体素点碰撞感知不到树的 StaticBody，主干实心由此补齐，
+## 否则对着树丢东西会穿树
+var trunk_solid_probe: Callable = Callable()
 
 var _drops: Array[ItemDrop] = []
 var _visuals: Array[Node3D] = []
@@ -157,7 +161,7 @@ func process_drops(delta: float) -> void:
 			# 无磁吸（MC/BDIR 均无此机制）：物品落地即安放，
 			# 走进拾取半径才拾取——磁吸曾把落地物品拉离地面，
 			# 卡在坡上表现为"以随机倾角插进地里"
-			drop.physics_step(world, delta)
+			drop.physics_step(world, delta, trunk_solid_probe)
 			drop.age += delta
 		# 拾取不要求所在区块就绪（顺手清走未加载边缘的掉落）
 		if player_center != null and pickup_inventory != null \

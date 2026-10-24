@@ -1,0 +1,12 @@
+[blockbench-mcp] 启动 headless server：bun headless/index.ts --root F:\yaohai-epic
+blockbench-mcp-headless 1.10.1 ready. Roots: F:\yaohai-epic. Renderer: built-in engine (installs its packages on first render)
+INIT: blockbench-mcp-headless 1.10.1
+TOOLS: 23 个 → bbmodel_info, bbmodel_outline, bbmodel_find_elements, bbmodel_get_node, bbmodel_list_textures, bbmodel_list_animations …
+CREATE: FAIL F:\yaohai-epic\_mcp_smoke\robot.bbmodel already exists; pass overwrite: true to replace it.
+EDIT: FAIL Revision conflict on F:\yaohai-epic\_mcp_smoke\robot.bbmodel: expected , found 4ada6729ea3f8da1. Another agent changed the file; read it again and retry.
+VALIDATE: { "revision": "4ada6729ea3f8da1", "format": "free", "summary": { "errors": 0, "warnings": 0, "passed": true }, "gates": [ { "id": "outliner", "label": "Outliner references resolve and UUIDs are unique", "severity": "error", "ran": true, "violations": [] }, { "id": "unlisted_nodes", "label": "Every g
+Installing the render engine's dependencies into C:\Users\Administrator\AppData\Local\blockbench-mcp-headless\render (first render only)...
+RENDER: ok(image)
+RENDER image saved → plugins/blockbench-mcp/.smoke/render_out.png
+INFO: { "path": "F:\\yaohai-epic\\_mcp_smoke\\robot.bbmodel", "revision": "4ada6729ea3f8da1", "name": "Smoke Robot", "model_identifier": "", "format": "free", "format_version": "5.0", "box_uv": false, "reso
+CLEANUP: ok

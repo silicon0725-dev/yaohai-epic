@@ -17,8 +17,13 @@ func run() -> void:
 	check(not registry.is_solid(VoxelTypes.AIR_ID), "空气不产生几何")
 	check(registry.is_solid(VoxelTypes.GRASS_ID), "草产生几何")
 
-	# 阶段 E 扩充方块：注册顺序与数值 ID 常量一致
-	check_eq(registry.block_count(), 14, "方块总数 14（空气 + 13 种）")
+	# 阶段 E 扩充方块 + v4 水：注册顺序与数值 ID 常量一致
+	check_eq(registry.block_count(), 17, "方块总数 17（空气 + 水 + 枝/叶）")
+	check_eq(registry.id_for_name("core:water"), VoxelTypes.WATER_ID,
+			"water 数值 ID（追加在末尾，§2.2）")
+	check(not registry.occludes(VoxelTypes.WATER_ID), "水不遮挡邻面")
+	check(not registry.is_targetable(VoxelTypes.WATER_ID), "射线穿过水")
+	check(registry.is_solid(VoxelTypes.WATER_ID), "水产生几何（独立水面）")
 	check_eq(registry.id_for_name("core:log"), VoxelTypes.LOG_ID, "log 数值 ID")
 	check_eq(registry.id_for_name("core:planks"), VoxelTypes.PLANKS_ID, "planks 数值 ID")
 	check_eq(registry.id_for_name("core:cobblestone"), VoxelTypes.COBBLESTONE_ID, "cobblestone 数值 ID")

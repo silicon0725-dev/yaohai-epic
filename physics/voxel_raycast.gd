@@ -28,7 +28,7 @@ static func raycast(
 			floori(origin.x), floori(origin.y), floori(origin.z))
 
 	# 起点就在实心方块内：直接命中，进入面无定义（放置方应跳过）
-	if world.registry.is_solid(world.get_block(pos)):
+	if world.registry.is_targetable(world.get_block(pos)):
 		result.hit = true
 		result.block_pos = pos
 		result.normal = Vector3i.ZERO
@@ -81,7 +81,7 @@ static func raycast(
 				pos.z += step.z
 				t_max.z += t_delta.z
 				normal.z = -step.z
-		if world.registry.is_solid(world.get_block(pos)):
+		if world.registry.is_targetable(world.get_block(pos)):
 			result.hit = true
 			result.block_pos = pos
 			result.normal = normal

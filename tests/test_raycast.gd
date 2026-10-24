@@ -118,3 +118,22 @@ func run() -> void:
 		not BlockPlacement.place(
 			world, Vector3i(2, 1, 0), VoxelTypes.AIR_ID, far_aabb),
 		"放置空气被拒绝")
+
+
+	# 水穿射：射线穿过水命中其后的固体（MC 同款，v4）
+	# 用全新世界避免前面用例遗留方块干扰
+	var water_world := _make_world()
+	var water_chunk := water_world.get_chunk(Vector3i.ZERO)
+	water_chunk.set_block_raw(Vector3i(1, 1, 1), VoxelTypes.STONE_ID)
+	water_chunk.set_block_raw(Vector3i(1, 1, 2), VoxelTypes.WATER_ID)
+	var water_hit := VoxelRaycast.raycast(
+			water_world, Vector3(1.5, 1.5, -0.5), Vector3(0, 0, 1), 10.0)
+	check(water_hit.hit, "穿过水仍命中后方固体")
+	check_eq(water_hit.block_pos, Vector3i(1, 1, 1), "命中固体而非水")
+	# 水中放置：目标格为水视同空气可替换
+	check(
+		BlockPlacement.place(
+			water_world, Vector3i(1, 1, 2), VoxelTypes.DIRT_ID, far_aabb),
+		"往水里放方块（替换水）")
+	check_eq(water_world.get_block(Vector3i(1, 1, 2)), VoxelTypes.DIRT_ID,
+		"水格被方块替换")

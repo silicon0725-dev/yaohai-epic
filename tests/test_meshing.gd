@@ -24,6 +24,8 @@ func _mesh(voxel_world: VoxelWorld, coord: Vector3i) -> Dictionary:
 
 
 func run() -> void:
+	_test_branch_meshing()
+	_test_water_meshing()
 	# 单个方块：恰好 6 个面
 	var world := _make_world(1)
 	var chunk := world.get_chunk(Vector3i(0, 0, 0))
@@ -110,3 +112,63 @@ func run() -> void:
 	check_eq(
 		world4.get_block(Vector3i(5, 1, 1)), VoxelTypes.STONE_ID,
 		"失败的 replace_block 不改变世界")
+
+
+## 动态树枝干几何：radius 1-2 十字面片（2 面）；radius 4 方形柱
+##（四侧+顶+底，独立格无邻遮挡）。
+func _test_branch_meshing() -> void:
+	var world := _make_world(1)
+	var chunk := world.get_chunk(Vector3i(0, 0, 0))
+	chunk.set_block_raw(Vector3i(2, 1, 2), VoxelTypes.BRANCH_ID)
+	var arrays := _mesh(world, Vector3i(0, 0, 0))
+	# 树系统 v2：BRANCH 是占位（无区块几何，渲染走树实体独立网格）
+	check_eq(arrays["indices"].size(), 0, "枝干占位无区块几何")
+
+
+func _test_water_meshing() -> void:
+	# 水柱（y 1..2，上为空气）：水-水内部面剔除，只剩表面 5 面
+	#（顶面 + 四侧），顶面顶点下沉 0.875；不进不透明网格
+	var world := _make_world(1)
+	var chunk := world.get_chunk(Vector3i(0, 0, 0))
+	chunk.set_block_raw(Vector3i(1, 1, 1), VoxelTypes.WATER_ID)
+	chunk.set_block_raw(Vector3i(1, 2, 1), VoxelTypes.WATER_ID)
+	var arrays := _mesh(world, Vector3i(0, 0, 0))
+	check_eq(arrays["indices"].size(), 0, "水不进不透明网格")
+	var water_indices: PackedInt32Array = arrays.get(
+			"water_indices", PackedInt32Array())
+	var side_indices: PackedInt32Array = arrays.get(
+			"water_side_indices", PackedInt32Array())
+	# 悬浮水柱：底面也朝空气可见 -> 底块（底+四侧）+ 顶块（顶+四侧）= 10 面。
+	# 顶/底面走双面通道（2 面），四侧走背面剔除通道（8 面）
+	check_eq(water_indices.size() + side_indices.size(), 60,
+			"悬浮水柱 10 面（水-水内部剔除）")
+	check_eq(water_indices.size(), 12, "顶/底面 2 面走双面通道")
+	check_eq(side_indices.size(), 48, "四侧 8 面走背面剔除通道")
+
+	# 顶面顶点下沉：最高顶点 y = 1 - 0.125 + z 偏移 -> 表面块 y=2 上沿 2.875
+	var water_vertices: PackedVector3Array = arrays["water_vertices"]
+	var max_y := -INF
+	var min_y := INF
+	for v in water_vertices:
+		max_y = maxf(max_y, v.y)
+		min_y = minf(min_y, v.y)
+	check(abs(max_y - (3.0 - ChunkMesher.WATER_SURFACE_DROP)) < 0.0001,
+			"表面水块上沿下沉 0.125（%.3f）" % max_y)
+	check(abs(min_y - 1.0) < 0.0001, "底面不下沉")
+
+	# 水下无面：水-固体不出面（固体自己的面隔着水可见）
+	var world2 := _make_world(1)
+	var chunk2 := world2.get_chunk(Vector3i(0, 0, 0))
+	chunk2.set_block_raw(Vector3i(1, 0, 1), VoxelTypes.STONE_ID)
+	chunk2.set_block_raw(Vector3i(1, 1, 1), VoxelTypes.WATER_ID)
+	var arrays2 := _mesh(world2, Vector3i(0, 0, 0))
+	# 石头顶面（y=1）在水下仍渲染；水只有上方空气面 + 四侧
+	check_eq(arrays2["indices"].size(), 30,
+			"水下固体面仍渲染（石 5 面 + 与水接触面）")
+	var water2: PackedInt32Array = arrays2.get(
+			"water_indices", PackedInt32Array())
+	var side2: PackedInt32Array = arrays2.get(
+			"water_side_indices", PackedInt32Array())
+	# 顶面 1 面走双面通道，四侧 4 面走背面剔除通道
+	check_eq(water2.size(), 6, "水对固体不出底面（顶面单面）")
+	check_eq(side2.size(), 24, "水对固体不出底面（四侧）")

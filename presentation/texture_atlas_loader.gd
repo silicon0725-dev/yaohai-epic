@@ -32,6 +32,7 @@ const TILES := [
 	"gravel",
 	"coal_ore",
 	"iron_ore",
+	"leaves",
 ]
 
 ## 矿石斑点中心（程序化占位图用，确定性团簇）。

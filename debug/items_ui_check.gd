@@ -116,9 +116,7 @@ func _report() -> void:
 
 
 func _cleanup_save() -> void:
-	var dir := DirAccess.open(ISOLATED_SAVE_ROOT.get_slice("://", 1))
-	if dir != null:
-		for file in dir.get_files():
-			dir.remove(file)
-		var base := "user://"
-		DirAccess.open(base).remove(ISOLATED_SAVE_ROOT.get_slice("://", 1))
+	# 必须走 user://（WorldSave.erase_all）；曾用相对路径 DirAccess.open，
+	# 清理恒为空操作，退出保存跨运行累积背包直到木板耗尽使检查必败
+	WorldSave.new(ISOLATED_SAVE_ROOT,
+			VoxelTypes.build_default_registry()).erase_all()

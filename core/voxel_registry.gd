@@ -54,6 +54,13 @@ func occludes(id: int) -> bool:
 	return definition_for_id(id).get("occludes_neighbors", false)
 
 
-## 该方块是否产生可见几何（空气为 false）。
+## 该方块是否产生可见几何（空气为 false；水为 true，走独立水面）。
 func is_solid(id: int) -> bool:
 	return definition_for_id(id).get("render_type", "none") != "none"
+
+
+## 射线/出生点扫描的"可命中实体"判定：可见几何且非水——
+## 挖掘射线穿过水（MC 同款），出生点搜索也跳过水柱。
+func is_targetable(id: int) -> bool:
+	var render_type := String(definition_for_id(id).get("render_type", "none"))
+	return render_type != "none" and render_type != "water"

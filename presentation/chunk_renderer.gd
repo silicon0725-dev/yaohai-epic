@@ -8,6 +8,9 @@ extends Node3D
 
 var world: VoxelWorld
 var material: Material
+## 水面材质（§6.5 独立半透明表面）；为空时不建水面
+var water_material: Material
+var water_side_material: Material
 
 var total_faces := 0
 
@@ -44,19 +47,24 @@ func register_chunk(coord: Vector3i) -> void:
 
 
 ## 主线程提交：由网格数组创建 ArrayMesh 与碰撞形状并赋给节点。
-func apply_mesh(coord: Vector3i, mesh_arrays: Dictionary) -> void:
+## rebuild_collision=false（纯水位变化，碰撞未标脏）时跳过昂贵的
+## ConcavePolygonShape3D 顶点汤重建——水没有碰撞体，固体面未变。
+func apply_mesh(
+		coord: Vector3i, mesh_arrays: Dictionary, rebuild_collision := true
+) -> void:
 	if not _mesh_instances.has(coord):
 		return
-	var mesh: ArrayMesh
-	if mesh_arrays["indices"].size() > 0:
-		mesh = MeshBuilder.arrays_to_mesh(mesh_arrays, material)
+	var mesh: MeshInstance3D = _mesh_instances[coord]
+	if mesh_arrays["indices"].size() > 0 			or mesh_arrays.get("water_indices", PackedInt32Array()).size() > 0 			or mesh_arrays.get("water_side_indices", PackedInt32Array()).size() > 0:
+		mesh.mesh = MeshBuilder.arrays_to_mesh(
+				mesh_arrays, material, water_material, water_side_material)
 	else:
-		mesh = ArrayMesh.new()  # 空区块：无表面
-	_mesh_instances[coord].mesh = mesh
-	var body: StaticBody3D = _bodies[coord]
-	var collider: CollisionShape3D = body.get_meta("collider")
-	collider.shape = ChunkCollisionBuilder.build_collision_shape(mesh_arrays)
-	var new_faces: int = mesh_arrays["indices"].size() / 6
+		mesh.mesh = ArrayMesh.new()  # 空区块：无表面
+	if rebuild_collision:
+		var body: StaticBody3D = _bodies[coord]
+		var collider: CollisionShape3D = body.get_meta("collider")
+		collider.shape = ChunkCollisionBuilder.build_collision_shape(mesh_arrays)
+	var new_faces: int = (mesh_arrays["indices"].size() 			+ mesh_arrays.get("water_indices", PackedInt32Array()).size() 			+ mesh_arrays.get("water_side_indices", PackedInt32Array()).size()) / 6
 	total_faces += new_faces - int(_chunk_faces.get(coord, 0))
 	_chunk_faces[coord] = new_faces
 

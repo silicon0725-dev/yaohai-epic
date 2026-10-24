@@ -10,6 +10,10 @@ extends RefCounted
 var config: WorldConfig
 var registry: VoxelRegistry
 
+## 方块实际变更时广播（set_block 成功路径）。水位模拟（WaterFlow）
+## 据此把扰动位置入队；语义：只有"数据变化"事件，无负载语义。
+signal block_changed(pos: Vector3i, old_id: int, new_id: int)
+
 ## Vector3i（区块坐标） -> ChunkData
 var chunks := {}
 
@@ -83,7 +87,9 @@ func get_block(world_pos: Vector3i) -> int:
 
 ## 统一修改入口：更新数据并使受影响网格/碰撞过期（含区块边界传播）。
 ## 方块被替换后其状态清空（放置方随后按需重新写入状态）。
-func set_block(world_pos: Vector3i, id: int) -> bool:
+## affects_collision=false 供无碰撞语义的变化用（水位流动：水/空气
+## 互转不影响固体碰撞体），跳过碰撞标脏避免整块碰撞形状白重建。
+func set_block(world_pos: Vector3i, id: int, affects_collision := true) -> bool:
 	if not config.in_block_bounds(world_pos):
 		return false
 	var chunk_coord := VoxelCoords.world_to_chunk(world_pos, config.chunk_size)
@@ -91,10 +97,13 @@ func set_block(world_pos: Vector3i, id: int) -> bool:
 	if chunk == null:
 		return false
 	var local := VoxelCoords.world_to_local(world_pos, config.chunk_size)
+	var old_id := chunk.get_block(local)
 	if not chunk.set_block(local, id):
 		return false
 	chunk.clear_state(local)
-	_invalidate_affected_meshes(chunk_coord, local)
+	_invalidate_affected_meshes(chunk_coord, local, affects_collision)
+	if old_id != id:
+		block_changed.emit(world_pos, old_id, id)
 	return true
 
 
@@ -138,7 +147,10 @@ func replace_block(world_pos: Vector3i, expected_id: int, new_id: int) -> bool:
 
 
 ## 修改区块边缘方块时，相邻区块的对应网格与碰撞必须失效（§6.4）。
-func _invalidate_affected_meshes(chunk_coord: Vector3i, local: Vector3i) -> void:
+## affects_collision=false 只标网格（水位流动等无碰撞变化）。
+func _invalidate_affected_meshes(
+		chunk_coord: Vector3i, local: Vector3i, affects_collision := true
+) -> void:
 	var size := config.chunk_size
 	var affected: Array[Vector3i] = [chunk_coord]
 	if local.x == 0:
@@ -157,4 +169,5 @@ func _invalidate_affected_meshes(chunk_coord: Vector3i, local: Vector3i) -> void
 		var chunk: ChunkData = chunks.get(coord)
 		if chunk != null:
 			chunk.mesh_dirty = true
-			chunk.collision_dirty = true
+			if affects_collision:
+				chunk.collision_dirty = true

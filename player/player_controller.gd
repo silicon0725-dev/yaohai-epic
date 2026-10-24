@@ -24,11 +24,24 @@ const TOTAL_SLOTS := 24
 const HOTBAR_SLOTS := 12
 const SLOT_PIXELS := 44
 
+# 游泳（v4 水世界）：水中重力/终端速度减小、Space 上浮、移速打折
+const WATER_GRAVITY := 5.0
+const WATER_TERMINAL := 3.0
+const SWIM_UP_SPEED := 3.2
+const WATER_SPEED_FACTOR := 0.6
+
+# 丢弃（Q / Ctrl+Q）：朝视线方向抛出，保护期内不磁吸不拾取
+const DROP_THROW_SPEED := 5.0
+const DROP_ARC_UP := 1.2
+const DROP_PICKUP_DELAY := 1.0
+
 var world: VoxelWorld
 var spawn_point := Vector3.ZERO
 
 var item_registry: ItemRegistry
 var inventory: Inventory
+## 掉落实体管理器（主场景注入；为空时掉落兜底直接入包，独立场景可用）
+var drop_manager: DropManager
 
 var selected_index := 0
 var _pitch := 0.0
@@ -59,6 +72,8 @@ var _inv_slot_counts: Array[Label] = []
 var _cursor_stack := {"item_id": -1, "count": 0}
 var _cursor_icon: TextureRect
 var _cursor_count: Label
+## 水下全屏色调（v4 水世界）
+var _underwater_tint: ColorRect
 
 
 func _ready() -> void:
@@ -104,6 +119,10 @@ func _unhandled_input(event: InputEvent) -> void:
 		match event.keycode:
 			KEY_E:
 				_toggle_inventory()
+			KEY_Q:
+				# Q 扔 1 个，Ctrl+Q 扔整堆（背包界面打开时不响应）
+				if not inventory_open:
+					_drop_held(event.ctrl_pressed)
 			KEY_ESCAPE:
 				if inventory_open:
 					_toggle_inventory()
@@ -134,6 +153,23 @@ func _physics_process(delta: float) -> void:
 	_update_mining(delta)
 	var speed := SPRINT_SPEED \
 			if Input.is_physical_key_pressed(KEY_SHIFT) else WALK_SPEED
+	# 水的两级判定（MC 语义），基于实际水位（water_surface_at：
+	# 向上扫表面格 + 级别高度）：
+	# - 涉水（浸深 > 0.1）：移速折扣 + 水流推力生效——踩进一格深的
+	#   浅滩走路变慢、会被水流冲走，但保持正常重力与跳跃（能跳出
+	#   浅滩，Space 是跳不是上浮）；
+	# - 深水（浸深 > 0.9）：才切换游泳物理（弱重力缓沉、Space 上浮）。
+	#   0.9 取在源水 0.875 与整格 1.0 之间，贴格边界抖动不闪断。
+	var feet_y := global_position.y - 1.0
+	var feet_cell := Vector3i(
+			floori(global_position.x),
+			floori(feet_y + 0.05),
+			floori(global_position.z))
+	var immersion := WaterFlow.water_surface_at(world, feet_cell) - feet_y
+	var wading := immersion > 0.1
+	var deep_water := immersion > 0.9
+	if wading:
+		speed *= WATER_SPEED_FACTOR
 	# 本节点只有偏航，basis.z/basis.x 已在水平面上
 	var forward := -global_transform.basis.z
 	var right := global_transform.basis.x
@@ -151,11 +187,18 @@ func _physics_process(delta: float) -> void:
 		motion = motion.normalized() * speed
 	velocity.x = motion.x
 	velocity.z = motion.z
-	if not is_on_floor():
+	if deep_water:
+		# 游泳：弱重力 + 缓沉，Space 上浮；水上跳出由跳速衰减自然处理。
+		# 玩家不被水流冲走（用户决策）：只有掉落物会被水流冲向下游
+		velocity.y = maxf(velocity.y - WATER_GRAVITY * delta, -WATER_TERMINAL)
+		if Input.is_physical_key_pressed(KEY_SPACE):
+			velocity.y = move_toward(velocity.y, SWIM_UP_SPEED, 24.0 * delta)
+	elif not is_on_floor():
 		velocity.y -= GRAVITY * delta
 	elif Input.is_physical_key_pressed(KEY_SPACE):
 		velocity.y = JUMP_VELOCITY
 	move_and_slide()
+	_update_underwater_tint()
 
 
 # ---- 挖掘（按住累积进度，§8.2 + 物品层规则）----
@@ -189,9 +232,47 @@ func _break_block(block_pos: Vector3i) -> void:
 	var drops := BlockMining.mine(
 			world, block_pos, item_registry, _mine_drops)
 	for drop in drops:
-		var leftover := inventory.add(int(drop["item_id"]), int(drop["count"]))
-		if leftover > 0:
-			push_warning("背包已满，%d 个物品丢失" % leftover)
+		_dispatch_drop(int(drop["item_id"]), int(drop["count"]), block_pos)
+
+
+## 挖掘产物优先生成地面掉落实体（方块中心 + 随机散射）；
+## 实体层不可用（独立场景 / 实体满）时兜底直接入包（旧语义）。
+func _dispatch_drop(item_id: int, count: int, block_pos: Vector3i) -> void:
+	if drop_manager != null and drop_manager.spawn_scatter(
+			item_id, count,
+			Vector3(block_pos) + Vector3(0.5, 0.5, 0.5)):
+		return
+	var leftover := inventory.add(item_id, count)
+	if leftover > 0:
+		push_warning("背包已满，%d 个物品丢失" % leftover)
+
+
+## 玩家身边丢弃一堆物品（关背包时手中还有堆）。返回是否成功落地。
+func _scatter_at_player(item_id: int, count: int) -> bool:
+	if drop_manager == null:
+		return false
+	var forward_dir := -global_transform.basis.z
+	return drop_manager.spawn_scatter(item_id, count,
+			global_position + Vector3(0.0, 1.2, 0.0) + forward_dir * 0.6, 1.0)
+
+
+# ---- 丢弃（Q 扔 1 个 / Ctrl+Q 扔整堆，朝视线方向抛出）----
+
+func _drop_held(whole_stack: bool) -> void:
+	if drop_manager == null or inventory == null:
+		return  # 无实体层（独立场景）：丢弃不可用，物品留在包里
+	if inventory.is_empty(selected_index):
+		return
+	var count := inventory.count_at(selected_index) if whole_stack else 1
+	var item_id := inventory.item_id_at(selected_index)
+	inventory.remove_at(selected_index, count)
+	# 从眼睛沿视线抛出（含俯仰）；保护期覆盖飞行时间，防止瞬吸回
+	var look := -camera.global_transform.basis.z
+	drop_manager.spawn_drop(
+			item_id, count,
+			camera.global_position + look * 0.6,
+			look * DROP_THROW_SPEED + Vector3.UP * DROP_ARC_UP,
+			DROP_PICKUP_DELAY)
 
 
 func _reset_mining() -> void:
@@ -326,6 +407,14 @@ func _build_hud() -> void:
 	_progress_bar.add_child(_progress_fill)
 
 	_build_inventory_screen(hud)
+
+	# 水下色调：全屏半透明蓝，鼠标穿透，默认隐藏
+	_underwater_tint = ColorRect.new()
+	_underwater_tint.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	_underwater_tint.color = Color(0.10, 0.30, 0.55, 0.30)
+	_underwater_tint.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_underwater_tint.visible = false
+	hud.add_child(_underwater_tint)
 
 
 func _make_slot_panel(selected: bool) -> Panel:
@@ -632,12 +721,15 @@ func _toggle_inventory() -> void:
 		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 		_refresh_inventory_screen()
 	else:
-		# 关闭时若手中还有堆，放回背包（放不下则丢失并告警）
+		# 关闭时若手中还有堆：丢到身边地面（实体层可用），
+		# 否则放回背包（放不下则丢失并告警）
 		if _cursor_stack["item_id"] >= 0:
-			var leftover := inventory.add(
-					int(_cursor_stack["item_id"]), int(_cursor_stack["count"]))
-			if leftover > 0:
-				push_warning("背包已满，%d 个物品丢失" % leftover)
+			var held_id := int(_cursor_stack["item_id"])
+			var held_count := int(_cursor_stack["count"])
+			if not _scatter_at_player(held_id, held_count):
+				var leftover := inventory.add(held_id, held_count)
+				if leftover > 0:
+					push_warning("背包已满，%d 个物品丢失" % leftover)
 			_cursor_stack = {"item_id": -1, "count": 0}
 		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 	_reset_mining()
@@ -653,6 +745,18 @@ func _process(_delta: float) -> void:
 		_progress_fill.size = Vector2(ratio * 60.0, 6.0)
 	else:
 		_progress_bar.visible = false
+
+
+## 相机在水下时叠一层蓝色色调（v1：纯叠加，不做折射/雾）。
+func _update_underwater_tint() -> void:
+	if _underwater_tint == null:
+		return
+	var eye_cell := Vector3i(
+			floori(camera.global_position.x),
+			floori(camera.global_position.y),
+			floori(camera.global_position.z))
+	_underwater_tint.visible = world != null \
+			and world.get_block(eye_cell) == VoxelTypes.WATER_ID
 
 
 # ---- 存档状态（§9.1 player_state）----

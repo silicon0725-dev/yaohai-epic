@@ -11,3 +11,10 @@ debug/*.png.import
 
 # 本地 Conquest 材质暂存（许可禁止再分发，绝不入库；见 assets/textures/CREDITS.md）
 assets/textures/conquest_local/
+
+# node_modules（blockbench-mcp vendor 的 bun 二进制在此，npm install 可恢复）
+node_modules/
+
+# 本地工具产物与会话目录
+.mimosa/
+.zcode/

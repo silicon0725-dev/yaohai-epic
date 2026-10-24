@@ -239,7 +239,10 @@ static func _build_gd(
 			for x in s:
 				var pidx := (z + 1) * stride_z + (y + 1) * stride_y + (x + 1)
 				var block_id := padded[pidx]
-				if block_id == VoxelTypes.AIR_ID or solid_by_id[block_id] == 0:
+				# 水走独立半透明表面（append_water_faces）；枝干走专用
+				# 几何通道（append_branch_faces，radius 状态驱动），
+				# 均不进普通不透明网格
+				if block_id == VoxelTypes.AIR_ID or block_id == VoxelTypes.WATER_ID 						or block_id == VoxelTypes.BRANCH_ID 						or solid_by_id[block_id] == 0:
 					continue
 				var textures: Dictionary = textures_by_id[block_id]
 				var state: Dictionary = {}
@@ -249,7 +252,7 @@ static func _build_gd(
 					if occludes_by_id[padded[pidx + neighbor_offsets[f]]] == 1:
 						continue
 					var corners: Array = face_corners[f]
-					var corner_uvs: Array = face_corner_uvs[f]
+					var corner_uvs: Array = FACES[f]["corner_uvs"]
 					var normal_vec := face_normal_vecs[f]
 					var base_index := vertices.size()
 					# tile 原点：无状态走缓存（键 "block:face"，免字符串查找/除法）
@@ -288,9 +291,199 @@ static func _build_gd(
 						base_index, base_index + 2, base_index + 1,
 						base_index, base_index + 3, base_index + 2,
 					]))
-	return {
+	var result := {
 		"vertices": vertices,
 		"normals": normals,
 		"uvs": uvs,
 		"indices": indices,
 	}
+	var c := chunk.chunk_coord
+	var d := chunk.dimensions
+	append_water_faces(padded, ps, result,
+			collect_water_levels_world(chunk, neighbors),
+			Vector3i(c.x * d.x, c.y * d.y, c.z * d.z))
+	return result
+
+
+## ---- 水面（§6.5：与不透明网格分离的半透明表面）----
+
+## 水顶面相对方块顶的下沉量（MC 式水面略低于方块顶，岸线更自然）。
+const WATER_SURFACE_DROP := 0.125
+
+## 从区块稀疏状态提取水格级别，合并 27 邻域为一张
+## {世界格坐标: level} 表——水面角点高度查询会跨界（角点由 2x2
+## 四格共享，可能落在邻区块）。源（无状态）不进表，缺省 0。
+static func collect_water_levels_world(
+		chunk: ChunkData, neighbors: Array
+) -> Dictionary:
+	var levels := {}
+	_merge_water_levels(levels, chunk)
+	for n in neighbors:
+		if n != null and n != chunk:
+			_merge_water_levels(levels, n)
+	return levels
+
+
+static func _merge_water_levels(levels: Dictionary, chunk: ChunkData) -> void:
+	if chunk == null or not chunk.block_ids.has(VoxelTypes.WATER_ID):
+		return
+	var c := chunk.chunk_coord
+	var d := chunk.dimensions
+	var origin := Vector3i(c.x * d.x, c.y * d.y, c.z * d.z)
+	for local in chunk.sparse_block_states:
+		var state: Dictionary = chunk.sparse_block_states[local]
+		if state.has("level") and chunk.get_block(local) == VoxelTypes.WATER_ID:
+			levels[origin + local] = int(state["level"])
+
+
+## 表面水块（上方为空气）的顶面高度：源 0.875（水面张力下沉），
+## 流动 1..7 级逐级递减成阶梯，8 级（下落柱）满格（理论不到此分支）。
+static func water_surface_height(level: int) -> float:
+	if level <= 0:
+		return 1.0 - WATER_SURFACE_DROP
+	if level >= 8:
+		return 1.0
+	return (8.0 - float(level)) * (1.0 - WATER_SURFACE_DROP) / 8.0
+
+## 把填充缓存中的水方面到 out 的 water_* 数组（面剔除与贪心共用）。
+## 规则：水只在邻格为空气时出面——水-水内部面剔除、水-固体不出面
+##（固体自己的面隔着水可见）。
+## 高度模型（连续水面）：角点高度 = 共享该角点的 2x2 四格中所有
+## 水格顶高的最大值。相邻水面因此在共享边上角点同高 -> 顶面成为
+## 连续折面（斜坡衔接而非一格一层的台阶断崖），侧面顶边随角点
+## 倾斜成梯形，级别差造成的竖直缝隙由 max 天然封住。
+## levels_world 来自 collect_water_levels_world（世界坐标 -> level，
+## 含邻区块；缺省 = 源）。origin 为本区块世界原点。未加 UV（纯色材质）。
+static func append_water_faces(
+		padded: PackedInt32Array, ps: int, out: Dictionary,
+		levels_world: Dictionary = {}, origin: Vector3i = Vector3i.ZERO
+) -> void:
+	var stride_y := ps
+	var stride_z := ps * ps
+	var neighbor_offsets := PackedInt32Array([
+		1, -1, stride_y, -stride_y, stride_z, -stride_z,
+	])
+	# 两个通道：顶/底面（双面材质，潜水视角可见水面）与四侧
+	#（背面剔除材质，防下落水柱远侧背面穿透叠加）
+	var vertices: PackedVector3Array = out.get("water_vertices", PackedVector3Array())
+	var normals: PackedVector3Array = out.get("water_normals", PackedVector3Array())
+	var indices: PackedInt32Array = out.get("water_indices", PackedInt32Array())
+	var colors: PackedColorArray = out.get("water_colors", PackedColorArray())
+	var side_vertices: PackedVector3Array = out.get(
+			"water_side_vertices", PackedVector3Array())
+	var side_normals: PackedVector3Array = out.get(
+			"water_side_normals", PackedVector3Array())
+	var side_indices: PackedInt32Array = out.get(
+			"water_side_indices", PackedInt32Array())
+	var side_colors: PackedColorArray = out.get(
+			"water_side_colors", PackedColorArray())
+	var size := ps - 2
+	for z in size:
+		for y in size:
+			for x in size:
+				var pidx := (z + 1) * stride_z + (y + 1) * stride_y + (x + 1)
+				if padded[pidx] != VoxelTypes.WATER_ID:
+					continue
+				for f in FACES.size():
+					var face: Dictionary = FACES[f]
+					if padded[pidx + neighbor_offsets[f]] != VoxelTypes.AIR_ID:
+						continue
+					var normal: Vector3 = face["normal"]
+					var is_side: bool = normal.y == 0
+					var corners: Array = face["corners"]
+					var base: int = (side_vertices.size()
+							if is_side else vertices.size())
+					for c in 4:
+						var corner: Vector3 = corners[c]
+						var vy := corner.y
+						if corner.y == 1.0:
+							vy = _corner_water_height(padded, ps, x, y, z,
+									x + int(corner.x), z + int(corner.z),
+									levels_world, origin)
+						var v := Vector3(x + corner.x, y + vy, z + corner.z)
+						# 角点衰减（角点 2x2 四格的固体性直接决定）——
+						# 数据全在单圈 padded 内：跨区块边界的角点两侧
+						# 区块算出同值（曾用格级场平均，两侧参与的格集
+						# 不同 -> 区块边界直线裂缝）
+						var fade := _corner_shore_fade(padded, ps,
+								x + int(corner.x), y, z + int(corner.z))
+						var fade_color := Color(fade, 0.0, 0.0)
+						if is_side:
+							side_vertices.append(v)
+							side_normals.append(normal)
+							side_colors.append(fade_color)
+						else:
+							vertices.append(v)
+							normals.append(normal)
+							colors.append(fade_color)
+					var tri := PackedInt32Array([
+						base, base + 2, base + 1,
+						base, base + 3, base + 2,
+					])
+					if is_side:
+						side_indices.append_array(tri)
+					else:
+						indices.append_array(tri)
+	if indices.size() > 0:
+		out["water_vertices"] = vertices
+		out["water_normals"] = normals
+		out["water_indices"] = indices
+		out["water_colors"] = colors
+	if side_indices.size() > 0:
+		out["water_side_vertices"] = side_vertices
+		out["water_side_normals"] = side_normals
+		out["water_side_indices"] = side_indices
+		out["water_side_colors"] = side_colors
+
+
+## 角点 (cx, cz)（y 层）的岸距衰减：角点自身 2x2 四格（同层与
+## y+1 层）中的固体格数直接决定——任何紧邻固体 -> 强衰减。
+## 关键性质：只依赖单圈 padded 内的数据，跨区块边界的角点在两侧
+## 区块的 padded 里数据相同 -> 算出同值 -> 波浪位移一致不裂缝。
+static func _corner_shore_fade(
+		padded: PackedInt32Array, ps: int, cx: int, cy: int, cz: int
+) -> float:
+	var stride_y := ps
+	var stride_z := ps * ps
+	var solid := 0
+	for layer in [0, 1]:
+		for gx in [cx - 1, cx]:
+			for gz in [cz - 1, cz]:
+				var nid: int = padded[(gz + 1) * stride_z
+						+ (cy + 1 + layer) * stride_y + (gx + 1)]
+				if nid != VoxelTypes.AIR_ID and nid != VoxelTypes.WATER_ID:
+					solid += 1
+	return 1.0 - clampf(float(solid) * 0.5, 0.0, 0.85)
+
+
+## 角点 (cx, cz)（格坐标，取 x 或 x+1 / z 或 z+1）的水面高度：
+## 共享该角点的 2x2 四格（cx-1..cx, cz-1..cz，同一 y 层）中所有水格
+## 顶高的最大值。水格顶高：上方是水 -> 满格 1.0（柱体内部）；
+## 否则按级别 water_surface_height（levels_world 缺省 = 源）。
+## 非水格贡献 0（角点朝岸时水面自然降到自身高度）。
+static func _corner_water_height(
+		padded: PackedInt32Array, ps: int, x: int, y: int, z: int,
+		cx: int, cz: int, levels_world: Dictionary, origin: Vector3i
+) -> float:
+	var stride_y := ps
+	var stride_z := ps * ps
+	var best := 0.0
+	for gx in [cx - 1, cx]:
+		for gz in [cz - 1, cz]:
+			var p: int = (gz + 1) * stride_z + (y + 1) * stride_y + (gx + 1)
+			if padded[p] != VoxelTypes.WATER_ID:
+				continue
+			var h := 1.0
+			if padded[p + stride_y] != VoxelTypes.WATER_ID:
+				var lvl: int = levels_world.get(origin + Vector3i(gx, y, gz), 0)
+				h = water_surface_height(lvl)
+			if h > best:
+				best = h
+	return best
+
+
+## ---- 枝干几何（动态树，参考 Dynamic Trees 的 radius 语义）----
+
+## 枝干按 radius 状态（1-8，1 格 = 16 半径单位）出几何：
+## - radius 1-2：十字交叉面片（植物式细枝，全高，宽 = radius*2/16）；
+## - radius 3-8：方形柱（宽 = radius*2/16 居中），四侧 + 顶/底。## 渐缩方管：从中心（截面 r0）沿 dir 到格边（截面 r1），## 盒面：复用 opaque 的 FACES 角点表（单位盒角 0/1 映射到 mn/mx），

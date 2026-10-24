@@ -5,6 +5,10 @@
 class_name BlockMining
 extends RefCounted
 
+## 树系统回调（main 注入：BRANCH 占位被挖时通知 TreeManager）。
+## 静态变量由 main.gd 赋值（RefCounted 无 export）。
+static var tree_callback: Callable
+
 ## 工具等级不满足 requires_tool.min_tier 时的减速倍率与掉落禁止。
 const WRONG_TOOL_PENALTY := 4.0
 
@@ -71,6 +75,8 @@ static func mine(
 	var block_id := world.get_block(block_pos)
 	if not can_mine(block_id, world.registry):
 		return []
+	# 结构化树：BRANCH 的 set_block AIR 会经 block_changed 信号
+	# 驱动 TreeManager 砍伐管线（不再用 static var 回调——失效过）
 	if not world.set_block(block_pos, VoxelTypes.AIR_ID):
 		return []
 	if not allow_drops:

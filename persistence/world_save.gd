@@ -105,7 +105,11 @@ static func _remove_tree(path: String) -> void:
 
 # ---- 元数据 ----
 
-func save_meta(world: VoxelWorld, player_state: Dictionary) -> bool:
+## extra 为附加世界状态（如掉落实体 {"drops": [...]}），键不得与
+## 保留键（format_version/world_seed/...）冲突，冲突键忽略并告警。
+func save_meta(
+		world: VoxelWorld, player_state: Dictionary, extra := {}
+) -> bool:
 	if not ensure_dirs():
 		return false
 	var meta := {
@@ -119,6 +123,11 @@ func save_meta(world: VoxelWorld, player_state: Dictionary) -> bool:
 		"player_state": player_state,
 		"saved_at": Time.get_datetime_string_from_system(),
 	}
+	for key in extra:
+		if meta.has(key):
+			push_warning("元数据扩展键 %s 与保留键冲突，已忽略" % key)
+		else:
+			meta[key] = extra[key]
 	var text := JSON.stringify(meta, "\t")
 	var verify := func(path: String) -> bool: return _verify_meta_file(path)
 	var ok := _atomic_write(meta_path(), text.to_utf8_buffer(), verify)

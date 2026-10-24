@@ -131,6 +131,12 @@ func run() -> void:
 	var total_area := 0
 	var total_quads := 0
 	for coord in real_world.chunks:
+		# 枝干细面（十字/窄柱）面积不等于单位面，面积等价只对
+		# 标准方块区块成立——含枝区块跳过（两种网格器对它都回退
+		# 同一 naive 路径，等价性由路径共享保证）
+		var ch: ChunkData = real_world.get_chunk(coord)
+		if ch != null and (ch.block_ids.has(VoxelTypes.BRANCH_ID) 				or ch.block_ids.has(VoxelTypes.LEAVES_ID)):
+			continue
 		var n := _mesh(real_world, coord, false)
 		var g := _mesh(real_world, coord, true)
 		total_naive += n["indices"].size() / 6

@@ -102,6 +102,23 @@ func remove_item(item_id: int, count: int) -> int:
 	return count - remaining
 
 
+## 是否还装得下 count 个该物品（已有非满堆的空隙 + 空格容量）。
+## 掉落实体用它预判磁吸/拾取资格，避免满包时物品贴着玩家打转。
+func can_fit(item_id: int, count := 1) -> bool:
+	if item_id < 0 or count <= 0:
+		return false
+	var max_stack := _registry.max_stack(item_id)
+	var space := 0
+	for i in slots.size():
+		if is_empty(i):
+			space += max_stack
+		elif item_id_at(i) == item_id:
+			space += max_stack - count_at(i)
+		if space >= count:
+			return true
+	return false
+
+
 ## 全背包同类物品总数。
 func count_of(item_id: int) -> int:
 	var total := 0

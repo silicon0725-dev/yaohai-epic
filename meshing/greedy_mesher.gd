@@ -23,9 +23,11 @@ static func build_mesh_arrays(
 	# C# 原生路径（阶段 E）：可用时优先，不可用自动回退 GDScript。
 	# A/B 基准（192 区块，本机 2 核）：62.2 → 25.9 ms/区块，C# 胜 2.4×，
 	# 算法足够重，收益盖过跨语言装箱开销（面剔除则相反，走 GDScript）。
-	var native_result := NativeMeshBridge.build(true, registry, chunk, neighbors)
-	if not native_result.is_empty():
-		return native_result
+	# C# 实现不认识水（v4）：含水区块回退 GD 路径补水面通道
+	if not chunk.block_ids.has(VoxelTypes.WATER_ID):
+		var native_result := NativeMeshBridge.build(true, registry, chunk, neighbors)
+		if not native_result.is_empty():
+			return native_result
 	return _build_gd(registry, chunk, neighbors)
 
 
@@ -76,6 +78,10 @@ static func _build_gd(
 					var a: int = padded[idx_a]
 					var b: int = padded[idx_b]
 					var encoded := 0
+					# 水不进不透明贪心网格（独立半透明表面，见文末水通道）
+					if a == VoxelTypes.WATER_ID or b == VoxelTypes.WATER_ID:
+						mask[u + v * s] = 0
+						continue
 					if a_real and solid_by_id[a] == 1 and occludes_by_id[b] == 0:
 						# a 的 +axis 面（状态感知贴图，§4.3）
 						var local_a := Vector3i.ZERO
@@ -128,7 +134,7 @@ static func _build_gd(
 					_emit_quad(axis, positive, boundary, u0, v0, u1, v1,
 							tile_index, vertices, normals, uvs, uv2s, indices)
 					u0 = u1
-	return {
+	var result := {
 		"vertices": vertices,
 		"normals": normals,
 		"uvs": uvs,
@@ -136,6 +142,13 @@ static func _build_gd(
 		"indices": indices,
 		"quads": quads,
 	}
+	# 水走独立半透明表面（与面剔除同一条水通道，不参与贪心合并）
+	var wc := chunk.chunk_coord
+	var wd := chunk.dimensions
+	ChunkMesher.append_water_faces(padded, ps, result,
+			ChunkMesher.collect_water_levels_world(chunk, neighbors),
+			Vector3i(wc.x * wd.x, wc.y * wd.y, wc.z * wd.z))
+	return result
 
 
 ## padded 一维布局：x + ps*y + ps*ps*z。

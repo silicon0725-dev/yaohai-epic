@@ -17,7 +17,8 @@ static func place(
 ) -> bool:
 	if block_id == VoxelTypes.AIR_ID:
 		return false
-	if world.get_block(target_pos) != VoxelTypes.AIR_ID:
+	# 水视同空气：可以往水里放方块（替换水）
+	if world.get_block(target_pos) != VoxelTypes.AIR_ID 			and world.get_block(target_pos) != VoxelTypes.WATER_ID:
 		return false
 	var block_aabb := AABB(Vector3(target_pos), Vector3.ONE)
 	# 边界相接也算重叠：站在方块上时不允许往脚下格放置

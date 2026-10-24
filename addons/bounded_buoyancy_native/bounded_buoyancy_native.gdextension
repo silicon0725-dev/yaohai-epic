@@ -1,0 +1,9 @@
+[configuration]
+
+entry_symbol = "bounded_buoyancy_library_init"
+compatibility_minimum = "4.4"
+
+[libraries]
+
+linux.x86_64 = "res://addons/bounded_buoyancy_native/bin/libbounded_buoyancy.linux.template_release.x86_64.so"
+windows.x86_64 = "res://addons/bounded_buoyancy_native/bin/libbounded_buoyancy.windows.template_release.x86_64.dll"

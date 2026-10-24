@@ -1,0 +1,18 @@
+{
+  "name": "dev-yaohai-epic-7b4a0ffd",
+  "plugins": [
+    {
+      "name": "blockbench-mcp",
+      "source": "./blockbench-mcp",
+      "version": "0.1.0",
+      "description": "AI 建模插件：内嵌 headless Blockbench MCP server，创建/编辑/校验/渲染 .bbmodel 模型并导出 Bedrock/Java/glTF",
+      "displayName": "Blockbench MCP 建模",
+      "displayName_i18n": {
+        "zh-CN": "Blockbench MCP 建模"
+      },
+      "description_i18n": {
+        "zh-CN": "AI 直接创建/编辑/校验/渲染 Blockbench 模型，导出 Bedrock/Java/glTF"
+      }
+    }
+  ]
+}

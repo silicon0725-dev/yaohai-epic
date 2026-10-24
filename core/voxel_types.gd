@@ -24,11 +24,17 @@ const SANDSTONE_ID := 10
 const GRAVEL_ID := 11
 const COAL_ORE_ID := 12
 const IRON_ORE_ID := 13
+const WATER_ID := 14
+const BRANCH_ID := 15
+const LEAVES_ID := 16
 
 
 ## 构建默认注册表。textures 引用的是图集 tile 名称，
 ## 由 presentation/texture_atlas_loader.gd 解析到图集网格位置，
 ## 材质资源因此可以整体替换而不影响方块身份（§2.3）。
+## 动态树（v6，参考 Dynamic Trees）：枝干按 radius 状态渲染
+##（1-2 十字面片 / 3+ 方形柱，无碰撞不遮挡）；树叶不遮挡邻居
+##（叶团内部面保留，避免整团被剔除成空壳）。
 static func build_default_registry() -> VoxelRegistry:
 	var registry := VoxelRegistry.new()
 	registry.register_block({
@@ -148,5 +154,32 @@ static func build_default_registry() -> VoxelRegistry:
 		"occludes_neighbors": true,
 		"hardness": 9.0,
 		"requires_tool": {"class": "pickaxe", "min_tier": 2},
+	})
+	# 水（v4 地形）：不可破坏（v1 无桶，无法收集/放置）、不遮挡、
+	# 不参与碰撞；render_type 专用类别 "water"——网格器把它发到
+	# 独立的半透明表面（§6.5：透明材质与不透明网格不混在第一版）
+	registry.register_block({
+		"id": "core:water",
+		"render_type": "water",
+		"textures": {},
+		"collision": false,
+		"occludes_neighbors": false,
+		"hardness": -1.0,
+	})
+	registry.register_block({
+		"id": "core:branch",
+		"render_type": "branch",
+		"textures": {"side": "log_side", "top": "log_top", "bottom": "log_top"},
+		"collision": false,
+		"occludes_neighbors": false,
+		"hardness": 1.0,
+	})
+	registry.register_block({
+		"id": "core:leaves",
+		"render_type": "opaque",
+		"textures": {"top": "leaves", "side": "leaves", "bottom": "leaves"},
+		"collision": true,
+		"occludes_neighbors": false,
+		"hardness": 0.3,
 	})
 	return registry

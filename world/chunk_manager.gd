@@ -46,6 +46,14 @@ var renderer: ChunkRenderer
 var save_system: WorldSave
 ## 玩家状态提供者（返回可 JSON 化的字典），保存元数据时调用。
 var player_state_provider: Callable
+## 附加世界状态提供者（如掉落实体 get_save_bundle）。返回可 JSON 化
+## 字典，键不得与元数据保留键冲突（冲突由 WorldSave 拦截）。
+var extra_meta_provider: Callable
+
+## 树系统生命周期钩子（可空 Callable，chunk ACTIVE/卸载时通知——
+## 引用计数由 TreeManager 内部维护，ChunkManager 不关心语义）
+var on_chunk_active_cb: Callable
+var on_chunk_unloaded_cb: Callable
 
 ## 跟踪的焦点（玩家）。取其位置计算视距中心，取其相机朝向做优先级偏置。
 var focus: Node3D
@@ -108,10 +116,21 @@ func save_all(player_state: Dictionary) -> int:
 		var chunk: ChunkData = world.chunks[coord]
 		if chunk.save_needed and save_system.save_chunk(chunk):
 			saved += 1
-	var meta_ok := save_system.save_meta(world, player_state)
+	var meta_ok := save_system.save_meta(
+			world, player_state, _current_extra_state())
 	print("存档：写入 %d 个区块，元数据 %s" % [
 		saved, "成功" if meta_ok else "失败"])
 	return saved
+
+
+func _current_extra_state() -> Dictionary:
+	if not extra_meta_provider.is_valid():
+		return {}
+	var target = extra_meta_provider.get_object()
+	if target == null or not is_instance_valid(target):
+		return {}
+	var result = extra_meta_provider.call()
+	return result if result is Dictionary else {}
 
 
 func _current_player_state() -> Dictionary:
@@ -172,7 +191,7 @@ func load_column_now(column: Vector2i) -> void:
 		else:
 			arrays = ChunkMesher.build_mesh_arrays(
 					registry, chunk, world.collect_neighbors(coord))
-		renderer.apply_mesh(coord, arrays)
+		renderer.apply_mesh(coord, arrays, chunk.collision_dirty)
 		chunk.mesh_dirty = false
 		chunk.collision_dirty = false
 		chunk.state = ChunkState.State.ACTIVE
@@ -386,10 +405,14 @@ func _commit_mesh(job: Dictionary) -> bool:
 			# 兜底：丢弃即重新标脏，保证任何漏标路径都不会卡死/漏重建
 			chunk.mesh_dirty = true
 			return false
-	renderer.apply_mesh(coord, mesh_arrays)
+	# 碰撞是否需要重建：纯水位变化（affects_collision=false）只标了
+	# mesh_dirty，提交时跳过碰撞形状重建（水无碰撞体）
+	renderer.apply_mesh(coord, mesh_arrays, chunk.collision_dirty)
 	chunk.mesh_dirty = false
 	chunk.collision_dirty = false
 	chunk.state = ChunkState.State.ACTIVE
+	if on_chunk_active_cb.is_valid():
+		on_chunk_active_cb.call(coord)
 	return true
 
 
@@ -418,6 +441,8 @@ func _restore_dormant(coord: Vector3i) -> ChunkData:
 
 
 func _unload_chunk(coord: Vector3i) -> void:
+	if on_chunk_unloaded_cb.is_valid():
+		on_chunk_unloaded_cb.call(coord)
 	# 在途任务的结果会在提交时因"不再需要/区块不存在"被丢弃
 	renderer.remove_chunk(coord)
 	var chunk: ChunkData = world.get_chunk(coord)

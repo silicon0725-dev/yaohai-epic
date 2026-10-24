@@ -16,6 +16,8 @@ const EXCEPTIONS := {
 	"core:stone": [["core:cobblestone", 1]],
 	"core:coal_ore": [["core:coal", 1]],
 	"core:bedrock": [],
+	"core:branch": [["core:stick", 1]],   # 细枝掉木棍（动态树）
+	"core:leaves": [],                    # 树叶无掉落（v1 无树苗物品）
 }
 
 

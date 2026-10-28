@@ -28,6 +28,7 @@ var _trees := {}
 var _falling := {}
 ## 砍伐事件流（存档）：按发生顺序
 var _cut_events: Array = []
+const MAX_CUT_EVENTS := 256
 ## 掉落结算回调（main 注入：spawn_drop）
 var drop_spawner: Callable
 
@@ -249,6 +250,11 @@ func on_branch_broken(cell: Vector3i) -> void:
 		return
 	tree.split_branch_at_cell(cell)
 	tree.record_cut(cell)
+	# 存档膨胀防护：只保留最近 MAX_CUT_EVENTS 条（旧事件丢失仅
+	# 表现为已砍树在远古区域重放长回——可接受；曾无限增长整体写入
+	# world.json，审查发现）
+	if _cut_events.size() >= MAX_CUT_EVENTS:
+		_cut_events = _cut_events.slice(_cut_events.size() - MAX_CUT_EVENTS + 1)
 	_cut_events.append({
 		"op": "cut",
 		"cell": [cell.x, cell.y, cell.z],
@@ -501,7 +507,9 @@ func _process(delta: float) -> void:
 			info["settled"] = 0.0
 		if float(info["settled"]) >= FALL_SETTLE_TIME \
 				or float(info["timer"]) >= FALL_TIMEOUT:
-			_settle_drop(int(info["cells"]))
+			# 结算位置 = 倒伏刚体当前位置（曾漏传 near，掉落物全被
+			# 传送到世界原点 (0,0.5,0)——实机审查发现）
+			_settle_drop(int(info["cells"]), body.global_position)
 			body.queue_free()
 			_falling.erase(body)
 

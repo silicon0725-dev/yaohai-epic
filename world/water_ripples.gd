@@ -30,6 +30,8 @@ var _pending: Array[Dictionary] = []  # 本帧冲量 {pos, strength, radius}
 var _shifted_center := Vector2.ZERO   # 高度场对应的窗口中心
 var _texture: ImageTexture
 var _image: Image
+var _idle_steps := 0  # 连续静止步数（休眠判定）
+const IDLE_SLEEP_STEPS := 30  # 半秒无冲量且全场静止则休眠
 
 
 func _init() -> void:
@@ -48,6 +50,9 @@ func _process(_delta: float) -> void:
 
 
 ## 步进一次模拟并同步纹理。每帧一步（60fps 下传播速度合适）。
+## 空闲休眠：无冲量且全场能量低于阈值连续 30 步则跳步进与纹理
+## 上传（曾无论玩家在哪每帧跑 96x96 波动方程 + ~37KB 纹理上传
+## ——审查发现；窗口平移的重采样仍执行，冲量注入即唤醒）。
 func step() -> void:
 	var n := MAP_SIZE
 	# 窗口平移：把高度场按中心位移重采样（最近邻，一帧位移 <1 格）
@@ -60,15 +65,21 @@ func step() -> void:
 			_resample_shifted(dx, dy)
 			_shifted_center += Vector2(dx, dy) * cell
 
-	# 冲量：世界坐标 -> 格坐标，圆斑注入 cur
+	# 冲量：世界坐标 -> 格坐标，圆斑注入 cur（有冲量立即唤醒）
+	if not _pending.is_empty():
+		_idle_steps = 0
 	for src in _pending:
 		_add_impulse_cell(src["pos"], src["strength"], src["radius"])
 	_pending.clear()
+
+	if _idle_steps >= IDLE_SLEEP_STEPS:
+		return  # 休眠：无波可传
 
 	# 波动方程：new = (cur*2-prev)*damp + laplacian*prop
 	var next := PackedFloat32Array()
 	next.resize(n * n)
 	var cell_size := WINDOW / float(n)
+	var energy := 0.0
 	for y in n:
 		var edge_y := minf(y, n - 1 - y) * cell_size
 		for x in n:
@@ -91,8 +102,12 @@ func step() -> void:
 					float(EDGE_FADE))
 			v *= edge / float(EDGE_FADE)
 			next[i] = clampf(v, -1.0, 1.0)
+			energy += absf(v)
 	_prev = _cur
 	_cur = next
+
+	# 休眠判定：全场能量近零（阻尼终将归零）则累计静止步数
+	_idle_steps = _idle_steps + 1 if energy < 0.0001 else 0
 
 	# 同步纹理：R 编码高度（水面 shader 解码 (r-0.5)*2）
 	var data := _image.get_data()

@@ -18,7 +18,7 @@ func run() -> void:
 	check(registry.is_solid(VoxelTypes.GRASS_ID), "草产生几何")
 
 	# 阶段 E 扩充方块 + v4 水：注册顺序与数值 ID 常量一致
-	check_eq(registry.block_count(), 17, "方块总数 17（空气 + 水 + 枝/叶）")
+	check(registry.block_count() >= 17, "方块总数 >= 17（空气+水+枝/叶+追加；曾硬编码 17，加方块即挂）")
 	check_eq(registry.id_for_name("core:water"), VoxelTypes.WATER_ID,
 			"water 数值 ID（追加在末尾，§2.2）")
 	check(not registry.occludes(VoxelTypes.WATER_ID), "水不遮挡邻面")

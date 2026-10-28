@@ -46,6 +46,18 @@ static func _block_id_table() -> PackedInt32Array:
 	])
 
 
+## 主线程预热（main 接线期调用）：完成可用性探测 + 建好当前种子的
+## NativeTerrain——否则生成 worker 首调时并发写 _native_by_seed/
+## _factory/_checked 静态字典（Godot Dictionary 非线程安全，启动
+## 突发期多 worker 同刻首调可致哈希表损坏——审查发现）
+static func prewarm(world_seed: int, world_height_blocks: int) -> void:
+	if not available():
+		return
+	if not _native_by_seed.has(world_seed):
+		_native_by_seed[world_seed] = _factory.CreateTerrain(
+				world_seed, world_height_blocks, _block_id_table())
+
+
 ## 生成区块（C#）。返回 { ids, heights, sandy, rocky }；空字典 = 不可用。
 ## profiles 覆盖本区块 16×16 列；±TREE_REACH 界外列由调用方回退
 ## column_profile（每树 1-2 次，成本低）。

@@ -6,14 +6,7 @@ const TMP_ROOT := "user://tmp_state_test"
 
 
 func _make_world() -> VoxelWorld:
-	var world_config := WorldConfig.new()
-	world_config.chunks_y = 1
-	world_config.chunk_size = 4
-	var voxel_world := VoxelWorld.new(
-			world_config, VoxelTypes.build_default_registry())
-	voxel_world.add_chunk(ChunkData.new(
-			Vector3i.ZERO, Vector3i(4, 4, 4), 2))
-	return voxel_world
+	return make_world(4, [Vector3i.ZERO])
 
 
 func run() -> void:

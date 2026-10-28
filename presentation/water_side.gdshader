@@ -106,7 +106,7 @@ float ripple_height(vec2 p) {
 void vertex() {
 	world_pos = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
 	shore_fade = COLOR.r;
-	// 位移钳制 [-0.08, +0.22]：上涌为主的涌浪——波谷不深陷（防浅滩
+	// 位移钳制 [-0.16, +0.56]（与 water_surface 一致）：上涌为主的涌浪——波谷不深陷（防浅滩
 	// 露底），波峰受钳与岸衰减共同约束
 	float displacement = (wave_field(world_pos.xz, u_time * wave_speed)
 			* wave_amplitude * storm_scale
@@ -173,7 +173,12 @@ void fragment() {
 			+ (water_color.rgb * 1.4 + 0.08) * tex_flow.x * tex_strength
 			+ ripple_strength * ripple * 0.35;
 	albedo = mix(albedo, vec3(0.88), foam);
+	// 不做平面反射：侧面是竖直面，平面反射公式（绕 y≈海平面的镜像）对它
+	// 无几何意义——SCREEN_UV 采样到的是错乱 RT 内容（凹处水坑侧壁映出
+	// "视野外的树"实机踩坑）。竖直面的镜面反射本就无平面 RT 可采，水色
+	// +白沫+波光足够
 	ALBEDO = albedo;
 	EMISSION = vec3(glint * 0.8);  // 波光耀斑不受场景光照二次调制
-	ALPHA = min(water_color.a + fresnel * 0.25 + foam * 0.7, 0.95);
+	// 掠射不再增不透明度（见 water_surface.gdshader 同款注释）
+	ALPHA = clamp(water_color.a + foam * 0.6, 0.0, 0.95);
 }

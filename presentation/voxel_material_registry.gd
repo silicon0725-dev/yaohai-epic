@@ -13,8 +13,7 @@ func _init(atlas_texture: Texture2D) -> void:
 	# 树叶镂空（cutout）：alpha 裁切让贴图的透明孔洞成真洞——叶簇
 	# 观感；其余全不透明贴图不受 scissor 影响
 	var cutout := _create_atlas_material(atlas_texture)
-	cutout.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA_SCISSOR
-	cutout.alpha_scissor_threshold = 0.5
+	cutout.set_shader_parameter("cutout_mode", true)
 	_materials["cutout"] = cutout
 
 
@@ -25,13 +24,13 @@ func material_for(render_type: String) -> Material:
 	return _materials["opaque"]
 
 
-func _create_atlas_material(atlas: Texture2D) -> StandardMaterial3D:
-	var material := StandardMaterial3D.new()
-	material.albedo_texture = atlas
-	# Nearest 过滤 + 无 mipmap：像素风外观，同时避免图集渗色（§7.1）。
-	material.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST
-	material.roughness = 1.0
-	material.metallic = 0.0
+## 地形材质：terrain_surface.gdshader（等价 StandardMaterial 的图集直采
+## + Nearest + 顶点色，另带反射 RT 的水下片元裁剪通道——StandardMaterial
+## 无法注入 discard 逻辑，见 shader 头注释）。
+func _create_atlas_material(atlas: Texture2D) -> ShaderMaterial:
+	var material := ShaderMaterial.new()
+	material.shader = load("res://presentation/terrain_surface.gdshader")
+	material.set_shader_parameter("atlas", atlas)
 	return material
 
 
@@ -46,12 +45,25 @@ func _create_atlas_material(atlas: Texture2D) -> StandardMaterial3D:
 func create_water_material() -> ShaderMaterial:
 	var material := ShaderMaterial.new()
 	material.shader = load("res://presentation/water_surface.gdshader")
-	var tex_image := Image.load_from_file(
-			"res://assets/textures/water_still.png")
-	tex_image.generate_mipmaps()  # 远处贴图颗粒 <1px，无 mipmap 会混叠闪烁
-	material.set_shader_parameter("water_tex",
-			ImageTexture.create_from_image(tex_image))
+	material.set_shader_parameter("water_tex", _water_still_texture())
 	return material
+
+
+## 静水贴图：优先 ResourceLoader（导出包里 .png 以 .import 的
+## .ctex 打包，Image.load_from_file 在导出环境对 res:// 返回 null
+## → 空引用崩溃——审查发现）；加载失败回退程序化噪点（headless
+## 稳健），shader 只读 RGB 亮度流场，回退不破功能。
+static func _water_still_texture() -> Texture2D:
+	var tex := load("res://assets/textures/water_still.png") as Texture2D
+	if tex != null:
+		return tex
+	var img := Image.create(64, 64, false, Image.FORMAT_RGBA8)
+	for y in 64:
+		for x in 64:
+			var v := 0.5 + 0.25 * sin(x * 0.7 + y * 0.3) \
+					* cos(y * 0.5 - x * 0.2)
+			img.set_pixel(x, y, Color(v, v, v, 1.0))
+	return ImageTexture.create_from_image(img)
 
 
 ## 水侧面材质：同波纹但背面剔除（water_side.gdshader）——下落水柱

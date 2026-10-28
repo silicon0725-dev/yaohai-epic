@@ -21,6 +21,7 @@ node_modules/
 
 # 调试运行日志（脚本本身入库，输出不入）
 debug/*.log
+debug/archive/*.log
 
 # 第三方专有许可素材（禁止再分发，同 conquest_local 先例）
 EmacEArtStylizedGrass/

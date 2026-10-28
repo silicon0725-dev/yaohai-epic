@@ -5,10 +5,6 @@
 class_name BlockMining
 extends RefCounted
 
-## 树系统回调（main 注入：BRANCH 占位被挖时通知 TreeManager）。
-## 静态变量由 main.gd 赋值（RefCounted 无 export）。
-static var tree_callback: Callable
-
 ## 工具等级不满足 requires_tool.min_tier 时的减速倍率与掉落禁止。
 const WRONG_TOOL_PENALTY := 4.0
 

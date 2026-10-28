@@ -91,6 +91,12 @@ static func generate_atlas_texture() -> ImageTexture:
 	return ImageTexture.create_from_image(generate_atlas_image())
 
 
+## 由已生成的图集 Image 建纹理（调用方已持有 image 时用这个，
+## 避免整个图集重复生成一遍——曾 image/texture 各生成一次）
+static func texture_from_image(image: Image) -> ImageTexture:
+	return ImageTexture.create_from_image(image)
+
+
 static func _packed_image(tile_name: String) -> Image:
 	var path := TEXTURE_PACK_DIR + "/" + tile_name + ".png"
 	if not ResourceLoader.exists(path) and not FileAccess.file_exists(path):

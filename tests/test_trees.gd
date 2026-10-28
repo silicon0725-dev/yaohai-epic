@@ -25,6 +25,40 @@ func run() -> void:
 	_test_leaf_crown()
 	_test_crown_shadow()
 	_test_leaf_clear_coverage()
+	_test_falling_settle_drop_position()
+
+
+## 倒伏结算掉落物落点：结算时用刚体当前位置（曾漏传 near 全部落
+## 世界原点——审查发现）。headless 下直接驱动 _process 到结算。
+func _test_falling_settle_drop_position() -> void:
+	var mgr: Node = TreeManagerScript.new()
+	var registry := VoxelTypes.build_default_registry()
+	mgr.registry = registry
+	# global_position 需在场景树内（真实接线 mgr 始终挂 main 下）。
+	# runner 注入 tree_root（_init 期 get_main_loop 为 null）
+	if tree_root == null:
+		check(false, "tree_root 未注入（runner 需设置 suite.tree_root）")
+		return
+	tree_root.add_child(mgr)
+	var spawned: Array = []
+	mgr.drop_spawner = func(_id: int, _count: int, pos: Vector3) -> void:
+		spawned.append(pos)
+	var body := RigidBody3D.new()
+	body.position = Vector3(37.5, 8.0, -12.5)
+	mgr.add_child(body)
+	mgr._falling[body] = {"cells": 9, "timer": 0.0, "settled": 99.0}
+	var dt := 0.05
+	for i in 200:  # settled 已超阈值，首帧即结算
+		mgr._process(dt)
+	var ok := spawned.size() >= 2  # log + stick
+	check(ok, "倒伏结算生成掉落物（%d 个）" % spawned.size())
+	if ok:
+		check(spawned[0].distance_to(Vector3(37.5, 8.0, -12.5)) < 1.0,
+				"原木掉落在树倒位置（%s）" % spawned[0])
+		check(spawned[0].length() > 10.0,
+				"掉落点不在世界原点（回归：曾传 (0,0.5,0)）")
+	mgr.free()
+
 
 
 ## 确定性：同 seed 同 origin 两次生成结构完全一致。

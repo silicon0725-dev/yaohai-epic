@@ -165,6 +165,18 @@ func _invalidate_affected_meshes(
 		affected.append(chunk_coord + Vector3i(0, 0, -1))
 	if local.z == size - 1:
 		affected.append(chunk_coord + Vector3i(0, 0, 1))
+	# 角点 2x2 采样跨对角区块（水面角点高度/岸衰减、光照平滑）：
+	# x、z 同时贴边时对角块也要标脏（曾漏标——角格挖放后对角区块
+	# 的水面角点错位/裂缝，serial 过期比对同扩全 26 邻）
+	var x_edge := local.x == 0 or local.x == size - 1
+	var z_edge := local.z == 0 or local.z == size - 1
+	if x_edge and z_edge:
+		var dx := 1 if local.x == size - 1 else -1
+		var dz := 1 if local.z == size - 1 else -1
+		affected.append(chunk_coord + Vector3i(dx, 0, dz))
+		if local.y == 0 or local.y == size - 1:
+			var dy := 1 if local.y == size - 1 else -1
+			affected.append(chunk_coord + Vector3i(dx, dy, dz))
 	for coord in affected:
 		var chunk: ChunkData = chunks.get(coord)
 		if chunk != null:

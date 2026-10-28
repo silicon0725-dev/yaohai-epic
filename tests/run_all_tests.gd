@@ -22,18 +22,25 @@ const TEST_CASES := [
 	"res://tests/test_tree_mesh.gd",
 	"res://tests/test_water_flow.gd",
 	"res://tests/test_light_manager.gd",
+	"res://tests/test_voxel_light.gd",
+	"res://tests/test_cave_fog.gd",
+	"res://tests/test_stress_edits.gd",
 	"res://tests/test_native_equivalence.gd",
 	"res://tests/test_native_terrain.gd",
 ]
 
 
-func _init() -> void:
+func _initialize() -> void:
+	# 跑一帧后再执行：_init/_initialize 期 root 未完全就绪，注入的
+	# tree_root 挂不进树（global_position 软报错吞检查——已踩坑）
+	await process_frame
 	var failed_suites := 0
 	var total_checks := 0
 	var total_failures := 0
 	print("=== 体素内核 Stage A 单元测试 ===")
 	for path in TEST_CASES:
 		var suite: VoxelTestCase = load(path).new()
+		suite.tree_root = root
 		suite.run()
 		total_checks += suite.check_count
 		total_failures += suite.failures.size()

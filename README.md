@@ -44,6 +44,9 @@ cd "<本项目目录>"
 
 # 6. 渲染回归检查（需要显示环境；等待流式安定后校验绕序/剔除）
 ~/godot/godot --path . res://debug/render_check.tscn
+# 7. 新增视觉验收场景：用 debug/capture_lib.gd 公共库（隔离启动/
+#    截图/FPS/找水找岸），禁止整文件复制旧场景（capture_shadow2..16
+#    共 16 份副本已归档 debug/archive/，仅保留各族最新一份）
 
 # 7. 流式加载集成检查（headless 可跑：加载/卸载/休眠恢复/修改存活）
 ~/godot/godot --headless --path . res://debug/streaming_check.tscn
@@ -564,14 +567,32 @@ physics/        体素 DDA 射线、区块碰撞构建
 interaction/    方块挖掘（硬度/工具/掉落规则）、方块放置
 items/          物品注册表、槽位背包、掉落表、合成配方、掉落实体（规则+管理器）
 persistence/    ChunkSerializer、WorldSave（原子写）、SaveMigrations
-presentation/   程序化占位图集、材质注册表、区块渲染器（被动应用）
+presentation/   程序化占位图集、材质注册表、区块渲染器（被动应用）、
+                水面镜像反射（water_reflection.gd，从 main 拆出）
 player/         第一人称玩家控制器、准星
 native/         C# NativeMesher（贪心网格原生路径，Variant 批量互转）
-debug/          截图/渲染回归/流式+存档集成检查、世界统计
-scenes/         主场景
-tests/          轻量单元测试 + headless 运行器
+debug/          截图/渲染回归/流式+存档集成检查、世界统计；
+                capture_lib.gd 验收公共库；历史迭代副本在 debug/archive/
+scenes/         主场景（接线层：各系统 setup + 回调注入，表现逻辑在
+                各系统/表现节点内）
+tests/          轻量单元测试 + headless 运行器（基类含 make_world/
+                activate_light 夹具工厂与 tree_root 注入）
 docs/           开发文档
 ```
+
+工程纪律（2026-10 结构审查后成文）：
+- **class_name/preload 双轨**：核心数据/纯逻辑类用 class_name；需要
+  main 接线的系统 Node 一律"无 class_name + 调用方 preload"
+  （headless/未 --import 环境全局类缓存会静默失效——voxel_light/
+  cave_fog/water_reflection/loading_overlay 是范本）。
+- **同一物理量单一来源**：水面高度只用 ChunkMesher.
+  water_surface_height / water_surface_at 推导，禁止手写字面量
+  （反射平面曾两处各写常量低 1 格，三轮实机反馈才定位）。
+- **worker 输入快照化**：跨线程传 Dictionary 前必须在主线程
+  duplicate/预收集（水位表经 chunk_manager 入队时预收集）；
+  PackedArray 依赖 edit_serial 过期比对自愈，不需快照。
+- **验收脚本不复制**：新视觉验收用 debug/capture_lib.gd。
+
 
 ## 决策记录
 

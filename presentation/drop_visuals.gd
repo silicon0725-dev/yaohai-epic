@@ -25,10 +25,14 @@ static var _flat_materials := {}    # item_id -> StandardMaterial3D
 
 
 ## 主场景在图集纹理生成后注入（与 ItemIcons.set_atlas 同时机）。
+## 全部缓存清空（曾漏 _extruded_cache/_flat_materials——场景重启后
+## 残留引用上一会话已释放的图集纹理，审查发现）
 static func configure(atlas_texture: Texture2D) -> void:
 	_atlas_texture = atlas_texture
 	_atlas_material = null
 	_cube_mesh_cache.clear()
+	_extruded_cache.clear()
+	_flat_materials.clear()
 
 
 ## 方块物品的 3D 迷你方块网格（中心在原点）。

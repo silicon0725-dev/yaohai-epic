@@ -35,3 +35,24 @@ func run() -> void:
 					chunk2.get_block(Vector3i(lx, ly, lz)),
 					1 + ((lx + ly + lz) % 4),
 					"索引往返: %d,%d,%d" % [lx, ly, lz])
+
+	# 角格修改标脏对角区块（水面角点 2x2 采样跨对角——曾只标 6 面，
+	# 对角区块水面角点错位/裂缝；审查发现）
+	var blocks := VoxelTypes.build_default_registry()
+	var config := WorldConfig.new()
+	config.chunk_size = 4
+	var world := VoxelWorld.new(config, blocks)
+	for cx in range(-1, 2):
+		for cz in range(-1, 2):
+			world.add_chunk(ChunkData.new(
+					Vector3i(cx, 0, cz), Vector3i(4, 4, 4), 0))
+	# 清全部脏标记后改 (0,0) 角格
+	for coord in world.chunks:
+		world.chunks[coord].mesh_dirty = false
+	world.set_block(Vector3i(0, 1, 0), VoxelTypes.STONE_ID)
+	var diag := world.get_chunk(Vector3i(-1, 0, -1))
+	var face := world.get_chunk(Vector3i(-1, 0, 0))
+	var far := world.get_chunk(Vector3i(1, 0, 1))
+	check(diag != null and diag.mesh_dirty, "角格修改标脏对角区块")
+	check(face != null and face.mesh_dirty, "面邻区块照常标脏")
+	check(far != null and not far.mesh_dirty, "远区块不标脏")

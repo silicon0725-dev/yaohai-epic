@@ -51,3 +51,27 @@ func run() -> void:
 	var center := ChunkManager.priority_score(
 			Vector2i(0, 0), Vector2i.ZERO, Vector2(1, 0), 2.0)
 	check(center < near, "玩家所在列最优先")
+
+	# 同步加载列必须触发激活回调（树引用等；曾漏调——出生列树隐形）
+	var config := WorldConfig.new()
+	config.world_seed = 7
+	config.chunks_y = 1
+	config.chunk_size = 4
+	var registry := VoxelTypes.build_default_registry()
+	var world := VoxelWorld.new(config, registry)
+	var gen := TerrainGenerator.new(config)
+	var renderer := ChunkRenderer.new()
+	renderer.setup(world, null)
+	var manager := ChunkManager.new()
+	if tree_root != null:
+		tree_root.add_child(renderer)
+		tree_root.add_child(manager)
+	manager.setup(world, registry, gen, renderer)
+	var activated: Array = []
+	manager.on_chunk_active_cb = func(coord: Vector3i) -> void:
+		activated.append(coord)
+	manager.load_column_now(Vector2i(1, 1))
+	check(activated.has(Vector3i(1, 0, 1)),
+			"load_column_now 触发激活回调（y=0 层）")
+	manager.free()
+	renderer.free()

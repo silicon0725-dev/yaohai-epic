@@ -142,15 +142,18 @@ func _step_in_water(world: VoxelWorld, delta: float) -> void:
 		# （ocean_waves.gd 与 shader 逐行同式——浮物随波起伏与渲染
 		# 一致）。物品浮到实际水位下方 FLOAT_IMMERSE 处，到位后竖直
 		# 速度刹停稳定贴面（修冒出水面被拉回造成的快速上下震荡）
-		# 波高采样带岸距衰减（与网格器同公式：8 邻固体数 → 衰减，
-		# 贴岸浮物与视觉水面同步变平）
+		# 波高采样带岸距衰减：与网格器角点同拓扑（2x2 XZ × 上下
+		# 2 层的固体数）+ 同公式（shore_fade_value）——两处各写曾
+		# 漂移出 /3.0 vs ×0.5，贴岸浮物与视觉水面起伏不一致（审查发现）
 		var solid_neighbors := 0
-		for d in NEIGHBOR_8:
-			var nid := world.get_block(cell + d)
-			if nid != VoxelTypes.AIR_ID and nid != VoxelTypes.WATER_ID:
-				solid_neighbors += 1
-		var shore_fade := 1.0 - clampf(
-				float(solid_neighbors) / 3.0, 0.0, 0.85)
+		for dx in 2:
+			for dz in 2:
+				for dy in 2:
+					var nid := world.get_block(cell
+							+ Vector3i(dx - 1, dy, dz - 1))
+					if nid != VoxelTypes.AIR_ID and nid != VoxelTypes.WATER_ID:
+						solid_neighbors += 1
+		var shore_fade := ChunkMesher.shore_fade_value(solid_neighbors)
 		var target := WaterFlow.water_surface_at(world, cell) 				+ OceanWavesScript.wave_offset(
 						position.x, position.z,
 						OceanWavesScript.global_time) * shore_fade 				- FLOAT_IMMERSE

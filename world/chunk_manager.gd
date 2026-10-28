@@ -60,6 +60,14 @@ var extra_meta_provider: Callable
 var on_chunk_active_cb: Callable
 var on_chunk_unloaded_cb: Callable
 
+## 体素光照钩子（光照阶段 2，可空 Callable）：
+## - light_init_cb：生成 worker 线程内调用 (chunk, 6面邻块快照)——
+##   本块全量光照计算（只写 chunk 自身）
+## - on_chunk_data_ready_cb：主线程 DATA_READY 提交后调用 (chunk)——
+##   边界光向已加载邻块播出
+var light_init_cb: Callable
+var on_chunk_data_ready_cb: Callable
+
 ## 跟踪的焦点（玩家）。取其位置计算视距中心，取其相机朝向做优先级偏置。
 var focus: Node3D
 
@@ -191,6 +199,15 @@ func load_column_now(column: Vector2i) -> void:
 			chunk.state = ChunkState.State.DATA_READY
 			world.add_chunk(chunk)
 		renderer.register_chunk(coord)
+	# 光照初始化（列内逐块：先入列的就绪块作为后续块的种子来源，
+	# 再统一 on_chunk_ready 做跨块播出；dormant 恢复块光照可能过期，同样重算）
+	for y in world.config.chunks_y:
+		var coord := Vector3i(column.x, y, column.y)
+		var chunk_l: ChunkData = world.get_chunk(coord)
+		if chunk_l != null and light_init_cb.is_valid():
+			light_init_cb.call(chunk_l, _collect_light_neighbors(coord))
+			if on_chunk_data_ready_cb.is_valid():
+				on_chunk_data_ready_cb.call(chunk_l)
 	# 纵向邻居全部就绪后再统一构建网格，避免列内互相触发重建
 	for y in world.config.chunks_y:
 		var coord := Vector3i(column.x, y, column.y)
@@ -208,6 +225,11 @@ func load_column_now(column: Vector2i) -> void:
 		chunk.mesh_dirty = false
 		chunk.collision_dirty = false
 		chunk.state = ChunkState.State.ACTIVE
+	# 激活回调（树引用等）：_commit_mesh 路径在首次提交时调，本同步
+	# 路径曾漏调——出生列树实体不建，区块内树"隐形"直到任意重网格
+	#（审查发现）。树回调内部自带 y==0 过滤
+	if on_chunk_active_cb.is_valid():
+		on_chunk_active_cb.call(Vector3i(column.x, 0, column.y))
 	# 已存在的水平邻居需要用本列的真实边界数据重建
 	for y in world.config.chunks_y:
 		_mark_neighbors_dirty(Vector3i(column.x, y, column.y), true)
@@ -291,9 +313,14 @@ func _update_streaming() -> void:
 				continue
 			all_present = false
 			if _dormant.has(coord):
-				_restore_dormant(coord)
+				var rchunk: ChunkData = _restore_dormant(coord)
 				renderer.register_chunk(coord)
 				_mark_neighbors_dirty(coord)
+				# 休眠期间光照可能过期（增量未达未加载块），恢复即重算
+				if light_init_cb.is_valid():
+					light_init_cb.call(rchunk, _collect_light_neighbors(coord))
+				if on_chunk_data_ready_cb.is_valid():
+					on_chunk_data_ready_cb.call(rchunk)
 			else:
 				# 磁盘存档由生成任务在工作线程内优先读取（见 _generate_job）
 				_enqueue_generation(coord)
@@ -358,11 +385,27 @@ func _poll_jobs() -> void:
 
 
 func _enqueue_generation(coord: Vector3i) -> void:
-	var job := {"coord": coord, "result": null}
+	var job := {
+		"coord": coord,
+		"result": null,
+		# 光照初始化用的 6 面邻块快照（worker 内查 dict 有并发风险）
+		"light_neighbors": _collect_light_neighbors(coord),
+	}
 	var task_id := WorkerThreadPool.add_task(
 			_generate_job.bind(job, coord), false, "chunk_generate")
 	_gen_by_coord[coord] = task_id
 	_gen_jobs[task_id] = job
+
+
+## 6 面已加载邻块引用（顺序 +x,-x,+y,-y,+z,-z，缺失 null）。
+func _collect_light_neighbors(coord: Vector3i) -> Array:
+	var result := []
+	for d in [
+		Vector3i(1, 0, 0), Vector3i(-1, 0, 0), Vector3i(0, 1, 0),
+		Vector3i(0, -1, 0), Vector3i(0, 0, 1), Vector3i(0, 0, -1),
+	]:
+		result.append(world.get_chunk(coord + d))
+	return result
 
 
 func _generate_job(job: Dictionary, coord: Vector3i) -> void:
@@ -373,6 +416,9 @@ func _generate_job(job: Dictionary, coord: Vector3i) -> void:
 		chunk = save_system.load_chunk(coord)
 	if chunk == null:
 		chunk = generator.generate_chunk(coord)
+	# 光照初始化（transient 数组不入库，存档恢复的区块同样全量重算）
+	if light_init_cb.is_valid():
+		light_init_cb.call(chunk, job["light_neighbors"])
 	job["result"] = chunk
 
 
@@ -388,6 +434,8 @@ func _commit_generation(job: Dictionary) -> bool:
 	world.add_chunk(chunk)
 	renderer.register_chunk(coord)
 	_mark_neighbors_dirty(coord)
+	if on_chunk_data_ready_cb.is_valid():
+		on_chunk_data_ready_cb.call(chunk)
 	return true
 
 
@@ -405,7 +453,13 @@ func _enqueue_mesh(coord: Vector3i) -> void:
 		"coord": coord,
 		"neighbors": neighbors,
 		"serials": serials,
+		# 主线程预收集水位表：worker 侧 collect 遍历 sparse_block_states
+		# Dictionary，与主线程水位 tick 的增删并发可致哈希表损坏
+		#（审查发现）；PackedArray 撕裂由 serial 比对自愈不需快照
+		"water_levels": ChunkMesher.collect_water_levels_world(chunk, neighbors),
 		"result": null,
+		# 入队时是否已 ACTIVE（重网格）：激活回调只该首次触发
+		"was_active": chunk.state == ChunkState.State.ACTIVE,
 	}
 	chunk.state = ChunkState.State.MESH_QUEUED
 	# 入队即清脏标记：任务是否过期由上方快照的 edit_serial 判定。
@@ -421,16 +475,15 @@ func _enqueue_mesh(coord: Vector3i) -> void:
 func _mesh_job(job: Dictionary, chunk: ChunkData) -> void:
 	if use_greedy_meshing:
 		job["result"] = GreedyMesher.build_mesh_arrays(
-				registry, chunk, job["neighbors"])
+				registry, chunk, job["neighbors"], job["water_levels"])
 	else:
 		job["result"] = ChunkMesher.build_mesh_arrays(
-				registry, chunk, job["neighbors"])
+				registry, chunk, job["neighbors"], job["water_levels"])
 
 
-## 27 邻域数组中 6 个面邻居的下标（遮挡判定只读单轴偏移的填充格，
-## 对角/棱角邻居的数据不参与面剔除，因此序列号比对只需覆盖面邻居——
-## 与 _mark_neighbors_dirty 的标脏范围精确对齐）。
-const FACE_NEIGHBOR_INDICES := [4, 10, 12, 14, 16, 22]
+## 过期比对覆盖全部 26 邻（曾只查 6 面——水面角点高度/岸衰减与
+## 光照平滑采样都会读对角区块，角格编辑后对角网格曾带旧数据提交）
+const NEIGHBOR_EXPIRE_INDICES: Array[int] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26]
 
 
 func _commit_mesh(job: Dictionary) -> bool:
@@ -447,7 +500,7 @@ func _commit_mesh(job: Dictionary) -> bool:
 	var current := world.collect_neighbors(coord)
 	var serials: Array = job["serials"]
 	var stored_neighbors: Array = job["neighbors"]
-	for i in FACE_NEIGHBOR_INDICES:
+	for i in NEIGHBOR_EXPIRE_INDICES:
 		var stored: ChunkData = stored_neighbors[i]
 		var now: ChunkData = current[i]
 		var stored_serial: int = stored.edit_serial if stored != null else -1
@@ -468,7 +521,9 @@ func _commit_mesh(job: Dictionary) -> bool:
 	chunk.mesh_dirty = false
 	chunk.collision_dirty = false
 	chunk.state = ChunkState.State.ACTIVE
-	if on_chunk_active_cb.is_valid():
+	# 激活回调只在首次进入 ACTIVE 时调（曾每次重网格都调——树 refs
+	# 无限膨胀 + 每次重扫 16x16 列做完整 column_profile，审查发现）
+	if on_chunk_active_cb.is_valid() and not job["was_active"]:
 		on_chunk_active_cb.call(coord)
 	return true
 

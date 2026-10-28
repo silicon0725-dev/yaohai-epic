@@ -9,6 +9,11 @@ var chunk_coord: Vector3i
 var dimensions: Vector3i
 var block_ids: PackedInt32Array
 
+## 体素光照（光照阶段 2）：1 字节/格，高 4bit 天光、低 4bit 方块光
+##（0-15）。transient 派生数据：不入库，加载/生成时由 VoxelLightSystem
+## 重算（WaterFlow _pending 的"派生不持久化"同模式）。
+var light: PackedByteArray
+
 ## 稀疏状态表：局部坐标 -> 状态字典（如 {"axis": "x"}）。
 ## 值必须是可 JSON 化的类型（字符串/数字/布尔），随区块存档持久化。
 var sparse_block_states := {}
@@ -42,6 +47,9 @@ func _init(
 	block_ids = PackedInt32Array()
 	block_ids.resize(dims.x * dims.y * dims.z)
 	block_ids.fill(0)
+	light = PackedByteArray()
+	light.resize(dims.x * dims.y * dims.z)
+	light.fill(0)
 
 
 func volume() -> int:
@@ -83,6 +91,31 @@ func set_block(local: Vector3i, id: int) -> bool:
 ## 调用方（TerrainGenerator）保证局部坐标合法。
 func set_block_raw(local: Vector3i, id: int) -> void:
 	block_ids[local_index(local)] = id
+
+
+# ---- 体素光照读写（0-15；数组 1 字节/格：高 4bit 天光、低 4bit 方块光） ----
+## 越界返回 -1；未经 VoxelLightSystem 初始化的区块全 0（深黑）。
+
+func get_sky_light(local: Vector3i) -> int:
+	if not is_valid_local(local):
+		return -1
+	return light[local_index(local)] >> 4
+
+
+func set_sky_light(local: Vector3i, value: int) -> void:
+	var i := local_index(local)
+	light[i] = (light[i] & 0x0F) | (value << 4)
+
+
+func get_block_light(local: Vector3i) -> int:
+	if not is_valid_local(local):
+		return -1
+	return light[local_index(local)] & 0x0F
+
+
+func set_block_light(local: Vector3i, value: int) -> void:
+	var i := local_index(local)
+	light[i] = (light[i] & 0xF0) | value
 
 
 # ---- 方块状态（朝向、开关等；稀疏存储，随存档持久化） ----

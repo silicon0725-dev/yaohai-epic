@@ -48,6 +48,8 @@ func run() -> void:
 	_test_fall_down()
 	_test_flat_spread()
 	_test_drain_after_source_removed()
+	_test_downgrade_propagates()
+	_test_bottom_layer_spreads()
 	_test_slope_seeking()
 	_test_tank_breach()
 	_test_surface_heights()
@@ -115,6 +117,54 @@ func _test_drain_after_source_removed() -> void:
 	world.set_block(Vector3i(8, 2, 8), VoxelTypes.AIR_ID)
 	_run_ticks(flow, 40)
 	check_eq(_count_water(world), 0, "断供后全部回退为空气（逐层剥落）")
+	flow.free()
+
+
+## 原地降级必须向下传播：构造 1→2→3 梯度链，把源降为不可供给后，
+## 链上格子需经降级波逐个退空。曾因 WATER→WATER 无信号、下游从不
+## 重新评估而残留过期水位（审查发现）
+func _test_downgrade_propagates() -> void:
+	var world := _make_world()
+	var flow := _make_flow(world)
+	# 手工铺 1→2→3 链（+x 方向），源在最左
+	var base := Vector3i(6, 2, 8)
+	world.set_block(base, VoxelTypes.WATER_ID)  # 源（无状态）
+	for i in 3:
+		var p := base + Vector3i(1 + i, 0, 0)
+		world.set_block(p, VoxelTypes.WATER_ID)
+		world.set_block_state(p, "level", i + 1)
+	# 源降为 3 级（不再能供给 1 级邻？——1 级邻的供给判定：邻级别
+	# 严格小于自身。源变 3 后 1 级格无 <1 的邻居，应退化），
+	# 简化验证：源直接变空气，梯度链必须退空
+	world.set_block(base, VoxelTypes.AIR_ID)
+	_run_ticks(flow, 30)
+	var remain := 0
+	for i in 3:
+		if world.get_block(base + Vector3i(1 + i, 0, 0)) == VoxelTypes.WATER_ID:
+			remain += 1
+	check_eq(remain, 0, "梯度链降级波传播到底（曾残留过期水位）")
+	flow.free()
+
+
+## 世界底（y=0）的水：向下写入越界失败不得早退，应继续横向扩散
+## （曾"假成功"早退，y=0 层水永不扩散——审查发现）
+func _test_bottom_layer_spreads() -> void:
+	# 石头平台 y0-1：中心 + 4 水平邻挖到底层，水坐世界底
+	var holes := {
+		Vector3i(8, 0, 8): true, Vector3i(9, 0, 8): true,
+		Vector3i(7, 0, 8): true, Vector3i(8, 0, 9): true,
+		Vector3i(8, 0, 7): true,
+	}
+	var world := _make_world(holes)
+	var flow := _make_flow(world)
+	world.set_block(Vector3i(8, 0, 8), VoxelTypes.WATER_ID)
+	_run_ticks(flow, 12)
+	var spread := false
+	for d in [Vector3i(1, 0, 0), Vector3i(-1, 0, 0),
+			Vector3i(0, 0, 1), Vector3i(0, 0, -1)]:
+		if world.get_block(Vector3i(8, 0, 8) + d) == VoxelTypes.WATER_ID:
+			spread = true
+	check(spread, "世界底水向水平邻格扩散（曾早退不扩散）")
 	flow.free()
 
 

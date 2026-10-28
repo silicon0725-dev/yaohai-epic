@@ -220,6 +220,15 @@ func _update_mining(delta: float) -> void:
 		_mine_elapsed = 0.0
 		var info := BlockMining.break_info(
 				world.get_block(target), world.registry, _held_tool())
+		if not bool(info["breakable"]):
+			# 不可破坏（基岩等）：记住目标并把时长置无穷——后续帧
+			# target 未变直接跳过（曾每物理帧重复 break_info+mine 空转）
+			_mine_active = true
+			_mine_target = target
+			_mine_elapsed = 0.0
+			_mine_seconds = INF
+			_mine_drops = false
+			return
 		_mine_seconds = float(info["seconds"])
 		_mine_drops = bool(info["drops"])
 	_mine_elapsed += delta

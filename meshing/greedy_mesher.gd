@@ -21,14 +21,15 @@ extends RefCounted
 static func build_mesh_arrays(
 		registry: VoxelRegistry,
 		chunk: ChunkData,
-		neighbors: Array
+		neighbors: Array,
+		water_levels: Variant = null
 ) -> Dictionary:
 	var native := NativeMeshBridge.build(true, registry, chunk, neighbors)
 	if not native.is_empty():
 		if chunk.block_ids.has(VoxelTypes.WATER_ID):
-			var water := NativeMeshBridge.build_water(chunk, neighbors)
+			var water := NativeMeshBridge.build_water(chunk, neighbors, water_levels)
 			if water.is_empty():
-				return _build_gd(registry, chunk, neighbors)
+				return _build_gd(registry, chunk, neighbors, water_levels)
 			native.merge(water)
 		return native
 	# C# 原生路径（阶段 E）：含水区块也由 C# 水通道补齐（上方已处理），
@@ -39,7 +40,8 @@ static func build_mesh_arrays(
 static func _build_gd(
 		registry: VoxelRegistry,
 		chunk: ChunkData,
-		neighbors: Array
+		neighbors: Array,
+		water_levels: Variant = null
 ) -> Dictionary:
 	assert(chunk.dimensions.x == chunk.dimensions.y
 			and chunk.dimensions.y == chunk.dimensions.z, "仅支持立方体区块")
@@ -58,8 +60,11 @@ static func _build_gd(
 	var normals := PackedVector3Array()
 	var uvs := PackedVector2Array()
 	var uv2s := PackedVector2Array()
+	var colors := PackedColorArray()
 	var indices := PackedInt32Array()
 	var quads := 0
+	# 体素光照 → 顶点色（角点平滑光照采样用，见 _emit_quad）
+	var light_padded := ChunkMesher.build_light_padded(chunk, neighbors)
 	# 无状态区块走纯查表快路径（_face_tile 内的 get_state 分支与
 	# is_empty 查询在 4096 格 × 6 面主循环里是纯开销）
 	var has_states := not chunk.sparse_block_states.is_empty()
@@ -161,14 +166,22 @@ static func _build_gd(
 					var positive := m > 0
 					var tile_index: int = (m if positive else -m) - 1
 					quads += 1
+					# 面外层：positive（a 的 +axis 面）= boundary+1；
+					# negative（b 的 -axis 面）= boundary
+					var layer: int = boundary + 1 if positive else boundary
+					var op_base: int = layer * stride_axis \
+							+ stride_u + stride_v
 					_emit_quad(axis, positive, boundary, u0, v0, u1, v1,
-							tile_index, vertices, normals, uvs, uv2s, indices)
+							tile_index, vertices, normals, uvs, uv2s,
+							indices, colors, light_padded,
+							op_base, stride_u, stride_v)
 					u0 = u1
 	var result := {
 		"vertices": vertices,
 		"normals": normals,
 		"uvs": uvs,
 		"uv2": uv2s,
+		"colors": colors,
 		"indices": indices,
 		"quads": quads,
 	}
@@ -176,7 +189,8 @@ static func _build_gd(
 	var wc := chunk.chunk_coord
 	var wd := chunk.dimensions
 	ChunkMesher.append_water_faces(padded, ps, result,
-			ChunkMesher.collect_water_levels_world(chunk, neighbors),
+			water_levels if water_levels != null
+					else ChunkMesher.collect_water_levels_world(chunk, neighbors),
 			Vector3i(wc.x * wd.x, wc.y * wd.y, wc.z * wd.z))
 	return result
 
@@ -228,7 +242,9 @@ static func _emit_quad(
 		u0: int, v0: int, u1: int, v1: int, tile_index: int,
 		vertices: PackedVector3Array, normals: PackedVector3Array,
 		uvs: PackedVector2Array, uv2s: PackedVector2Array,
-		indices: PackedInt32Array
+		indices: PackedInt32Array,
+		colors: PackedColorArray, light_padded: PackedByteArray,
+		op_base: int, stride_u: int, stride_v: int
 ) -> void:
 	var normal := Vector3.ZERO
 	normal[axis] = 1.0 if positive else -1.0
@@ -256,6 +272,12 @@ static func _emit_quad(
 		vertices.append(pos)
 		normals.append(normal)
 		uv2s.append(rect.position)
+		# 角点平滑光照：面外层 2x2 四格（角点两侧格 = pu-1..pu × pv-1..pv；
+		# 低角（==u0/v0）取 -1 方向，与面剔除 corner 分量规则一致）
+		var op_index := op_base + pu * stride_u + pv * stride_v
+		colors.append(ChunkMesher.vertex_light_color(light_padded, 0,
+				op_index, stride_u, stride_v,
+				0 if pu == u0 else 1, 0 if pv == v0 else 1))
 		# tile 空间 UV：顶/底面直接用参数；侧面水平取水平轴、
 		# 竖直取"上边界 - y"保证贴图不倒置
 		if axis == 1:

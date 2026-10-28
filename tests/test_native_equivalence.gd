@@ -2,6 +2,8 @@
 ## 原生不可用时跳过（不算失败——纯 GDScript 环境是合法运行形态）。
 extends VoxelTestCase
 
+const VoxelLightScript := preload("res://systems/lighting/voxel_light.gd")
+
 
 func run() -> void:
 	if not NativeMeshBridge.available():
@@ -49,6 +51,22 @@ func run() -> void:
 	worlds.append({"world": w4, "coord": Vector3i(1, 1, 0), "label": "真实地形(边界)"})
 
 	# ---- 逐世界对比 C# 与 GDScript 输出 ----
+	# 先对每个世界跑体素光照初始化：colors 顶点色需要非平凡光照值
+	# 才能真正验证双语言采样/公式一致（全 0 光照下两侧恒等黑）
+	var light_sys: Node = VoxelLightScript.new()
+	var neighbor_dirs := [
+		Vector3i(1, 0, 0), Vector3i(-1, 0, 0), Vector3i(0, 1, 0),
+		Vector3i(0, -1, 0), Vector3i(0, 0, 1), Vector3i(0, 0, -1),
+	]
+	for entry in worlds:
+		var lw: VoxelWorld = entry["world"]
+		for coord in lw.chunks:
+			var six := []
+			for d in neighbor_dirs:
+				six.append(lw.get_chunk(coord + d))
+			light_sys.init_chunk_light(lw.chunks[coord], six)
+	light_sys.free()
+
 	for entry in worlds:
 		var world: VoxelWorld = entry["world"]
 		var coord: Vector3i = entry["coord"]
@@ -80,11 +98,15 @@ func run() -> void:
 				"%s %s：索引一致" % [label, mode])
 			check(native_result["uvs"] == gd_result["uvs"],
 				"%s %s：UV 一致" % [label, mode])
+			check(native_result["colors"] == gd_result["colors"],
+				"%s %s：光照顶点色一致" % [label, mode])
 			if greedy:
 				check(native_result["uv2"] == gd_result["uv2"],
 					"%s 贪心：UV2 一致" % label)
-			check(native_result["quads"] == gd_result["quads"],
-				"%s 贪心：四边形数一致" % label)
+				# quads 仅贪心路径产出（naive 结果无此键——写在保护外
+				# 会软报错且检查被跳过，v32 起每份回归日志都在刷）
+				check(native_result["quads"] == gd_result["quads"],
+					"%s 贪心：四边形数一致" % label)
 
 	# ---- 水世界用例：C# BuildWater 与 GDScript append_water_faces 的
 	# water_* 8 数组逐字节等价（角点高度/岸衰减/双通道分流/组合门面）----
@@ -93,14 +115,14 @@ func run() -> void:
 	# 源水（无状态）+ 流动级 + 下落柱（8）+ 邻固体 + 区块边界角点
 	c5.set_block_raw(Vector3i(0, 1, 0), VoxelTypes.WATER_ID)
 	c5.set_block_raw(Vector3i(1, 1, 0), VoxelTypes.WATER_ID)
-	c5.set_block_state(Vector3i(1, 1, 0), "level", 2)
+	c5.set_state(Vector3i(1, 1, 0), "level", 2)
 	c5.set_block_raw(Vector3i(1, 2, 0), VoxelTypes.WATER_ID)
-	c5.set_block_state(Vector3i(1, 2, 0), "level", 8)
+	c5.set_state(Vector3i(1, 2, 0), "level", 8)
 	c5.set_block_raw(Vector3i(2, 1, 0), VoxelTypes.STONE_ID)
 	c5.set_block_raw(Vector3i(0, 1, 1), VoxelTypes.WATER_ID)
-	c5.set_block_state(Vector3i(0, 1, 1), "level", 3)
+	c5.set_state(Vector3i(0, 1, 1), "level", 3)
 	c5.set_block_raw(Vector3i(3, 1, 3), VoxelTypes.WATER_ID)
-	c5.set_block_state(Vector3i(3, 1, 3), "level", 1)
+	c5.set_state(Vector3i(3, 1, 3), "level", 1)
 	var water_cases: Array[Dictionary] = [
 		{"world": w5, "coord": Vector3i.ZERO, "label": "水世界(4³)"},
 	]

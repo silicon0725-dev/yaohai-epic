@@ -70,7 +70,15 @@ func register_chunk(coord: Vector3i) -> void:
 		"mesh": null,
 		"shape": null,
 		"has_collision": false,
+		"origin": origin,
 	}
+
+
+## 场景卸载时释放全部 RS/PS RID（单场景游戏无碍，但场景重载/
+## 测试反复挂载会泄漏——审查发现）
+func _exit_tree() -> void:
+	for coord in _entries.keys():
+		remove_chunk(coord)
 
 
 ## 该区块当前是否持有碰撞形状（ChunkManager 碰撞圈补建判定用）。
@@ -94,16 +102,40 @@ func apply_mesh(
 			"water_side_indices", PackedInt32Array()).size()
 	var cutout: int = mesh_arrays.get(
 			"cutout_indices", PackedInt32Array()).size()
-	var mesh: ArrayMesh
-	if opaque > 0 or water > 0 or water_side > 0 or cutout > 0:
-		mesh = MeshBuilder.arrays_to_mesh(
-				mesh_arrays, material, water_material, water_side_material,
-				cutout_material)
-	else:
-		mesh = ArrayMesh.new()  # 空区块：无表面
+	# 地形（不透明+树叶）与水面分属两个 instance：水面要在独立
+	# instance 上设 visibility layer 2，镜像相机（水面反射 RT）经
+	# cull_mask 排除它——水面双面材质会铺满反射画面挡住倒影
+	var terrain_mesh: ArrayMesh = null
+	if opaque > 0 or cutout > 0:
+		terrain_mesh = MeshBuilder.arrays_to_mesh(
+				mesh_arrays, material, null, null, cutout_material, false)
+	var water_mesh: ArrayMesh = null
+	if water > 0 or water_side > 0:
+		water_mesh = MeshBuilder.water_mesh_from_arrays(
+				mesh_arrays, water_material, water_side_material)
 	# 先切 instance base 再换引用：旧 mesh 资源随引用断开自动释放
-	RenderingServer.instance_set_base(entry.inst, mesh.get_rid())
-	entry.mesh = mesh
+	if terrain_mesh != null:
+		RenderingServer.instance_set_base(entry.inst, terrain_mesh.get_rid())
+	else:
+		RenderingServer.instance_set_base(entry.inst, RID())
+	entry.mesh = terrain_mesh
+	if water_mesh != null:
+		if not entry.has("water_inst"):
+			var winst := RenderingServer.instance_create()
+			if _scenario.is_valid():
+				RenderingServer.instance_set_scenario(winst, _scenario)
+			RenderingServer.instance_set_layer_mask(winst, 1 << 1)  # layer 2
+			RenderingServer.instance_set_transform(winst,
+					Transform3D(Basis(), entry.origin))
+			entry.water_inst = winst
+		# RS instance 不持有 mesh 引用：须存 entry 保活（地形同理由
+		# entry.mesh 保活），否则函数退出即被 GC、instance 渲染消失
+		entry.water_mesh = water_mesh
+		RenderingServer.instance_set_base(entry.water_inst, water_mesh.get_rid())
+	elif entry.has("water_inst"):
+		RenderingServer.free_rid(entry.water_inst)
+		entry.erase("water_inst")
+		entry.erase("water_mesh")
 	if rebuild_collision:
 		var shape := ChunkCollisionBuilder.build_collision_shape(mesh_arrays)
 		PhysicsServer3D.body_clear_shapes(entry.body)
@@ -121,6 +153,9 @@ func remove_chunk(coord: Vector3i) -> void:
 	if entry.is_empty():
 		return
 	RenderingServer.free_rid(entry.inst)
+	if entry.has("water_inst"):
+		RenderingServer.free_rid(entry.water_inst)
+		entry.erase("water_mesh")
 	PhysicsServer3D.free_rid(entry.body)
 	entry.mesh = null
 	entry.shape = null

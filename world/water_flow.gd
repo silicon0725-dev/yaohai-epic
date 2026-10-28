@@ -85,10 +85,12 @@ func _evaluate(pos: Vector3i) -> bool:
 	var lvl := _level(pos)
 	var above_water := world.get_block(pos + UP) == VoxelTypes.WATER_ID
 
-	# 1) 向下流：任何级别的水都优先灌满下方空气
+	# 1) 向下流：任何级别的水都优先灌满下方空气。写入失败（未加载/
+	#    世界底越界）不算成功也不早退——y=0 层的水曾被这里"假成功"
+	#    早退挡住横向扩散（审查发现）
 	if world.get_block(pos + DOWN) == VoxelTypes.AIR_ID:
-		_set_water(pos + DOWN, 8)
-		return true
+		if _set_water(pos + DOWN, 8):
+			return true
 
 	# 2) 自我校验：源（0）永久；其余必须有上游供给
 	if lvl != 0:
@@ -99,6 +101,13 @@ func _evaluate(pos: Vector3i) -> bool:
 			else:
 				world.set_block(pos, VoxelTypes.WATER_ID, false)
 				world.set_block_state(pos, "level", target, true)
+				# 原地降级不触发 block_changed（WATER→WATER 无信号、
+				# set_block_state 也无信号）——下游格子不会被重新评估，
+				# 残留过期高水位直到新扰动（审查发现）；手动扰动 6 邻
+				for d in HORIZONTAL_DIRS:
+					_enqueue(pos + d)
+				_enqueue(pos + UP)
+				_enqueue(pos + DOWN)
 			return true
 
 	# 3) 水平扩散（仅当下方已非空气）。先短路：4 邻全非空气时
@@ -116,8 +125,7 @@ func _evaluate(pos: Vector3i) -> bool:
 	var changed := false
 	for d in _spread_dirs(pos):
 		var q := pos + d
-		if world.get_block(q) == VoxelTypes.AIR_ID:
-			_set_water(q, spread)
+		if world.get_block(q) == VoxelTypes.AIR_ID and _set_water(q, spread):
 			changed = true
 	return changed
 
@@ -165,12 +173,16 @@ func _spread_dirs(pos: Vector3i) -> Array[Vector3i]:
 	return result
 
 
-func _set_water(pos: Vector3i, lvl: int) -> void:
+## 返回是否写入成功（set_block 失败 = 未加载/越界，不算变更——
+## 否则未加载边界的"幽灵水"假报变更并挤占 pending 名额）
+func _set_water(pos: Vector3i, lvl: int) -> bool:
 	# set_block 清空状态，随后写入级别（级别 0 = 源，无状态即默认）。
 	# 水无碰撞体：affects_collision=false 跳过碰撞形状重建（§性能）
-	world.set_block(pos, VoxelTypes.WATER_ID, false)
+	if not world.set_block(pos, VoxelTypes.WATER_ID, false):
+		return false
 	if lvl > 0:
 		world.set_block_state(pos, "level", lvl, true)
+	return true
 
 
 func _level(pos: Vector3i) -> int:

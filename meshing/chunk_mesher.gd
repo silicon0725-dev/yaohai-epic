@@ -141,6 +141,116 @@ static func build_padded_cache(chunk: ChunkData, neighbors: Array) -> PackedInt3
 	return padded
 
 
+## ---- 体素光照 → 顶点色（光照阶段 2）----
+
+## (s+2)^3 光照填充缓存（1 字节/格：高 4bit 天光、低 4bit 方块光）。
+## 内部直拷 chunk.light；边界从 27 邻域 light 取；缺失邻块按空气
+## （天光 15，与面剔除"未加载当空气"一致，避免边界黑缝）；
+## y<0 世界底按实心（光照 0）。角点平滑光照的全部采样都在此缓存内，
+## 跨区块边界两侧取到同格数据 -> 同值不裂缝（岸衰减同思路）。
+static func build_light_padded(
+		chunk: ChunkData, neighbors: Array
+) -> PackedByteArray:
+	var s := chunk.dimensions.x
+	var ps := s + 2
+	var padded := PackedByteArray()
+	padded.resize(ps * ps * ps)
+	padded.fill(0xF0)  # 缺省空气（sky 15 / block 0）
+	var light := chunk.light
+	for z in s:
+		for y in s:
+			var src_row := z * s * s + y * s
+			var dst_row := (z + 1) * ps * ps + (y + 1) * ps + 1
+			for x in s:
+				padded[dst_row + x] = light[src_row + x]
+	for pz in ps:
+		for py in ps:
+			var interior_row := pz >= 1 and pz <= s and py >= 1 and py <= s
+			for px in ps:
+				if interior_row and px >= 1 and px <= s:
+					continue
+				var a := px - 1
+				var b := py - 1
+				var c := pz - 1
+				var dx := 0
+				var dy := 0
+				var dz := 0
+				var la := a
+				var lb := b
+				var lc := c
+				if la < 0:
+					dx = -1
+					la = s - 1
+				elif la >= s:
+					dx = 1
+					la = 0
+				if lb < 0:
+					dy = -1
+					lb = s - 1
+				elif lb >= s:
+					dy = 1
+					lb = 0
+				if lc < 0:
+					dz = -1
+					lc = s - 1
+				elif lc >= s:
+					dz = 1
+					lc = 0
+				var neighbor: ChunkData = neighbors[
+						(dz + 1) * 9 + (dy + 1) * 3 + (dx + 1)]
+				var border_light := 0xF0
+				if neighbor != null:
+					border_light = neighbor.light[la + s * lb + s * s * lc]
+				elif chunk.chunk_coord.y * s + b < 0:
+					border_light = 0  # 世界底：实心无光
+				padded[px + py * ps + pz * ps * ps] = border_light
+	return padded
+
+
+## 亮度 gamma（深黑取向）：>1 让暗部更黑，露天仍 1.0 不影响
+const LIGHT_GAMMA := 1.5
+
+## 面角点颜色（MC 平滑光照）：以角点为公共角的 2x2 四格光照平均
+##（实心格光照 0，天然形成角部 AO 变暗，不另叠显式 AO——双重暗化
+## 过头）；亮度 = max(天光, 方块光)/15 的幂曲线；方块光占优时色温
+## 偏暖（本轮无光源方块，色温通路就位不生效）。
+## op_index：面外侧格的 light_padded 索引；tan1/tan2：面切向两轴的
+## padded 步长；corner 分量 0/1（0 取 -1 方向格）。
+static func vertex_light_color(
+		light_padded: PackedByteArray, ps: int,
+		op_index: int, tan1_stride: int, tan2_stride: int,
+		corner_t1: int, corner_t2: int
+) -> Color:
+	var o1 := -tan1_stride if corner_t1 == 0 else 0
+	var o2 := -tan2_stride if corner_t2 == 0 else 0
+	var i0: int = op_index
+	var i1: int = op_index + o1
+	var i2: int = op_index + o2
+	var i3: int = op_index + o1 + o2
+	var b0: int = light_padded[i0]
+	var b1: int = light_padded[i1]
+	var b2: int = light_padded[i2]
+	var b3: int = light_padded[i3]
+	var sky := (b0 >> 4) + (b1 >> 4) + (b2 >> 4) + (b3 >> 4)
+	var blk := (b0 & 15) + (b1 & 15) + (b2 & 15) + (b3 & 15)
+	var s := float(sky) * 0.25 / 15.0
+	var b := float(blk) * 0.25 / 15.0
+	# 深黑洞穴曲线 m^3（纯乘法 IEEE 确定，C# 侧逐位一致）。m^1.5 太缓：
+	# 天光 10-12 的洞内区顶点色只压到 0.5-0.7，观感"进洞不变暗"；
+	# m^3 下 sky=10→0.30、8→0.16、≤6→接近黑，露天 15 不受影响
+	var m := maxf(s, b)
+	var bright := m * m * m
+	# 方块光暖色对齐 BSL blocklightColor (255,212,160)/255 归一化
+	# (1.44, 1.0, 0.56)：R+44%/B-44%（曾手调 +18%/-25% 偏淡）
+	var warm := 0.0
+	if b > s:
+		warm = clampf((b - s) * 2.0, 0.0, 1.0)
+	return Color(
+			bright * (1.0 + 0.44 * warm),
+			bright,
+			bright * (1.0 - 0.44 * warm))
+
+
 ## 状态感知的面贴图选择（§4.3 方块状态）：带 "axis" 状态的方块
 ##（如横放原木）垂直于轴向的端面用 top 贴图（年轮），其余用 side。
 ## 无状态方块走常规 top/side/bottom 规则。
@@ -176,20 +286,24 @@ static func effective_tile_name(
 ## A/B 干区块 4.6ms vs GD 20.6ms，湿区块 C# opaque+水通道组合）。
 ## 水侧 C# 不可用时整体回退 GD（水/不透明必须同源实现，避免混搭
 ## 出两套等价面）。无 C# 环境（未 dotnet build）自动回退。
+## water_levels：主线程预收集的水位级别表（worker 安全——collect 会
+## 遍历 sparse_block_states Dictionary，主线程水位 tick 同时增删可致
+## 哈希表损坏，审查发现）。null = 自行收集（单测/低频路径）。
 static func build_mesh_arrays(
 		registry: VoxelRegistry,
 		chunk: ChunkData,
-		neighbors: Array
+		neighbors: Array,
+		water_levels: Variant = null
 ) -> Dictionary:
 	var native := NativeMeshBridge.build(false, registry, chunk, neighbors)
 	if not native.is_empty():
 		if chunk.block_ids.has(VoxelTypes.WATER_ID):
-			var water := NativeMeshBridge.build_water(chunk, neighbors)
+			var water := NativeMeshBridge.build_water(chunk, neighbors, water_levels)
 			if water.is_empty():
-				return _build_gd(registry, chunk, neighbors)
+				return _build_gd(registry, chunk, neighbors, water_levels)
 			native.merge(water)
 		return native
-	return _build_gd(registry, chunk, neighbors)
+	return _build_gd(registry, chunk, neighbors, water_levels)
 
 
 ## 共享只读空状态（热循环 per-block 曾构造 {} 4096 次/区块——
@@ -200,7 +314,8 @@ const EMPTY_STATE := {}
 static func _build_gd(
 		registry: VoxelRegistry,
 		chunk: ChunkData,
-		neighbors: Array
+		neighbors: Array,
+		water_levels: Variant = null
 ) -> Dictionary:
 	assert(chunk.dimensions.x == chunk.dimensions.y
 			and chunk.dimensions.y == chunk.dimensions.z, "Stage A 仅支持立方体区块")
@@ -243,9 +358,23 @@ static func _build_gd(
 
 	var tile_cache := {}  # block_id*8+face -> Vector2(tile 原点)
 
+	# 光照填充缓存 + 面切向轴步长（角点平滑光照采样用）
+	var light_padded := build_light_padded(chunk, neighbors)
+	var axis_stride := [1, stride_y, stride_z]
+	# 每面 normal 轴外的两切向轴（与 FACES 顺序对应）
+	var face_tan_axes: Array = [
+		[1, 2], [1, 2], [0, 2], [0, 2], [0, 1], [0, 1],
+	]
+	var face_tan1_stride := PackedInt32Array()
+	var face_tan2_stride := PackedInt32Array()
+	for f0 in FACES.size():
+		face_tan1_stride.append(axis_stride[face_tan_axes[f0][0]])
+		face_tan2_stride.append(axis_stride[face_tan_axes[f0][1]])
+
 	var vertices := PackedVector3Array()
 	var normals := PackedVector3Array()
 	var uvs := PackedVector2Array()
+	var colors := PackedColorArray()
 	var indices := PackedInt32Array()
 	# 树叶面单独成桶（cutout 表面：alpha 裁切镂空材质）；顶点/UV
 	# 与不透明网格共享，仅索引分流——碰撞构建合并两桶
@@ -303,6 +432,13 @@ static func _build_gd(
 						uvs.append(Vector2(
 								tile_origin.x + cuv.x * inv_cols,
 								tile_origin.y + cuv.y * inv_rows))
+						# 角点平滑光照：面外层 2x2 四格平均（含实心 0 格的
+						# 天然 AO）；两切向轴上 corner 分量决定取 -1 方向格
+						var tan_axes: Array = face_tan_axes[f]
+						colors.append(vertex_light_color(light_padded, ps,
+								pidx + neighbor_offsets[f],
+								face_tan1_stride[f], face_tan2_stride[f],
+								int(corner[tan_axes[0]]), int(corner[tan_axes[1]])))
 					# 索引绕序与角点顺序相反：Godot 正面 = 面外侧看顺时针。
 					# 树叶面进 cutout 桶（独立渲染表面），其余进不透明桶。
 					# 直接 append 六索引——曾 append_array(PackedInt32Array([...]))
@@ -325,13 +461,15 @@ static func _build_gd(
 		"vertices": vertices,
 		"normals": normals,
 		"uvs": uvs,
+		"colors": colors,
 		"indices": indices,
 		"cutout_indices": cutout_indices,
 	}
 	var c := chunk.chunk_coord
 	var d := chunk.dimensions
 	append_water_faces(padded, ps, result,
-			collect_water_levels_world(chunk, neighbors),
+			water_levels if water_levels != null
+					else collect_water_levels_world(chunk, neighbors),
 			Vector3i(c.x * d.x, c.y * d.y, c.z * d.z))
 	return result
 
@@ -490,6 +628,13 @@ static func append_water_faces(
 ## 区块的 padded 里数据相同 -> 算出同值 -> 波浪位移一致不裂缝。
 ## 展开双循环（曾 [0,1]/[cx-1,cx] 数组字面量：水通道每角点一次
 ## 调用 ×3 数组分配，含水区块实测 47ms/块的大头之一）
+## 岸距衰减统一公式：采样到的固体格数 → 衰减（网格器角点与
+## 浮物波高采样共用；两处各写曾漂移出 ×0.5 与 /3.0 两套——
+## 贴岸浮物与视觉水面起伏不一致，审查发现）
+static func shore_fade_value(solid_count: int) -> float:
+	return 1.0 - clampf(float(solid_count) * 0.5, 0.0, 0.85)
+
+
 static func _corner_shore_fade(
 		padded: PackedInt32Array, ps: int, cx: int, cy: int, cz: int
 ) -> float:
@@ -504,7 +649,7 @@ static func _corner_shore_fade(
 				var nid: int = padded[zbase + cx + gx_off]
 				if nid != VoxelTypes.AIR_ID and nid != VoxelTypes.WATER_ID:
 					solid += 1
-	return 1.0 - clampf(float(solid) * 0.5, 0.0, 0.85)
+	return shore_fade_value(solid)
 
 
 ## 角点 (cx, cz)（格坐标，取 x 或 x+1 / z 或 z+1）的水面高度：

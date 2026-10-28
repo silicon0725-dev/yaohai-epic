@@ -28,6 +28,36 @@ const WATER_ID := 14
 const BRANCH_ID := 15
 const LEAVES_ID := 16
 
+## 光照不透明度（光照阶段 2）：索引 = 数值 ID（与上方常量顺序一致，
+## 由 registry 一致性测试保护）。0 = 完全透光；实心方块 15 全挡；
+## 水 2、细枝/树叶 1（光可穿过但逐格衰减——树叶下有斑驳树荫）。
+const LIGHT_OPACITY := [
+	0,   # air
+	15, 15, 15, 15, 15, 15, 15, 15,  # grass..bricks
+	15, 15, 15, 15, 15,               # sand..water 之前
+	2,   # water
+	1,   # branch（细枝透光）
+	1,   # leaves
+]
+
+## 方块光发射等级（0-15）：光源方块在此登记（火把等，下轮接入；
+## 本轮框架就位、表全 0——无实际光源）。
+const LIGHT_EMISSION := [
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+]
+
+
+static func light_opacity(block_id: int) -> int:
+	if block_id >= 0 and block_id < LIGHT_OPACITY.size():
+		return LIGHT_OPACITY[block_id]
+	return 15  # 未知方块按全挡处理（保守）
+
+
+static func light_emission(block_id: int) -> int:
+	if block_id >= 0 and block_id < LIGHT_EMISSION.size():
+		return LIGHT_EMISSION[block_id]
+	return 0
+
 
 ## 构建默认注册表。textures 引用的是图集 tile 名称，
 ## 由 presentation/texture_atlas_loader.gd 解析到图集网格位置，

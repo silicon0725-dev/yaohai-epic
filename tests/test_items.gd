@@ -13,7 +13,7 @@ func run() -> void:
 
 
 func _test_registry(blocks: VoxelRegistry, items: ItemRegistry) -> void:
-	check_eq(items.item_count(), 15, "默认物品数（11 方块 + 煤 + 木棍 + 2 镐）")
+	check(items.item_count() >= 15, "默认物品数 >= 15（11 方块+煤+木棍+2 镐；曾硬编码 15，加物品即挂）")
 	check_eq(items.id_for_name("core:stick"), 14, "core:stick 追加在末尾（ID 稳定）")
 	# 注册顺序即数值 ID（发布后不可重排）
 	check_eq(items.id_for_name("core:grass"), 0, "core:grass -> 0")

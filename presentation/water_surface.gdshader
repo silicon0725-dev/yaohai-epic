@@ -42,6 +42,13 @@ uniform float tex_strength = 0.85;
 uniform float glint_strength = 0.8;
 uniform float glint_shininess = 90.0;
 uniform float foam_strength = 0.6;
+// 平面反射（真镜像相机）：main 维护一台镜像相机（位置/朝向关于
+// 海平面翻转）渲到 SubViewport RT，水面用自身屏幕坐标采样——
+// 镜像画面里水面点的位置恰为其真实屏幕位置，几何完全正确
+// （水线翻转/raymarch 的近似误差都不存在）；波法线扰动随波晃动
+uniform sampler2D sspr_rt : filter_linear_mipmap;
+uniform float sspr_water_h = 0.0;
+uniform float sspr_strength = 0.7;
 
 varying vec3 world_pos;
 // 岸距衰减（网格器烘入的顶点 COLOR.r）：8 邻固体越多越靠岸，
@@ -104,8 +111,9 @@ float ripple_height(vec2 p) {
 void vertex() {
 	world_pos = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
 	shore_fade = COLOR.r;
-	// 位移钳制 [-0.08, +0.22]：上涌为主的涌浪——波谷不深陷（防浅滩
-	// 露底），波峰受钳与岸衰减共同约束
+	// 位移钳制 [-0.16, +0.56]：上涌为主的涌浪——波谷不深陷（防浅滩
+	// 露底），波峰受钳与岸衰减共同约束（空间/时间均值实测 ≈-0.03，
+	// 反射平面无需为此补偿）
 	float displacement = (wave_field(world_pos.xz, u_time * wave_speed)
 			* wave_amplitude * storm_scale
 			+ ripple_height(world_pos.xz) * RIPPLE_VERTEX_DISPLACEMENT)
@@ -171,7 +179,41 @@ void fragment() {
 			+ (water_color.rgb * 1.4 + 0.08) * tex_flow.x * tex_strength
 			+ ripple_strength * ripple * 0.35;
 	albedo = mix(albedo, vec3(0.88), foam);
+	// 平面反射：采样镜像相机 RT（SCREEN_UV 即镜像画面中本点的位置）
+	// h_gate 只拦"远离海平面的高处流水"（|Δ|>0.6 渐隐、1.5 全关——
+	// 山坡瀑布不镜像）。低水位坑水（level 1~4，Δ=0.1~0.55）必须保持
+	// 全反射：按 |Δ| 收紧会把这些水的反射压没（"反射消失"实机反馈，
+	// 用户测试区正是凹坑水位），其轻微视差错位换取反射存在感
+	float h_gate = 1.0 - smoothstep(0.6, 1.5, abs(world_pos.y - sspr_water_h));
+	// 镜像相机 = 数学镜像基（逐列 y 翻转）x 列取反补右手性——其画面
+	// 相对正确倒影图是水平翻转，采样 1-uv.x 精确还原点对应（任意俯角
+	// 成立；up 正交化构造低头会退化——已踩坑）
+	// 波法线扰动按相机距离归一：固定 uv 偏移是角度量，世界偏移随距离
+	// 线性放大（远岸 1~2 格，倒影飘离水线——实机踩坑）；0.3/dist 让
+	// 世界晃幅恒定 ≈0.3 格（近岸 clamp 6 不超原幅度）
+	float cam_dist = length(world_pos
+			- (INV_VIEW_MATRIX * vec4(0.0, 0.0, 0.0, 1.0)).xyz);
+	vec2 uv_ref = clamp(vec2(1.0 - SCREEN_UV.x, SCREEN_UV.y)
+			+ normal.xz * (0.3 / max(cam_dist, 6.0)),
+			vec2(0.001), vec2(0.999));
+	vec3 refl = texture(sspr_rt, uv_ref).rgb;
+	// 水体滤色（海洋渲染标准做法）：反射色向水色偏移——掠射时反射
+	// 主体是亮天空，不滤色会把水面刷成牛奶白（已踩坑）；FILMIC 后
+	// 天空/亮沙亮度几乎相同（0.62/0.60 实测），按亮度区分内容不可行
+	refl = refl * vec3(0.65, 0.8, 1.0);
+	refl = mix(refl, deep_color * 2.0, 0.22);
+	float refl_w = clamp(h_gate * sspr_strength
+			* (0.15 + 0.5 * fresnel) * (1.0 - foam * 0.8), 0.0, 1.0);
+	// 岸线裙边淡出：水面网格在岸线角点斜降 1 格到岸格底（防裂缝裙边），
+	// 该带 world_pos.y 低于反射平面 → 反射采样渐变错位（"倒影与水线断
+	// 层 / 多显示一格水下方块"实机踩坑）。淡出区间只盖真正的贴岸角点
+	// （shore_fade≤0.2，1 个固体邻的角点 0.5 不受影响——v35 的 0.35
+	// 区间近岸大面积压反射，"反射消失"实机反馈）
+	refl_w *= smoothstep(0.0, 0.2, shore_fade);
+	albedo = mix(albedo, refl, refl_w);
 	ALBEDO = albedo;
 	EMISSION = vec3(glint * 0.8);  // 波光耀斑不受场景光照二次调制
-	ALPHA = min(water_color.a + fresnel * 0.25 + foam * 0.7, 0.95);
+	// 掠射不再增不透明度（fresnel*0.25 会在掠射把 alpha 推到 0.93，
+	// 叠反射色成大块不透明奶白——实机踩坑）；反射负责掠射增亮
+	ALPHA = clamp(water_color.a + foam * 0.6, 0.0, 0.95);
 }

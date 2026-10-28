@@ -34,6 +34,20 @@ static func available() -> bool:
 	return _native != null
 
 
+## 已缓存的 C# 实例（先 available() 探测；供光照等其他系统复用）。
+static func native() -> RefCounted:
+	return _native
+
+
+## 主线程预热（main 接线期调用）：完成探测 + 预填当前注册表的
+## tile 表——否则 mesh worker 首调并发写 _tile_cache/_checked
+## （Godot Dictionary 非线程安全——审查发现）
+static func prewarm(registry: VoxelRegistry) -> void:
+	if not available():
+		return
+	_tile_tables(registry)
+
+
 ## 为指定注册表构建 tile 下标表（缓存）。
 static func _tile_tables(registry: VoxelRegistry) -> Dictionary:
 	var key := registry.get_instance_id()
@@ -96,6 +110,9 @@ static func build(
 	var lookup := ChunkMesher.build_lookup_tables(registry)
 	var solid: PackedByteArray = lookup["solid"]
 	var occl: PackedByteArray = lookup["occludes"]
+	# 光照填充缓存（C# 顶点色采样；GD 侧 build_light_padded 是唯一真值，
+	# 双语言共享同一份输入避免两套 padded 组装逻辑漂移）
+	var light_padded := ChunkMesher.build_light_padded(chunk, neighbors)
 
 	var result: Variant
 	if greedy:
@@ -106,7 +123,8 @@ static func build(
 			tables["top"], tables["side"], tables["bottom"],
 			chunk.sparse_block_states,
 			TextureAtlasLoader.COLS, TextureAtlasLoader.ROWS,
-			VoxelTypes.BRANCH_ID)
+			VoxelTypes.BRANCH_ID,
+			light_padded)
 	else:
 		result = _native.BuildNaive(
 			chunk.chunk_coord, chunk.dimensions.x,
@@ -115,7 +133,8 @@ static func build(
 			tables["top"], tables["side"], tables["bottom"],
 			chunk.sparse_block_states,
 			TextureAtlasLoader.COLS, TextureAtlasLoader.ROWS,
-			VoxelTypes.BRANCH_ID, VoxelTypes.LEAVES_ID)
+			VoxelTypes.BRANCH_ID, VoxelTypes.LEAVES_ID,
+			light_padded)
 	if result == null:
 		return {}
 	return result
@@ -124,10 +143,12 @@ static func build(
 ## C# 水通道（water_* 8 数组；与 GDScript append_water_faces 等价，
 ## 等价测试水世界用例保证）。levels_world 打包为扁平数组避开 C# 侧
 ## Variant Dictionary 查询。返回空字典 = 原生不可用。
-static func build_water(chunk: ChunkData, neighbors: Array) -> Dictionary:
+static func build_water(
+		chunk: ChunkData, neighbors: Array, water_levels: Variant = null
+) -> Dictionary:
 	if not available():
 		return {}
-	var levels := ChunkMesher.collect_water_levels_world(chunk, neighbors)
+	var levels: Dictionary = water_levels if water_levels != null 			else ChunkMesher.collect_water_levels_world(chunk, neighbors)
 	var lx := PackedInt32Array()
 	var ly := PackedInt32Array()
 	var lz := PackedInt32Array()

@@ -149,8 +149,12 @@ func _play_step(volume: float) -> void:
 func _family_at_feet() -> String:
 	if _wading:
 		return "water"
+	# 脚下方块：玩家中心（脚底 +1.0 半高）再往下 0.05 = 地面格。
+	# 曾用 y-0.95（player_controller 涉水判定的脚位式）——那是给
+	# 水面扫描的，直接读格子类型时站着不动读到的是**空气层**，
+	# 族恒为 air → 脚步静默（实机报告：只闻环境/互动音无脚步）
 	var cell := Vector3i(floori(_player.global_position.x),
-			floori(_player.global_position.y - 0.95),
+			floori(_player.global_position.y - 1.05),
 			floori(_player.global_position.z))
 	return block_family(_world.get_block(cell))
 

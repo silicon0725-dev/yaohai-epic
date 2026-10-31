@@ -13,6 +13,7 @@ func run() -> void:
 	_test_block_family_map()
 	_test_footstep_synth()
 	_test_footstep_recorded()
+	_test_foot_cell_formula()
 	_test_land_volume()
 	_test_ambient_selector()
 	_test_ambient_stream_variant()
@@ -84,6 +85,33 @@ func _test_footstep_recorded() -> void:
 		for s in streams:
 			check(s is AudioStreamOggVorbis or s is AudioStreamWAV,
 					"%s 录音流类型正确" % family)
+
+
+## 脚位公式回归：站方块顶面时 _family_at_feet 必须读到脚下那格。
+## 曾用 y-0.95（涉水判定脚位）——直接读格类型时读到**空气层**，
+## 族恒 air → 脚步从不出声（实机报告：只闻环境/互动音无脚步）
+func _test_foot_cell_formula() -> void:
+	var world: VoxelWorld = make_world(16, [Vector3i.ZERO], 7)
+	world.get_chunk(Vector3i.ZERO).set_block(
+			Vector3i(5, 5, 5), VoxelTypes.GRASS_ID)
+	var sys: Node = FootstepScript.new()
+	sys.setup(Node.new(), world)
+	if tree_root == null:
+		check(false, "tree_root 未注入（runner 需设置 suite.tree_root）")
+		return
+	var fake := Node3D.new()
+	tree_root.add_child(fake)  # 树外节点 global_position 不可靠
+	sys._player = fake
+	# 站 (5,5,5) 顶面（y=6.0）：胶囊中心 = 脚底+1.0
+	fake.position = Vector3(5.5, 7.0, 5.5)
+	check_eq(sys._family_at_feet(), "grass", "站草顶读到 grass")
+	check_eq(sys.block_family(world.get_block(Vector3i(5, 6, 5))),
+			"", "y-0.95 层是空气（旧公式 bug 层）")
+	# 漂浮一格高（脚底 y=7.0）→ 读不到草（垂直错位不误报）
+	fake.position = Vector3(5.5, 8.0, 5.5)
+	check_eq(sys._family_at_feet(), "", "悬空一格不误报")
+	fake.free()
+	sys.free()
 
 
 ## 落地音量：随坠落速度单调、边界收敛

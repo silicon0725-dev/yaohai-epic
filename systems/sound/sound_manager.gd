@@ -157,6 +157,9 @@ func _process(delta: float) -> void:
 		_eval_acc = 0.0
 		var profile: Dictionary = AcousticScript.evaluate_room(_world, eye)
 		var params: Dictionary = AcousticScript.reverb_params(profile)
+		# 水下平滑压回声（眼格在水面线抖动时 1Hz 评估有间隙——
+		# 用低通同款平滑系数连续过渡）
+		params["wet"] = lerpf(params["wet"], 0.02, _wet_underwater)
 		for bus_name in _reverb:
 			var rv: AudioEffectReverb = _reverb[bus_name]
 			rv.room_size = params["room_size"]

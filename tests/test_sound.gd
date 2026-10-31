@@ -315,3 +315,17 @@ func _test_room_reverb() -> void:
 			% profile["sky_frac"])
 	params = AcousticScript.reverb_params(profile)
 	check(params["wet"] <= 0.05, "露天混响趋零（%f）" % params["wet"])
+	# 水下不评腔体：水格曾整个入腔+水底高反射面 → 假回声（实机报告）
+	var water_world: VoxelWorld = make_world(16, [Vector3i.ZERO], 7)
+	var wchunk: ChunkData = water_world.get_chunk(Vector3i.ZERO)
+	for x in range(4, 12):
+		for y in range(4, 12):
+			for z in range(4, 12):
+				wchunk.set_block(Vector3i(x, y, z),
+						VoxelTypes.WATER_ID)
+	profile = AcousticScript.evaluate_room(water_world,
+			Vector3(8.5, 8.5, 8.5))
+	check(int(profile["room"]) == 0, "水下不评腔体（room=%s）"
+			% profile["room"])
+	check(AcousticScript.reverb_params(profile)["wet"] <= 0.05,
+			"水下湿端趋零")

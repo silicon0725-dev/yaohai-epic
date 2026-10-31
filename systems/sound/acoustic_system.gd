@@ -138,6 +138,10 @@ static func evaluate_room(world: VoxelWorld, eye: Vector3) -> Dictionary:
 	var start := Vector3i(floori(eye.x), floori(eye.y), floori(eye.z))
 	if is_opaque_block(world.get_block(start)):
 		return {"room": 0, "sky_frac": 0.0, "reflectivity": 0.5}
+	# 水下不评腔体：水格会整个入腔+水底高反射面 → 假"封闭腔"回声
+	# （实机报告：水里能听到回声）。水下声学由低通闷化承担
+	if world.get_block(start) == VoxelTypes.WATER_ID:
+		return {"room": 0, "sky_frac": 0.0, "reflectivity": 0.2}
 	var visited := {}
 	var queue: Array[Vector3i] = [start]
 	visited[start] = true

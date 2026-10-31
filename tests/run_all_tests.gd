@@ -32,6 +32,7 @@ const TEST_CASES := [
 	"res://tests/test_mc_model.gd",
 	"res://tests/test_lantern_entities.gd",
 	"res://tests/test_lantern_light_probe.gd",
+	"res://tests/test_leaf_probe.gd",
 	"res://tests/test_native_equivalence.gd",
 	"res://tests/test_native_terrain.gd",
 ]

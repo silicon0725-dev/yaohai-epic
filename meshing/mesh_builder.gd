@@ -93,6 +93,11 @@ static func arrays_to_mesh(
 				"normals", PackedVector3Array())
 		cutout_arrays[Mesh.ARRAY_TEX_UV] = mesh_arrays.get(
 				"uvs", PackedVector2Array())
+		# 顶点色双通道（天光 a / 方块光 rgb）必须随面走——曾漏挂，
+		# shader 里 COLOR=(1,1,1)：EMISSION=tex 全亮自发光，树叶
+		# "不受光照"（日夜轮 EMISSION 语义放大暴露）
+		cutout_arrays[Mesh.ARRAY_COLOR] = mesh_arrays.get(
+				"colors", PackedColorArray())
 		cutout_arrays[Mesh.ARRAY_INDEX] = mesh_arrays.get(
 				"cutout_indices", PackedInt32Array())
 		mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, cutout_arrays)

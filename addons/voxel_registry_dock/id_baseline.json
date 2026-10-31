@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "frozen_at": "2026-10-28",
+  "note": "存档兼容红线：稳定名按注册顺序只增不改。由编辑器 Dock 固化，tests/test_registry_dock.gd 同步守护。",
+  "names": [
+    "core:air",
+    "core:grass",
+    "core:dirt",
+    "core:stone",
+    "core:bedrock",
+    "core:log",
+    "core:planks",
+    "core:cobblestone",
+    "core:bricks",
+    "core:sand",
+    "core:sandstone",
+    "core:gravel",
+    "core:coal_ore",
+    "core:iron_ore",
+    "core:water",
+    "core:branch",
+    "core:leaves",
+    "core:torch",
+    "core:lantern"
+  ]
+}

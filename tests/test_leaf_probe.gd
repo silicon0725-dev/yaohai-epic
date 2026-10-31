@@ -7,16 +7,40 @@ func run() -> void:
 	if tree_root == null:
 		check(false, "tree_root 未注入")
 		return
-	# 真实生成器世界（树叶需要地形生成产出；seed 1337 有树）
+	# 真实生成器世界（树叶需要地形生成产出）。v8 大陆波长 4096 格，
+	# 固定小窗可能整片落在海洋/低地无树列——先扫 has_tree_at 找
+	# 有效树列（草地 + 海拔 > 8），再以其所在区块为中心生成（含
+	# 上一层，叶冠可跨 y 层）
 	var config := WorldConfig.new()
 	config.world_seed = 1337
 	var generator := TerrainGenerator.new(config)
 	var blocks := VoxelTypes.build_default_registry()
 	var world := VoxelWorld.new(config, blocks)
+	var tree_col := Vector2i(-1, -1)
+	for wx in range(-240, 240):
+		for wz in range(-240, 240):
+			if not TreeGenerator.has_tree_at(1337, Vector2i(wx, wz)):
+				continue
+			var prof: Dictionary = generator.column_profile(wx, wz)
+			if int(prof["height"]) > 8 and not prof["sandy"] \
+					and not prof["rocky"]:
+				tree_col = Vector2i(wx, wz)
+				break
+		if tree_col.x >= 0:
+			break
+	check(tree_col.x >= 0, "种子 1337 存在有效树列")
+	if tree_col.x < 0:
+		return
+	var center := Vector3i(
+			VoxelCoords.floordiv(tree_col.x, config.chunk_size),
+			VoxelCoords.floordiv(int(generator.column_profile(
+					tree_col.x, tree_col.y)["height"]) + 2,
+					config.chunk_size),
+			VoxelCoords.floordiv(tree_col.y, config.chunk_size))
 	for cz in 2:
 		for cx in 2:
 			var chunk: ChunkData = generator.generate_chunk(
-					Vector3i(cx, 2, cz))
+					center + Vector3i(cx, 0, cz))
 			world.add_chunk(chunk)
 	var light: Node = preload("res://systems/lighting/voxel_light.gd").new()
 	tree_root.add_child(light)

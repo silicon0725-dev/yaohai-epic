@@ -19,7 +19,7 @@ namespace VoxelTerrain;
 /// </summary>
 public partial class NativeTerrain : RefCounted
 {
-    private const int GeneratorVersion = 7;
+    private const int GeneratorVersion = 8;
     private const int DirtLayerDepth = 3;
     private const int SandMaxHeight = 8;
     private const int IronOreMaxY = 20;
@@ -43,10 +43,32 @@ public partial class NativeTerrain : RefCounted
     private const double IronVeinValue = 0.965;
     private const int SeaLevel = 7;
     private const int KnotCount = 17;
+    // v8 地形塑形（Epic-Terrain 配比，巨型档=其尺度 ÷2）
+    private const double ContinentFreq = 1.0 / 4096.0;
+    private const int ContinentOctaves = 6;
+    private const double MountainMaskFreq = 1.0 / 2048.0;
+    private const double RidgeFreq = 1.0 / 1024.0;
+    private const int RidgeOctaves = 5;
+    private const double MountainGain = 0.46;
+    private const double ErodeFreq = 1.0 / 1024.0;
+    private const double ErodeGain1 = 0.5;
+    private const double ErodeGain2 = 0.3;
+    private const double ErodeGain3 = 0.17;
+    private const double ErodeGain4 = 0.08;
+    private const double CoastRiseLo = 0.06;
+    private const double CoastRiseHi = 0.11;
+    private const double CoastFallLo = 0.24;
+    private const double CoastFallHi = 0.34;
+    private const double CoastErodeGain = 0.07;
+    private const double InlandErodeGain = 0.03;
+    private const double RiverFreq = 1.0 / 2048.0;
+    private const int RiverOctaves = 4;
+    private const double RiverModFreq = 1.0 / 1024.0;
+    private const double RiverBand = 0.001;
+    private const double RiverFrac = 0.085;
+    private const double RiverBase = 0.4;
     private const double MountainGateLo = 0.30;
     private const double MountainGateHi = 0.60;
-    private const double MountainGain = 0.46;
-    private const double DetailGain = 0.045;
     private const double RockSurfaceFrac = 0.62;
     private const double TempLapse = 0.9;
     private const double DesertTemp = 0.30;
@@ -75,7 +97,13 @@ public partial class NativeTerrain : RefCounted
     private readonly FastNoiseLite _continental;
     private readonly FastNoiseLite _mountainMask;
     private readonly FastNoiseLite _ridge;
-    private readonly FastNoiseLite _detail;
+    private readonly FastNoiseLite _e0;
+    private readonly FastNoiseLite _e1;
+    private readonly FastNoiseLite _e2;
+    private readonly FastNoiseLite _e3;
+    private readonly FastNoiseLite _e4;
+    private readonly FastNoiseLite _river1;
+    private readonly FastNoiseLite _river2;
     private readonly FastNoiseLite _temp;
     private readonly FastNoiseLite _precip;
     private readonly FastNoiseLite _coal;
@@ -105,19 +133,25 @@ public partial class NativeTerrain : RefCounted
         _ironOreId = b[7];
         _waterId = b[8];
         _worldHeightBlocks = worldHeightBlocks;
-        _continental = MakeFbm(worldSeed, 0.0028, 4);
-        _mountainMask = MakeFbm(worldSeed + 101, 0.0011, 3);
-        _temp = MakeFbm(worldSeed + 202, 0.0016, 3);
-        _precip = MakeFbm(worldSeed + 303, 0.0013, 3);
+        _continental = MakeFbm(worldSeed, ContinentFreq, ContinentOctaves);
+        _mountainMask = MakeFbm(worldSeed + 101, MountainMaskFreq, 3);
+        _temp = MakeFbm(worldSeed + 202, MountainMaskFreq, 3);
+        _precip = MakeFbm(worldSeed + 303, MountainMaskFreq, 3);
         _ridge = new FastNoiseLite
         {
             Seed = (int)(worldSeed + 404),
             NoiseType = FastNoiseLite.NoiseTypeEnum.Simplex,
-            Frequency = 0.02f,
+            Frequency = (float)RidgeFreq,
             FractalType = FastNoiseLite.FractalTypeEnum.Ridged,
-            FractalOctaves = 3,
+            FractalOctaves = RidgeOctaves,
         };
-        _detail = MakeFbm(worldSeed + 505, 0.05, 2);
+        _e0 = MakeFbm(worldSeed + 505, ErodeFreq, 1);
+        _e1 = MakeFbm(worldSeed + 515, ErodeFreq * 2.0, 1);
+        _e2 = MakeFbm(worldSeed + 525, ErodeFreq * 4.0, 1);
+        _e3 = MakeFbm(worldSeed + 535, ErodeFreq * 8.0, 1);
+        _e4 = MakeFbm(worldSeed + 545, ErodeFreq * 16.0, 1);
+        _river1 = MakeFbm(worldSeed + 624, RiverFreq, RiverOctaves);
+        _river2 = MakeFbm(worldSeed + 634, RiverModFreq, 3);
         _coal = MakeFbm(worldSeed + 606, 0.08, 1);
         _iron = MakeFbm(worldSeed + 707, 0.09, 1);
         _cave1 = MakeFbm(worldSeed + 808, CaveFreq, CaveOctaves);
@@ -145,12 +179,14 @@ public partial class NativeTerrain : RefCounted
 
     /// 与 GDScript _build_source_quantiles 逐位一致：24x24 固定采样点
     /// 排序后取 17 个分位节点（同坐标同噪声值，排序结果相同）。
+    /// 采样步长 911/929（v8 大陆波长 4096 → 窗 ~20000 格 ≈ 5 波长；
+    /// 小窗会让分位节点挤成一点，全图高度塌到低端）。
     private double[] BuildSourceQuantiles()
     {
         var samples = new List<double>(24 * 24);
         for (int i = 0; i < 24; i++)
             for (int j = 0; j < 24; j++)
-                samples.Add(_continental.GetNoise2D(i * 37 + 3, j * 41 + 13));
+                samples.Add(_continental.GetNoise2D(i * 911 + 3, j * 929 + 13));
         samples.Sort();
         var knots = new double[KnotCount];
         for (int k = 0; k < KnotCount; k++)
@@ -206,6 +242,8 @@ public partial class NativeTerrain : RefCounted
     }
 
     /// 列剖面（与 GDScript column_profile 等价；返回三值元组而非字典）。
+    /// v8 层序：分位匹配大陆 → 山系掩码×脊状山形 → Epic 侵蚀链
+    /// （海岸带全幅/内陆轻调制）→ 河流窄带下切 → 气候群系。
     private (int height, bool rocky, bool sandy) ColumnProfile(int wx, int wz)
     {
         double frac = ShapeHeight(_continental.GetNoise2D(wx, wz));
@@ -213,11 +251,31 @@ public partial class NativeTerrain : RefCounted
         double gate = SmoothStep(MountainGateLo, MountainGateHi, maskRaw);
         if (gate > 0.0)
         {
-            double ridge01 = ClampD(
-                (_ridge.GetNoise2D(wx, wz) + 1.0) * 0.5, 0.0, 1.0);
+            // FNL Ridged 实测 [-0.62,1]，截 [0,1] 后平方——压谷抬峰：
+            // 不平方时输出均值 ~0.4，山系内部整体抬升成裸岩高原；
+            // 平方后只有脊线附近满幅，山系=线状峰峦+谷地
+            double ridge01 = ClampD(_ridge.GetNoise2D(wx, wz), 0.0, 1.0);
+            ridge01 *= ridge01;
             frac += gate * ridge01 * MountainGain;
         }
-        frac += _detail.GetNoise2D(wx, wz) * DetailGain;
+        // Epic 式侵蚀链：大波长主体 + 逐级小系数扰动
+        double e = _e0.GetNoise2D(wx, wz)
+            + Math.Abs(_e1.GetNoise2D(wx, wz)) * ErodeGain1
+            + Math.Abs(_e2.GetNoise2D(wx, wz)) * ErodeGain2
+            + Math.Abs(_e3.GetNoise2D(wx, wz)) * ErodeGain3
+            + Math.Abs(_e4.GetNoise2D(wx, wz)) * ErodeGain4;
+        double coast = SmoothStep(CoastRiseLo, CoastRiseHi, frac)
+            * (1.0 - SmoothStep(CoastFallLo, CoastFallHi, frac));
+        frac += e * (coast * CoastErodeGain + InlandErodeGain);
+        // 河流：原始 fbm 取 abs 的过零窄带，只在陆上下切
+        double rn = Math.Abs(_river1.GetNoise2D(wx, wz));
+        if (rn < RiverBand && frac > RiverFrac)
+        {
+            double rw = ClampD(_river2.GetNoise2D(wx, wz), 0.0, 1.0);
+            double band = 1.0 - rn / RiverBand;
+            double depth = band * (RiverBase + (1.0 - RiverBase) * rw);
+            frac += (RiverFrac - frac) * Math.Min(depth, 1.0);
+        }
         frac = ClampD(frac, 0.0, 1.0);
         int maxSurface = _worldHeightBlocks - 3;
         int height = RoundToInt(frac * (maxSurface - 1)) + 1;

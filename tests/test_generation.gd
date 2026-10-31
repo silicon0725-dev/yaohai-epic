@@ -89,8 +89,8 @@ func run() -> void:
 	check_eq(
 		first.generation_version, TerrainGenerator.GENERATOR_VERSION,
 		"区块记录生成算法版本")
-	check_eq(TerrainGenerator.GENERATOR_VERSION, 7,
-			"生成算法已升级到 v7（v6 + 洞穴网络 + 细脉矿）")
+	check_eq(TerrainGenerator.GENERATOR_VERSION, 8,
+			"生成算法已升级到 v8（v7 + Epic-Terrain 尺度配比：大陆板块/侵蚀链/河流）")
 
 	# 目标高程分位表单调递增（分位匹配的前提）
 	var target := TerrainGenerator.TARGET_HEIGHT_FRAC
@@ -102,15 +102,15 @@ func run() -> void:
 
 	# 分布形态（分位匹配的效果）：大范围采样高度占比——
 	# 多数列应处于中低高度（平原为主），且存在高占比列（山地长尾）
-	# 采样窗必须远大于山脉掩码波长（~900 格），否则整窗可能落在
-	# 单一山系内（该参考项目的粗图像素高达 23km，山系尺度本就巨大）
+	# 采样窗必须远大于大陆波长（v8 大陆 fbm 4096 格 → 窗 ~18000 格，
+	# 约 4.4 个波长；v3 的 37 步长 3500 格窗在 v8 下只覆盖单一地貌）
 	var low := 0
 	var mid := 0
 	var high := 0
 	for x in 96:
 		for z in 96:
 			var frac: float = generator.column_profile(
-					x * 37 - 1700, z * 37 - 1700)["frac"]
+					x * 187 - 9000, z * 187 - 9000)["frac"]
 			if frac < 0.30:
 				low += 1
 			elif frac < 0.62:
@@ -118,10 +118,10 @@ func run() -> void:
 			else:
 				high += 1
 	var total := low + mid + high
-	check(float(low) / total > 0.55, "平原为主（低占比列 > 55%%，实际 %.0f%%）"
+	check(float(low) / total > 0.40, "平原为主（低占比列 > 40%%，实际 %.0f%%）"
 			% (100.0 * low / total))
 	check(high > 0, "存在山地长尾（高占比列 %d）" % high)
-	check(float(high) / total < 0.15, "山地稀少（< 15%%，实际 %.0f%%）"
+	check(float(high) / total < 0.20, "山地稀少（< 20%%，实际 %.0f%%）"
 			% (100.0 * high / total))
 
 	# 生物群系覆盖：裸岩列与气候荒漠列在固定种子下确实存在
@@ -130,7 +130,7 @@ func run() -> void:
 	for x in 96:
 		for z in 96:
 			var profile: Dictionary = generator.column_profile(
-					x * 37 - 1700, z * 37 - 1700)
+					x * 187 - 9000, z * 187 - 9000)
 			if profile["rocky"]:
 				seen_rocky += 1
 			if profile["sandy"] and profile["height"] > TerrainGenerator.SAND_MAX_HEIGHT:

@@ -8,6 +8,12 @@
 ##   3. 气候场——低频温度/降水两张粗图 + 温度随海拔的递减率
 ##      （lapse），据此选生物群系：荒漠（热且干）/ 草原 /
 ##      裸岩山地 / 滩涂沙地。
+## v8（Epic-Terrain 数据包尺度配比移植，"巨型档"整体缩 2 倍）：
+##   地表按"显示比例"分层重构——大陆板块 fbm 4096 格 / 山系掩码
+##   2048 + 脊状山形 1024 / Epic 式 5 级侵蚀链（1024→64，嵌套系数
+##   0.5/0.3/0.17/0.08，海岸带加权出峡湾与离岸岛屿）+ ridged 零点
+##   窄带河流（走向 2048 格，窄带 0.03 下切到海平面下，静态水填充
+##   自动成河）。分位匹配表保留（高程多样性资产），仅换形状来源。
 ## 调整任何参数都必须递增版本——未修改区域会用新算法重建，已保存
 ## 的完整区块数据不受影响（§5.1、§9）。
 @tool
@@ -18,7 +24,7 @@ extends RefCounted
 const NativeTerrainBridge := preload("res://meshing/native_terrain_bridge.gd")
 
 ## 生成算法版本。
-const GENERATOR_VERSION := 7
+const GENERATOR_VERSION := 8
 
 # ---- 地层参数（v2 语义保留）----
 ## 表层以下 3 格为泥土（草区）或砂岩（沙区）。
@@ -65,7 +71,7 @@ const IRON_VEIN_VALUE := 0.965
 ## 铁矿深度带上限（比煤更深）。
 const IRON_ORE_MAX_Y := 20
 
-# ---- v3 地形参数 ----
+# ---- v8 地形塑形参数（Epic-Terrain 配比，巨型档=其尺度 ÷2）----
 ## 高程分布重映射的目标分位表（移植其分位匹配）：输入为噪声的
 ## 累积分位，输出为高度占比 0..1。质量集中在中低（平原为主），
 ## 高端长尾（山地稀少而陡峭）——即真实地貌的测高曲线形状。
@@ -74,14 +80,50 @@ const TARGET_HEIGHT_FRAC := [
 	0.030, 0.055, 0.075, 0.095, 0.115, 0.135, 0.155, 0.180,
 	0.205, 0.235, 0.270, 0.315, 0.370, 0.445, 0.540, 0.680, 0.900,
 ]
-## 山脉掩码门控（smoothstep 区间）：掩码值高于上界全幅出山，
-## 低于下界完全无山——山只出现在粗图划定的区域。
+## 大陆板块 fbm 波长（Epic continentalness 8192 格 ÷2）与倍频。
+const CONTINENT_FREQ := 1.0 / 4096.0
+const CONTINENT_OCTAVES := 6
+## 山系分布掩码波长与门控（smoothstep 区间）：掩码高于上界全幅出山，
+## 低于下界完全无山——山只出现在掩码划定的山系区域。
+const MOUNTAIN_MASK_FREQ := 1.0 / 2048.0
 const MOUNTAIN_GATE_LO := 0.30
 const MOUNTAIN_GATE_HI := 0.60
-## 山脊叠加幅度（高度占比）。
+## 脊状山形波长/倍频与幅度。FNL Ridged 实测输出 [-0.62, 1.0]
+## （1-|n| 加权语义，脊线=max）；clamp 截到 [0,1] 后负值区=谷底
+## 平地，正好像山间谷地（v3 的 (n+1)/2 映射会把输出压在 [0.2,1]
+## 使山形变馒头——v8 改直接取值）。
+const RIDGE_FREQ := 1.0 / 1024.0
+const RIDGE_OCTAVES := 5
 const MOUNTAIN_GAIN := 0.46
-## 细节起伏幅度（高度占比）。
-const DETAIL_GAIN := 0.045
+## Epic 式侵蚀链：4 级嵌套扰动（波长 512/256/128/64，系数递减
+## 0.5/0.3/0.17/0.08）叠加在 1024 格主体上——大波长管趋势、逐级
+## 加细节，中观地貌过渡带的来源。
+const ERODE_FREQ := 1.0 / 1024.0
+const ERODE_GAIN_1 := 0.5
+const ERODE_GAIN_2 := 0.3
+const ERODE_GAIN_3 := 0.17
+const ERODE_GAIN_4 := 0.08
+## 海岸带权重（smoothstep 升/降端点，frac 空间；海平面 frac≈0.14）：
+## 侵蚀只在海岸带全幅作用（峡湾/海峡/离岸岛屿），内陆轻调制。
+const COAST_RISE_LO := 0.06
+const COAST_RISE_HI := 0.11
+const COAST_FALL_LO := 0.24
+const COAST_FALL_HI := 0.34
+const COAST_ERODE_GAIN := 0.07
+const INLAND_ERODE_GAIN := 0.03
+## 河流（Epic r/1 配方移植）：普通 fbm 噪声取绝对值后的过零窄带
+## = 河道（走向波长 2048 格；|n|<BAND 的带状区即河，宽度由带宽
+## 与噪声梯度决定）。窄带内按带宽向下切到 RIVER_FRAC（河床 h≈5，
+## 海平面下 2 格 → 静态水填充自动成河），强度调制噪声（1024 格）
+## 让河段有深浅/源头变化。只在陆上（frac > RIVER_FRAC）下切，
+## 河到海边自然衔接。注意不能用 Ridged 分形取低值端——多倍频
+## 和的分布挤在中段，>0.97 端趋零；必须对原始 fbm 取 abs。
+const RIVER_FREQ := 1.0 / 2048.0
+const RIVER_OCTAVES := 4
+const RIVER_MOD_FREQ := 1.0 / 1024.0
+const RIVER_BAND := 0.001
+const RIVER_FRAC := 0.085
+const RIVER_BASE := 0.4
 ## 裸岩山地的高度占比阈值（高于此值表层为石头，无泥土）。
 const ROCK_SURFACE_FRAC := 0.62
 ## 气候：温度随高度占比的递减率（高地更冷）。
@@ -95,7 +137,13 @@ var config: WorldConfig
 var _continental_noise: FastNoiseLite
 var _mountain_mask_noise: FastNoiseLite
 var _ridge_noise: FastNoiseLite
-var _detail_noise: FastNoiseLite
+var _e0_noise: FastNoiseLite
+var _e1_noise: FastNoiseLite
+var _e2_noise: FastNoiseLite
+var _e3_noise: FastNoiseLite
+var _e4_noise: FastNoiseLite
+var _river1_noise: FastNoiseLite
+var _river2_noise: FastNoiseLite
 var _temp_noise: FastNoiseLite
 var _precip_noise: FastNoiseLite
 var _coal_noise: FastNoiseLite
@@ -112,19 +160,37 @@ var _source_knots := PackedFloat32Array()
 
 func _init(world_config: WorldConfig) -> void:
 	config = world_config
-	# 粗图（低频布局）：大陆高程 4 倍频 / 山脉掩码 / 温度 / 降水
-	_continental_noise = _make_fbm(world_config.world_seed, 0.0028, 4)
-	_mountain_mask_noise = _make_fbm(world_config.world_seed + 101, 0.0011, 3)
-	_temp_noise = _make_fbm(world_config.world_seed + 202, 0.0016, 3)
-	_precip_noise = _make_fbm(world_config.world_seed + 303, 0.0013, 3)
-	# 细节：山脊（脊状分形）与局部起伏
+	# 粗图（v8 尺度配比）：大陆板块 4096 / 山系掩码 2048 / 气候 2048
+	_continental_noise = _make_fbm(world_config.world_seed,
+			CONTINENT_FREQ, CONTINENT_OCTAVES)
+	_mountain_mask_noise = _make_fbm(world_config.world_seed + 101,
+			MOUNTAIN_MASK_FREQ, 3)
+	_temp_noise = _make_fbm(world_config.world_seed + 202,
+			MOUNTAIN_MASK_FREQ, 3)
+	_precip_noise = _make_fbm(world_config.world_seed + 303,
+			MOUNTAIN_MASK_FREQ, 3)
+	# 山形：脊状分形（FNL Ridged 输出 [0,1]，1-|n| 语义脊线=max）
 	_ridge_noise = FastNoiseLite.new()
 	_ridge_noise.seed = world_config.world_seed + 404
 	_ridge_noise.noise_type = FastNoiseLite.TYPE_SIMPLEX
-	_ridge_noise.frequency = 0.02
+	_ridge_noise.frequency = RIDGE_FREQ
 	_ridge_noise.fractal_type = FastNoiseLite.FRACTAL_RIDGED
-	_ridge_noise.fractal_octaves = 3
-	_detail_noise = _make_fbm(world_config.world_seed + 505, 0.05, 2)
+	_ridge_noise.fractal_octaves = RIDGE_OCTAVES
+	# Epic 式侵蚀链：1024 主体 + 4 级扰动（512/256/128/64）
+	_e0_noise = _make_fbm(world_config.world_seed + 505, ERODE_FREQ, 1)
+	_e1_noise = _make_fbm(world_config.world_seed + 515,
+			ERODE_FREQ * 2.0, 1)
+	_e2_noise = _make_fbm(world_config.world_seed + 525,
+			ERODE_FREQ * 4.0, 1)
+	_e3_noise = _make_fbm(world_config.world_seed + 535,
+			ERODE_FREQ * 8.0, 1)
+	_e4_noise = _make_fbm(world_config.world_seed + 545,
+			ERODE_FREQ * 16.0, 1)
+	# 河流：fbm 走向（取 abs 过零窄带）+ 强度调制
+	_river1_noise = _make_fbm(world_config.world_seed + 624,
+			RIVER_FREQ, RIVER_OCTAVES)
+	_river2_noise = _make_fbm(world_config.world_seed + 634,
+			RIVER_MOD_FREQ, 3)
 	# 矿物（v7 细脉网络替代 v2 单噪声阈值）
 	_coal_noise = _make_fbm(world_config.world_seed + 606, 0.08, 1)
 	_iron_noise = _make_fbm(world_config.world_seed + 707, 0.09, 1)
@@ -154,12 +220,15 @@ static func _make_fbm(seed_value: int, frequency: float, octaves: int) -> FastNo
 ## 对本种子的大陆噪声固定采样，构建源分布分位节点（对应
 ## build_quantiles：分布与种子无关，仅频率/倍频参数决定形状；
 ## 固定采样坐标保证确定性）。
+## 采样窗必须远大于噪声波长（v8 大陆 4096 格 → 窗 ~20000 格，
+## 约 5 个波长；v3 旧步长 37/41 的 900 格窗会让 576 个样本全落在
+## 单一坡面上，分位节点挤成一点，全图高度塌到低端）。
 func _build_source_quantiles() -> PackedFloat32Array:
 	var samples: Array[float] = []
 	for i in 24:
 		for j in 24:
 			samples.append(_continental_noise.get_noise_2d(
-					float(i * 37 + 3), float(j * 41 + 13)))
+					float(i * 911 + 3), float(j * 929 + 13)))
 	samples.sort()
 	var knots := PackedFloat32Array()
 	for k in KNOT_COUNT:
@@ -186,18 +255,39 @@ func _shape_height(noise_value: float) -> float:
 
 
 ## 列剖面：高度占比 + 高度 + 生物群系（每列一次，供地层填充）。
-## 生物群系：裸岩山地（高）/ 荒漠（热干低地）/ 滩涂沙（近基准面）/
-## 草原（默认）。温度含海拔递减（对应其 lapse 公式的简化）。
+## v8 层序：分位匹配大陆 → 山系掩码×脊状山形 → Epic 侵蚀链
+## （海岸带全幅/内陆轻调制）→ 河流窄带下切 → 气候群系。
 func column_profile(world_x: int, world_z: int) -> Dictionary:
 	var frac := _shape_height(
 			_continental_noise.get_noise_2d(world_x, world_z))
 	var mask_raw := _mountain_mask_noise.get_noise_2d(world_x, world_z)
 	var gate := smoothstep(MOUNTAIN_GATE_LO, MOUNTAIN_GATE_HI, mask_raw)
 	if gate > 0.0:
-		var ridge01 := clampf(
-				(_ridge_noise.get_noise_2d(world_x, world_z) + 1.0) * 0.5, 0.0, 1.0)
+		# FNL Ridged 实测 [-0.62,1]，截 [0,1] 后平方——压谷抬峰：
+		# 不平方时输出均值 ~0.4，山系内部整体抬升成裸岩高原；
+		# 平方后只有脊线附近满幅，山系=线状峰峦+谷地
+		var ridge01 := clampf(_ridge_noise.get_noise_2d(world_x, world_z),
+				0.0, 1.0)
+		ridge01 *= ridge01
 		frac += gate * ridge01 * MOUNTAIN_GAIN
-	frac += _detail_noise.get_noise_2d(world_x, world_z) * DETAIL_GAIN
+	# Epic 式侵蚀链：大波长主体 + 逐级小系数扰动
+	var e := _e0_noise.get_noise_2d(world_x, world_z) \
+			+ absf(_e1_noise.get_noise_2d(world_x, world_z)) * ERODE_GAIN_1 \
+			+ absf(_e2_noise.get_noise_2d(world_x, world_z)) * ERODE_GAIN_2 \
+			+ absf(_e3_noise.get_noise_2d(world_x, world_z)) * ERODE_GAIN_3 \
+			+ absf(_e4_noise.get_noise_2d(world_x, world_z)) * ERODE_GAIN_4
+	var coast := smoothstep(COAST_RISE_LO, COAST_RISE_HI, frac) \
+			* (1.0 - smoothstep(COAST_FALL_LO, COAST_FALL_HI, frac))
+	frac += e * (coast * COAST_ERODE_GAIN + INLAND_ERODE_GAIN)
+	# 河流：原始 fbm 取 abs 的过零窄带（|n|<BAND 的线状带区），
+	# 只在陆上下切（河海自然衔接）
+	var rn := absf(_river1_noise.get_noise_2d(world_x, world_z))
+	if rn < RIVER_BAND and frac > RIVER_FRAC:
+		var rw := clampf(_river2_noise.get_noise_2d(world_x, world_z),
+				0.0, 1.0)
+		var band := 1.0 - rn / RIVER_BAND
+		var depth := band * (RIVER_BASE + (1.0 - RIVER_BASE) * rw)
+		frac = lerpf(frac, RIVER_FRAC, minf(depth, 1.0))
 	frac = clampf(frac, 0.0, 1.0)
 	var max_surface := config.world_height_blocks() - 3
 	var height := clampi(

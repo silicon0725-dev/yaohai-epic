@@ -30,8 +30,29 @@ const BLOCK_FAMILY := {
 	17: "wood", 18: "wood",
 }
 
-## 每族 4 个预生成变体（AudioStreamWAV），启动时合成一次
+## 录音素材（CC0，见 assets/sounds/footsteps/ATTRIBUTION.md）：
+## 族 → 文件名表。步态播放优先录音，缺失族回退程序化合成。
+## water 族录音（splash）只做入水/出水溅泼——涉水脚步短促，用合成。
+const RECORDED_DIR := "res://assets/sounds/footsteps/"
+const RECORDED_FILES := {
+	"grass": ["grass_01.ogg", "grass_02.ogg", "grass_03.ogg",
+			"grass_04.ogg"],
+	"dirt": ["dirt_01.ogg"],
+	"stone": ["stone_01.ogg", "stone_f01.ogg", "stone_f02.ogg",
+			"stone_f03.ogg", "stone_f04.ogg", "stone_f05.ogg",
+			"stone_f06.ogg"],
+	"wood": ["wood_01.ogg", "wood_02.ogg", "wood_03.ogg"],
+	"sand": ["sand_01.ogg", "sand_02.ogg", "sand_03.ogg", "sand_04.ogg",
+			"sand_05.ogg", "sand_06.ogg"],
+	"gravel": ["gravel_01.ogg"],
+	"leaves": ["leaves_01.ogg", "leaves_02.ogg"],
+	"water": ["splash_01.wav", "splash_02.wav"],
+}
+
+## 步态变体（录音优先，合成兜底；water 恒用合成）
 var _variants := {}
+## 溅泼变体（water 族录音，入水/出水事件用）
+var _splash_variants: Array = []
 var _player: Node  # PlayerController
 var _world: VoxelWorld
 var _stride_acc := 0.0
@@ -46,14 +67,23 @@ var volume_scale := 1.0
 func setup(p_manager: Node, p_world: VoxelWorld) -> void:
 	_manager = p_manager
 	_world = p_world
+	for family in ["grass", "dirt", "stone", "wood", "sand",
+			"gravel", "leaves", "water"]:
+		# 录音优先（CC0）；合成兜底。water 的录音（splash）留给
+		# 溅泼事件，涉水脚步用合成（录音 2s+ 太长）
+		var recorded := load_family_streams(family)
+		if family == "water":
+			_splash_variants = recorded
+			_variants[family] = _synth_family(family)
+		elif recorded.is_empty():
+			_variants[family] = _synth_family(family)
+		else:
+			_variants[family] = recorded
 
 
 ## 玩家在 main 加载流程后段才创建，单独挂接
 func set_player(p_player: Node) -> void:
 	_player = p_player
-	for family in ["grass", "dirt", "stone", "wood", "sand",
-			"gravel", "leaves", "water"]:
-		_variants[family] = _synth_family(family)
 
 
 func _physics_process(_delta: float) -> void:
@@ -80,10 +110,13 @@ func _physics_process(_delta: float) -> void:
 			floori(_player.global_position.z))
 	_wading = WaterFlow.water_surface_at(_world, feet_cell) \
 			- (_player.global_position.y - 1.0) > 0.1
-	# 入水/出水溅泼（边沿触发；SFX 总线比脚步响一档）
+	# 入水/出水溅泼（边沿触发；SFX 总线比脚步响一档）——CC0 录音
+	# splash，缺失回退合成 water 变体
 	if _wading != _was_wading:
-		_manager.play_2d(_variants["water"].pick_random(),
-				1.3 * volume_scale, randf_range(0.9, 1.1), "SFX")
+		var splashes: Array = _splash_variants if not _splash_variants.is_empty() \
+				else _variants["water"]
+		_manager.play_2d(splashes.pick_random(), 1.3 * volume_scale,
+				randf_range(0.9, 1.1), "SFX")
 	_was_wading = _wading
 	# 步距累计（水平速度）
 	var horizontal := Vector2(vel.x, vel.z).length()
@@ -106,8 +139,10 @@ func _play_step(volume: float) -> void:
 	var streams: Array = _variants.get(family, [])
 	if streams.is_empty():
 		return
+	# 稀缺族（录音变体 ≤2）加大音高抖动弥补变化感
+	var pitch_span := 0.06 if streams.size() > 2 else 0.12
 	_manager.play_2d(streams.pick_random(), volume * volume_scale,
-			randf_range(0.94, 1.06), "Footsteps")
+			randf_range(1.0 - pitch_span, 1.0 + pitch_span), "Footsteps")
 
 
 ## 脚下方块材质族；涉水时水声优先（splash 掩盖底部材质）
@@ -128,6 +163,28 @@ static func block_family(block_id: int) -> String:
 static func land_volume(fall_speed: float) -> float:
 	return clampf(0.5 + (fall_speed - LAND_MIN_FALL) / 12.0 * 0.7,
 			0.5, 1.2)
+
+
+## 族录音流加载（CC0 文件，见 assets/sounds/footsteps/
+## ATTRIBUTION.md）：ogg 字节加载绕 .import、wav 同理；缺失/损坏
+## 返回空数组（调用方回退合成）。静态可测。
+static func load_family_streams(family: String) -> Array:
+	var out := []
+	for file_name: String in RECORDED_FILES.get(family, []):
+		var path := RECORDED_DIR + family + "/" + file_name
+		var bytes := FileAccess.get_file_as_bytes(path)
+		if bytes.is_empty():
+			push_warning("脚步录音缺失: " + path)
+			continue
+		if file_name.ends_with(".ogg"):
+			var ogg := AudioStreamOggVorbis.load_from_buffer(bytes)
+			if ogg != null:
+				out.append(ogg)
+		elif file_name.ends_with(".wav"):
+			var wav := AudioStreamWAV.load_from_file(path)
+			if wav != null:
+				out.append(wav)
+	return out
 
 
 # ---- 程序化合成（22050Hz 16bit 单声道短样本，启动时一次） ----

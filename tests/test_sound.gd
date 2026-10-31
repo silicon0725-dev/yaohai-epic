@@ -12,6 +12,7 @@ const AcousticScript := preload("res://systems/sound/acoustic_system.gd")
 func run() -> void:
 	_test_block_family_map()
 	_test_footstep_synth()
+	_test_footstep_recorded()
 	_test_land_volume()
 	_test_ambient_selector()
 	_test_ambient_stream_variant()
@@ -69,6 +70,20 @@ func _test_footstep_synth() -> void:
 				break
 		check(nonzero, "%s 波形非全零" % family)
 		sys.free()
+
+
+## CC0 录音层（ATTRIBUTION.md）：八族全部有录音流、格式正确、
+## 变体数与文件表一致——步态播放走录音，合成只做兜底
+func _test_footstep_recorded() -> void:
+	for family in ["grass", "dirt", "stone", "wood", "sand", "gravel",
+			"leaves", "water"]:
+		var streams: Array = FootstepScript.load_family_streams(family)
+		var expect: int = FootstepScript.RECORDED_FILES[family].size()
+		check(streams.size() == expect,
+				"%s 录音 %d/%d 全部加载" % [family, streams.size(), expect])
+		for s in streams:
+			check(s is AudioStreamOggVorbis or s is AudioStreamWAV,
+					"%s 录音流类型正确" % family)
 
 
 ## 落地音量：随坠落速度单调、边界收敛

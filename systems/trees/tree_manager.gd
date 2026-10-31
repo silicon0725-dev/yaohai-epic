@@ -31,9 +31,15 @@ var _cut_events: Array = []
 const MAX_CUT_EVENTS := 256
 ## 掉落结算回调（main 注入：spawn_drop）
 var drop_spawner: Callable
-## 光照脏树集合：光源/遮挡方块变化后需重烘顶点色的 tree_id
+## 光照脏树（快速通道）：方块光语义变化（放/挖光源、遮挡变化）
+## 时**光照数据已同步落定**——voxel_light 在 block_changed 信号内
+## 同步完成 BFS 才返回，重烘无需等管线空闲。曾误等 is_idle：区块
+## remesh 队列可拖秒级，树干光照更新明显滞后于地面光池（实机报告）
 var _light_dirty := {}
 var _light_dirty_wait := 0.0
+## 首建待定树（慢通道）：需邻块到齐才首烘，空闲门控 + 2s 兜底
+var _build_pending := {}
+var _build_pending_wait := 0.0
 ## 每帧重烘上限（初次加载后全量标脏一次，限量防单帧长卡）
 const REBUILD_BUDGET_PER_FRAME := 4
 ## 管线空闲判定（main 注入 chunk_manager.is_idle）：光照传播是排队
@@ -105,9 +111,9 @@ func on_chunk_active(chunk_coord: Vector3i) -> void:
 
 ## 新激活区块补齐了树网格烘焙时可能缺失的邻块光照（重进存档/
 ## 流式加载：树在其根列 chunk 激活瞬间构建，树梢/横枝跨着的上层
-## 与水平邻块常未就绪）。相交树标脏等空闲重烘——与 light_of 的
-## 未加载安全回退配合：先烘出无自发光的安全色，邻块到齐后重烘
-## 成正确光照。
+## 与水平邻块常未就绪）。相交树标脏走快速通道——ACTIVE 时刻本块
+## 光照已在 worker 初始化+边界播入落定；未加载面由 light_of 安全
+## 回退兜底，其余邻块到齐后自动重烘。
 func _mark_intersecting_dirty(chunk_coord: Vector3i) -> void:
 	var s := world.config.chunk_size
 	var cbox := AABB(Vector3(chunk_coord) * float(s) - Vector3.ONE,
@@ -204,9 +210,9 @@ func _ref_tree(col: Vector2i) -> void:
 	for cell in tree.cell_to_branch:
 		_cell_lookup[cell] = tree_id
 	_apply_cuts(tree, tree_id)
-	# 首建走光照脏冲刷（空闲门控）：根列 chunk 激活瞬间邻块常未
-	# 就绪，立即构建会把未加载跨块面烘成回退色——等管线空闲再烘
-	_light_dirty[tree_id] = true
+	# 首建走慢通道（空闲门控）：根列 chunk 激活瞬间邻块常未就绪，
+	# 立即构建会把未加载跨块面烘成回退色——等管线空闲再首烘
+	_build_pending[tree_id] = true
 
 
 var _terrain_gen = null
@@ -606,17 +612,12 @@ func _collect_leaves_near(cells: Array[Vector3i]) -> Array[Vector3i]:
 
 
 func _process(delta: float) -> void:
-	# 光照脏重建：合并窗口内多次编辑；等区块管线空闲（光照传播
-	# 落定、邻块到齐）再重烘，2s 兜底防饿死；每帧限量（初次加载
-	# 后全量标脏一次，防单帧长卡）
+	# 快速通道：光照事件重烘。光照数据在信号内同步落定，合并窗口
+	#（0.15s，水流级联/多格编辑合并为一次）后即烘，不等管线空闲；
+	# 每帧限量防单帧长卡
 	if not _light_dirty.is_empty():
 		_light_dirty_wait += delta
-		var ready := false
-		if idle_check.is_valid():
-			ready = _light_dirty_wait >= 2.0 or bool(idle_check.call())
-		else:
-			ready = _light_dirty_wait >= 0.15
-		if ready:
+		if _light_dirty_wait >= 0.15:
 			var built := 0
 			for tid in _light_dirty.keys():
 				if built >= REBUILD_BUDGET_PER_FRAME:
@@ -627,6 +628,26 @@ func _process(delta: float) -> void:
 					built += 1
 		if _light_dirty.is_empty():
 			_light_dirty_wait = 0.0
+	# 慢通道（首建）：根列 chunk 激活瞬间邻块常未就绪，等管线空闲
+	# 再首烘；2s 兜底防饿死（兜底烘出的未加载面走 light_of 安全回退）
+	if not _build_pending.is_empty():
+		_build_pending_wait += delta
+		var ready := false
+		if idle_check.is_valid():
+			ready = _build_pending_wait >= 2.0 or bool(idle_check.call())
+		else:
+			ready = _build_pending_wait >= 0.15
+		if ready:
+			var built2 := 0
+			for tid in _build_pending.keys():
+				if built2 >= REBUILD_BUDGET_PER_FRAME:
+					break
+				_build_pending.erase(tid)
+				if _trees.has(tid):
+					_build_visual(tid)
+					built2 += 1
+		if _build_pending.is_empty():
+			_build_pending_wait = 0.0
 	for body in _falling.keys():
 		var info: Dictionary = _falling[body]
 		info["timer"] = float(info["timer"]) + delta

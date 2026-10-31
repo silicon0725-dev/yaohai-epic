@@ -83,6 +83,13 @@ func _test_light_dirty_rebuild() -> void:
 	mgr._on_block_changed(Vector3i(19, 5, 0), VoxelTypes.AIR_ID,
 			VoxelTypes.TORCH_ID)
 	check(mgr._light_dirty.has(123), "16 格内火把标脏")
+	# 快速通道不依赖管线空闲：光照数据在 block_changed 信号内同步
+	# 落定——重烘曾被 is_idle 门控拖到 remesh 队列排空（秒级滞后，
+	# 实机报告）
+	mgr.idle_check = func() -> bool: return false
+	mgr._process(0.2)
+	check(mgr.builds == 3, "idle=false 仍即时重烘（%d）" % mgr.builds)
+	check(mgr._light_dirty.is_empty(), "冲刷后脏集合清空")
 	mgr.free()
 
 

@@ -212,9 +212,12 @@ func play_3d(stream: AudioStream, pos: Vector3, volume: float,
 	p.global_position = pos
 	p.finished.connect(p.queue_free)
 	p.play()
-	# 早期反射：直通（无遮挡）才规划——被闷掉的源其反射同样弱
-	if occ <= 0.01 and _world != null:
-		_spawn_reflections(stream, pos, ear, volume, pitch)
+	# 早期反射：任何源都规划（不完全封闭的屋子也有回声——次数/
+	# 强度由几何与能量衰减涌现）；被闷的源能量乘遮挡衰减，其绕面
+	# 反射仍可能传入
+	if _world != null:
+		_spawn_reflections(stream, pos, ear,
+				volume * AcousticScript.occlusion_gain(occ), pitch)
 
 
 ## 早期反射声像：延迟 (path-direct)/343 秒后在镜像点播放（Resonance
@@ -223,8 +226,9 @@ func play_3d(stream: AudioStream, pos: Vector3, volume: float,
 ## plan_reflections 验证无遮挡，反射声像走 SFX 干总线
 func _spawn_reflections(stream: AudioStream, source: Vector3,
 		ear: Vector3, volume: float, pitch: float) -> void:
+	# volume 已含源能量（直达遮挡衰减）——被闷的源反射同弱
 	var events: Array = EarlyReflectionsScript.plan_reflections(
-			_world, source, ear)
+			_world, source, ear, volume)
 	for ev in events:
 		var refl_pos: Vector3 = ev["pos"]
 		var refl_gain: float = ev["gain"]

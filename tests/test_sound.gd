@@ -24,6 +24,7 @@ func run() -> void:
 	_test_room_reverb()
 	_test_block_sound_filtering()
 	_test_early_reflections()
+	_test_multibounce_reflections()
 
 
 ## 1 阶镜像源早期反射：单面墙产生 1 条（延迟/镜像位/衰减合理）、
@@ -65,6 +66,45 @@ func _test_early_reflections() -> void:
 	events = ReflectionsScript.plan_reflections(world,
 			Vector3(4.5, 6.5, 8.5), Vector3(4.5, 6.5, 8.5))
 	check(events.is_empty(), "源=听者无路径差 0 条")
+
+
+## 多阶路径展开：封闭屋内的障碍遮挡直达时，墙面 2 阶反弹链
+## （源→后墙→柱面→听者）仍有回声——曾只在直达无遮挡时做 1 阶
+## （实机讨论：否则路径追踪没意义）。镜面反射物理上不穿不透明
+## 墙——跨封闭墙的传声靠衍射，不在镜像源法域内
+func _test_multibounce_reflections() -> void:
+	var world: VoxelWorld = make_world(16, [Vector3i.ZERO], 7)
+	var chunk: ChunkData = world.get_chunk(Vector3i.ZERO)
+	# 封闭石屋：壳 x 2..14、y 6..10、z 6..10；中央柱 (8,8,8)
+	# 挡住源→听者直达
+	for x in range(2, 15):
+		for y in range(6, 11):
+			for z in range(6, 11):
+				var shell: bool = x == 2 or x == 14 or y == 6 \
+						or y == 10 or z == 6 or z == 10
+				chunk.set_block(Vector3i(x, y, z),
+						VoxelTypes.STONE_ID if shell
+						else VoxelTypes.AIR_ID)
+	chunk.set_block(Vector3i(8, 8, 8), VoxelTypes.STONE_ID)
+	var source := Vector3(12.5, 8.5, 8.5)
+	var ear := Vector3(4.5, 8.5, 8.5)
+	var occ: float = AcousticScript.occlusion_between(world, source, ear)
+	check(occ > 0.01, "柱子确实挡住直达（%f）" % occ)
+	var events: Array = ReflectionsScript.plan_reflections(world,
+			source, ear, 0.9)
+	check(events.size() >= 1,
+			"被柱遮挡仍有反射事件（%d 条）" % events.size())
+	if not events.is_empty():
+		var ev: Dictionary = events[0]
+		check(ev["delay_sec"] > 0.0, "反射晚于直达（%f）"
+				% ev["delay_sec"])
+		check(ev["gain"] > 0.05 and ev["gain"] < 0.8,
+				"衰减后增益合理（%f）" % ev["gain"])
+	# 能量剪枝：低源能量不产生超增益事件
+	var far_events: Array = ReflectionsScript.plan_reflections(world,
+			source, ear, 0.3)
+	for ev in far_events:
+		check(ev["gain"] <= 0.8, "剪枝后无超增益事件（%f）" % ev["gain"])
 
 
 ## 交互音过滤回归：水位引擎写入静音（洪水 AIR↔WATER 曾每格一声

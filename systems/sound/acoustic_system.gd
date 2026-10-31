@@ -58,9 +58,11 @@ static func reflectivity(block_id: int) -> float:
 
 ## 声源→听者的遮挡累计：DDA 体素步进，满格 +1.0 / 半透明 +0.15。
 ## 返回 [0,∞)，0=直通。max_dist 限程（超出按无遮挡计）。
+## ignore_cells：豁免格数组（镜像源法的反射面链——2 阶路径穿
+## 两个已验证反射面，面本身不是遮挡）
 static func occlusion_between(world: VoxelWorld, from: Vector3,
 		to: Vector3, max_dist := 32.0,
-		ignore_cell := Vector3i(1 << 29, 1 << 29, 1 << 29)) -> float:
+		ignore_cells: Array = []) -> float:
 	var delta := to - from
 	var dist := delta.length()
 	if dist < 0.5 or dist > max_dist:
@@ -90,9 +92,9 @@ static func occlusion_between(world: VoxelWorld, from: Vector3,
 	var first := true
 	while t < dist:
 		# 起点格跳过（放置音的源格即新方块本身，不能自遮挡）
-		# ignore_cell：镜像源法检查时排除反射面格——镜像→听者直线
-		# 必然穿过反射面（几何本质），面本身不是遮挡
-		if not first and pos != end_cell and pos != ignore_cell:
+		# ignore_cells：镜像源法检查时排除反射面格——镜像→听者
+		# 直线必然穿过反射面链（几何本质），面本身不是遮挡
+		if not first and pos != end_cell and not ignore_cells.has(pos):
 			var b := world.get_block(pos)
 			if is_opaque_block(b):
 				occ += 1.0

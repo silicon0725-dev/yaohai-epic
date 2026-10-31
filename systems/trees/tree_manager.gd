@@ -31,6 +31,13 @@ var _cut_events: Array = []
 const MAX_CUT_EVENTS := 256
 ## 掉落结算回调（main 注入：spawn_drop）
 var drop_spawner: Callable
+## 光照脏树集合：光源/遮挡方块变化后需重烘顶点色的 tree_id
+var _light_dirty := {}
+var _light_dirty_wait := 0.0
+## 管线空闲判定（main 注入 chunk_manager.is_idle）：光照传播是排队
+## 异步的——过早重烘会采到未更新的光照烘焙进网格（实测 0.15s 时
+## torch 邻格仍是 blk=0）。invalid 时退回纯时间窗（测试用）。
+var idle_check: Callable
 
 
 func setup(p_world: VoxelWorld, p_registry: VoxelRegistry,
@@ -48,6 +55,36 @@ func setup(p_world: VoxelWorld, p_registry: VoxelRegistry,
 func _on_block_changed(pos: Vector3i, old_id: int, new_id: int) -> void:
 	if old_id == VoxelTypes.BRANCH_ID and new_id == VoxelTypes.AIR_ID:
 		on_branch_broken(pos)
+		return
+	_mark_light_dirty(pos, old_id, new_id)
+
+
+## 光照相关方块变化（放/挖光源、封挡/挖开遮挡）→ 标脏附近树。
+## 树网格顶点色是 _build_visual 建网格时的烘焙采样——不重建则之后
+## 放置的火把/提灯永远照不亮枝干（实机报告）。光源变化按影响半径
+## 16（火把 14 级衰减全距），遮挡变化按局部 3 格近似（水流同一
+## id 不触发：old_id == new_id 早退）。
+static func _light_emission(id: int) -> int:
+	if id >= 0 and id < VoxelTypes.LIGHT_EMISSION.size():
+		return VoxelTypes.LIGHT_EMISSION[id]
+	return 0
+
+
+func _mark_light_dirty(pos: Vector3i, old_id: int, new_id: int) -> void:
+	if old_id == new_id:
+		return
+	if _light_emission(old_id) == _light_emission(new_id) \
+			and VoxelTypes.light_opacity(old_id) \
+					== VoxelTypes.light_opacity(new_id):
+		return
+	var margin := 16.0 if (_light_emission(old_id) > 0
+			or _light_emission(new_id) > 0) else 3.0
+	var p := Vector3(pos)
+	for tid in _trees:
+		var aabb: AABB = _trees[tid]["aabb"]
+		var nearest := p.clamp(aabb.position, aabb.end)
+		if nearest.distance_to(p) <= margin:
+			_light_dirty[tid] = true
 
 
 # ---- 生命周期（chunk_manager 钩子驱动） ----
@@ -130,8 +167,20 @@ func _ref_tree(col: Vector2i) -> void:
 	# 首次引用：确定性重建 + 应用砍伐记录
 	var tree := TreeGenerator.generate(species,
 			world.config.world_seed, origin)
+	# 枝干 AABB（供光照脏标记的邻近判定；砍伐缩枝后偏大仅多触发，
+	# 保守无害）
+	var mn := Vector3i(1 << 29, 1 << 29, 1 << 29)
+	var mx := Vector3i(-(1 << 29), -(1 << 29), -(1 << 29))
+	for cell in tree.cell_to_branch:
+		mn.x = mini(mn.x, cell.x)
+		mn.y = mini(mn.y, cell.y)
+		mn.z = mini(mn.z, cell.z)
+		mx.x = maxi(mx.x, cell.x)
+		mx.y = maxi(mx.y, cell.y)
+		mx.z = maxi(mx.z, cell.z)
 	var entry := {
 		"instance": tree, "mesh_node": null, "body": null, "refs": 1,
+		"aabb": AABB(Vector3(mn), Vector3(mx - mn) + Vector3.ONE),
 	}
 	_trees[tree_id] = entry
 	for cell in tree.cell_to_branch:
@@ -187,7 +236,7 @@ func _build_visual(tree_id: int) -> void:
 	if entry["body"] != null:
 		entry["body"].queue_free()
 	# 树干 mesh（独立合并网格）
-	var mesh := TreeMeshBuilder.build_mesh(tree)
+	var mesh := TreeMeshBuilder.build_mesh(tree, {}, world)
 	if mesh == null:
 		return
 	var mi := MeshInstance3D.new()
@@ -333,7 +382,7 @@ func _spawn_falling_rigid(tree: TreeInstance,
 
 	# **真实枝干 mesh 子集**（TreeMeshBuilder 只建脱落分支——正确
 	# 贴图与形状，不用 BoxMesh 链）
-	var sub_mesh := TreeMeshBuilder.build_mesh(tree, unsup)
+	var sub_mesh := TreeMeshBuilder.build_mesh(tree, unsup, world)
 	if sub_mesh != null:
 		var mi := MeshInstance3D.new()
 		mi.mesh = sub_mesh
@@ -355,15 +404,30 @@ func _spawn_falling_rigid(tree: TreeInstance,
 		var inv_c := 1.0 / TextureAtlasLoader.COLS
 		var inv_r := 1.0 / TextureAtlasLoader.ROWS
 		var uv_leaf := Vector2(float(tile.x) * inv_c, float(tile.y) * inv_r)
+		var lc_colors := PackedColorArray()
 		for lc in leaves:
 			var c := Vector3(lc) + Vector3(0.5, 0.5, 0.5) - pivot
+			# 叶格自身光照（双通道，与 build_mesh light_of 同式——
+			# _leaf_material 已换 tree_surface shader）
+			var col := Color(0, 0, 0, 1)
+			var lch: ChunkData = world.chunks.get(
+					VoxelCoords.world_to_chunk(lc, world.config.chunk_size))
+			if lch != null:
+				var llocal := VoxelCoords.world_to_local(lc,
+						world.config.chunk_size)
+				var sky := float(lch.get_sky_light(llocal)) / 15.0
+				var blk := float(lch.get_block_light(llocal)) / 15.0
+				var blk_c := blk * blk * blk
+				var sky_c := sky * sky * sky
+				col = Color(blk_c * 1.44, blk_c, blk_c * 0.56, sky_c)
 			for f in 6:
-				TreeMeshBuilder._box(lv, ln, lu, li,
+				TreeMeshBuilder._box(lv, ln, lu, lc_colors, li,
 						c - Vector3(0.5, 0.5, 0.5), c + Vector3(0.5, 0.5, 0.5),
-						f, uv_leaf, inv_c, inv_r)
+						f, col, uv_leaf, inv_c, inv_r)
 		leaf_arrays[Mesh.ARRAY_VERTEX] = lv
 		leaf_arrays[Mesh.ARRAY_NORMAL] = ln
 		leaf_arrays[Mesh.ARRAY_TEX_UV] = lu
+		leaf_arrays[Mesh.ARRAY_COLOR] = lc_colors
 		leaf_arrays[Mesh.ARRAY_INDEX] = li
 		var lm := ArrayMesh.new()
 		lm.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, leaf_arrays)
@@ -387,8 +451,8 @@ func _spawn_falling_rigid(tree: TreeInstance,
 	}
 
 
-var _leaf_mat: StandardMaterial3D = null
-var _wood_mat: StandardMaterial3D = null
+var _leaf_mat: ShaderMaterial = null
+var _wood_mat: ShaderMaterial = null
 var _crown_shadow_mat: StandardMaterial3D = null
 
 
@@ -419,6 +483,8 @@ func _build_crown_shadow(tree: TreeInstance, parent: MeshInstance3D) -> void:
 	var verts := PackedVector3Array()
 	var norms := PackedVector3Array()
 	var dummy_uvs := PackedVector2Array()
+	# 阴影代理不渲染（只投影），签名统一要 colors/light——丢弃用
+	var shadow_colors := PackedColorArray()
 	var idx := PackedInt32Array()
 	for c: Vector3i in cells:
 		var mn := Vector3(float(c.x - tree.origin.x),
@@ -426,8 +492,9 @@ func _build_crown_shadow(tree: TreeInstance, parent: MeshInstance3D) -> void:
 		for f in 6:
 			if cells.has(c + FACE_DIRS[f]):
 				continue
-			TreeMeshBuilder._face(verts, norms, dummy_uvs, idx,
-					mn, mn + Vector3.ONE, f, Vector2.ZERO, 0.0, 0.0)
+			TreeMeshBuilder._face(verts, norms, dummy_uvs, shadow_colors,
+					idx, mn, mn + Vector3.ONE, f, Color(0, 0, 0, 1),
+					Vector2.ZERO, 0.0, 0.0)
 	if idx.is_empty():
 		return
 	var arrays := []
@@ -452,19 +519,40 @@ func _crown_shadow_material() -> StandardMaterial3D:
 	return _crown_shadow_mat
 
 
-func _wood_material() -> StandardMaterial3D:
+func _wood_material() -> ShaderMaterial:
 	if _wood_mat == null:
-		_wood_mat = DropVisuals.atlas_material().duplicate()
-		_wood_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+		_wood_mat = _tree_surface_material(false)
 	return _wood_mat
 
-func _leaf_material() -> StandardMaterial3D:
+func _leaf_material() -> ShaderMaterial:
 	# 树叶贴图材质（图集 + alpha 裁切镂空，与区块叶面同观感；
 	# 曾纯色绿。双面：贴图孔洞透出背面内壁，叶盒看起来更饱满）
 	if _leaf_mat == null:
-		_leaf_mat = DropVisuals.atlas_material().duplicate()
-		_leaf_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+		_leaf_mat = _tree_surface_material(true)
 	return _leaf_mat
+
+
+## 树表面材质：tree_surface.gdshader 双通道（方块光→EMISSION
+## fullbright、天光→ALBEDO×u_day）——StandardMaterial 合并式
+## max(s,b) 顶点色在露天区被天光值吞掉火把贡献（sky=15 ≥ 火把
+## 14，暖色调制永不触发），与地形同构后昼夜两头都成立。
+func _tree_surface_material(cutout: bool) -> ShaderMaterial:
+	var material := ShaderMaterial.new()
+	material.shader = load("res://presentation/tree_surface.gdshader")
+	var base := DropVisuals.atlas_material() as StandardMaterial3D
+	if base != null and base.albedo_texture != null:
+		material.set_shader_parameter("atlas", base.albedo_texture)
+	material.set_shader_parameter("cutout_mode", cutout)
+	return material
+
+
+## 日夜系数下发（main._update_day_night 每帧调）；材质未建时跳过
+##（建好后下一帧即有值）
+func set_day_factor(v: float) -> void:
+	if _wood_mat != null:
+		_wood_mat.set_shader_parameter("u_day", v)
+	if _leaf_mat != null:
+		_leaf_mat.set_shader_parameter("u_day", v)
 
 
 ## 倒树清叶半径：叶球生成半径 2（球判 d<=2.3），冠心球落格用
@@ -498,6 +586,21 @@ func _collect_leaves_near(cells: Array[Vector3i]) -> Array[Vector3i]:
 
 
 func _process(delta: float) -> void:
+	# 光照脏重建：合并窗口内多次编辑；等区块管线空闲（光照传播
+	# 落定）再重烘，2s 兜底防饿死
+	if not _light_dirty.is_empty():
+		_light_dirty_wait += delta
+		var ready := false
+		if idle_check.is_valid():
+			ready = _light_dirty_wait >= 2.0 or bool(idle_check.call())
+		else:
+			ready = _light_dirty_wait >= 0.15
+		if ready:
+			for tid in _light_dirty.keys():
+				if _trees.has(tid):
+					_build_visual(tid)
+			_light_dirty.clear()
+			_light_dirty_wait = 0.0
 	for body in _falling.keys():
 		var info: Dictionary = _falling[body]
 		info["timer"] = float(info["timer"]) + delta

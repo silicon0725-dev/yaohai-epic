@@ -26,6 +26,64 @@ func run() -> void:
 	_test_crown_shadow()
 	_test_leaf_clear_coverage()
 	_test_falling_settle_drop_position()
+	_test_light_dirty_rebuild()
+
+
+## 光照脏树重建（计数桩：只数 _build_visual 调用，不碰真实网格）
+class _CountingManager extends "res://systems/trees/tree_manager.gd":
+	var builds := 0
+
+	func _build_visual(_tree_id: int) -> void:
+		builds += 1
+
+
+## 光照脏标记：光源/遮挡变化标脏邻近树 → 延迟窗口合并重建。
+## （树网格顶点色是建网格时的烘焙采样——不重建则后放的火把/
+## 提灯永远照不亮枝干，实机报告）
+func _test_light_dirty_rebuild() -> void:
+	if tree_root == null:
+		check(false, "tree_root 未注入（runner 需设置 suite.tree_root）")
+		return
+	var mgr := _CountingManager.new()
+	tree_root.add_child(mgr)
+	# 伪树条目：AABB 覆盖 x/z 0..3、y 3..11
+	mgr._trees[123] = {
+		"instance": null, "mesh_node": null, "body": null, "refs": 1,
+		"aabb": AABB(Vector3(0, 3, 0), Vector3(3, 8, 3)),
+	}
+	# 火把放置干旁 5 格：16 格光源影响半径内 → 标脏
+	mgr._on_block_changed(Vector3i(5, 5, 0), VoxelTypes.AIR_ID,
+			VoxelTypes.TORCH_ID)
+	check(mgr._light_dirty.has(123), "火把放置标脏邻近树")
+	# 窗口内再挖再放：合并为一次重建
+	mgr._on_block_changed(Vector3i(5, 5, 0), VoxelTypes.TORCH_ID,
+			VoxelTypes.AIR_ID)
+	mgr._process(0.2)
+	check(mgr.builds == 1, "延迟窗口合并为一次重建（%d）" % mgr.builds)
+	check(mgr._light_dirty.is_empty(), "冲刷后脏集合清空")
+	# 无光照语义变化不标脏：同 id（水流水位）；同透明度同发射的替换
+	mgr._on_block_changed(Vector3i(1, 5, 0), VoxelTypes.WATER_ID,
+			VoxelTypes.WATER_ID)
+	check(mgr._light_dirty.is_empty(), "同 id 水位变化不标脏")
+	mgr._on_block_changed(Vector3i(1, 5, 0), VoxelTypes.GRASS_ID,
+			VoxelTypes.DIRT_ID)
+	check(mgr._light_dirty.is_empty(), "同透明度替换不标脏")
+	# 遮挡变化：贴体标脏、4 格外不标脏
+	mgr._on_block_changed(Vector3i(3, 5, 0), VoxelTypes.AIR_ID,
+			VoxelTypes.DIRT_ID)
+	check(mgr._light_dirty.has(123), "3 格内封挡标脏")
+	mgr._process(0.2)
+	mgr._on_block_changed(Vector3i(7, 5, 0), VoxelTypes.AIR_ID,
+			VoxelTypes.DIRT_ID)
+	check(mgr._light_dirty.is_empty(), "4 格外封挡不标脏")
+	# 光源变化 16 格临界：17 格外不标脏
+	mgr._on_block_changed(Vector3i(20, 5, 0), VoxelTypes.AIR_ID,
+			VoxelTypes.TORCH_ID)
+	check(mgr._light_dirty.is_empty(), "17 格外火把不标脏")
+	mgr._on_block_changed(Vector3i(19, 5, 0), VoxelTypes.AIR_ID,
+			VoxelTypes.TORCH_ID)
+	check(mgr._light_dirty.has(123), "16 格内火把标脏")
+	mgr.free()
 
 
 ## 倒伏结算掉落物落点：结算时用刚体当前位置（曾漏传 near 全部落

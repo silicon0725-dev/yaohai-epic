@@ -141,6 +141,9 @@ func _ready() -> void:
 	tree_manager.apply_save_state(meta)
 	tree_manager.drop_spawner = func(item_id: int, count: int, pos: Vector3) -> void:
 		drop_manager.spawn_drop(item_id, count, pos)
+	# 光照脏重烘等区块管线空闲（光照传播异步落定）再执行
+	tree_manager.idle_check = func() -> bool:
+		return chunk_manager.is_idle()
 	# 掉落物撞得上树干：掉落走体素碰撞感知不到树 StaticBody，
 	# 主干实心由树管理器实时查询补齐（枝干无碰撞，与玩家一致）
 	drop_manager.trunk_solid_probe = tree_manager.is_solid_for_items
@@ -363,13 +366,14 @@ func _update_day_night(delta: float) -> void:
 	sky_mat.ground_horizon_color = sky_mat.sky_horizon_color
 	_environment.ambient_light_color = DAY_AMBIENT.lerp(
 			NIGHT_AMBIENT, 1.0 - day01)
-	# u_day 下发（地形双 shader + 水双 shader；脏检查省自然达成——
-	# 每帧都在变，过渡期外 day 稳定值重发成本可忽略）
+	# u_day 下发（地形双 shader + 水双 shader + 树表面；脏检查省
+	# 自然达成——每帧都在变，过渡期外 day 稳定值重发成本可忽略）
 	for mat in [chunk_renderer.material, chunk_renderer.cutout_material,
 			chunk_renderer.water_material,
 			chunk_renderer.water_side_material]:
 		if mat is ShaderMaterial:
 			mat.set_shader_parameter("u_day", u_day)
+	tree_manager.set_day_factor(u_day)
 	# 水面反射的太阳方向（day/night 方位不同，随光重发）
 	var sun_dir: Vector3 = -_sun.global_transform.basis.z.normalized()
 	for mat in [chunk_renderer.water_material, chunk_renderer.water_side_material]:

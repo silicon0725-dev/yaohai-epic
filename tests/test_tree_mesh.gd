@@ -426,8 +426,8 @@ func _test_no_degenerate_quads() -> void:
 			var ns := PackedVector3Array()
 			var uv := PackedVector2Array()
 			var idx := PackedInt32Array()
-			MeshBuilderScript._box(vs, ns, uv, idx, mn, mx, f,
-					Vector2.ZERO, 1.0, 1.0)
+			MeshBuilderScript._box(vs, ns, uv, PackedColorArray(), idx, mn, mx, f,
+					Color(0, 0, 0, 1), Vector2.ZERO, 1.0, 1.0)
 			var gn := (vs[1] - vs[0]).cross(vs[2] - vs[0])
 			if gn.length() < 0.002:
 				bad_unit += 1

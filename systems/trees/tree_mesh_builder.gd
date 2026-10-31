@@ -16,13 +16,14 @@ extends RefCounted
 ## 构建整棵树（或指定分支子集——倒树刚体用）的 ArrayMesh。
 ## branch_subset 非空时只构建指定分支（含子递归）。
 static func build_mesh(tree: TreeInstance,
-		branch_subset: Dictionary = {}) -> ArrayMesh:
+		branch_subset: Dictionary = {}, world: VoxelWorld = null) -> ArrayMesh:
 	if tree.cell_to_branch.is_empty():
 		return null
 	var origin := Vector3(tree.origin)
 	var vertices := PackedVector3Array()
 	var normals := PackedVector3Array()
 	var uvs := PackedVector2Array()
+	var colors := PackedColorArray()
 	var indices := PackedInt32Array()
 
 	var tile := TextureAtlasLoader.tile_grid("log_side")
@@ -31,6 +32,31 @@ static func build_mesh(tree: TreeInstance,
 	var inv_rows := 1.0 / TextureAtlasLoader.ROWS
 	var uv_o := Vector2(float(tile.x) * inv_cols, float(tile.y) * inv_rows)
 	var uv_ot := Vector2(float(tile_top.x) * inv_cols, float(tile_top.y) * inv_rows)
+
+	# 面光照采样：f 序法线（0=+X 1=-X 2=+Y 3=-Y 4=+Z 5=-Z）→ 面外邻
+	# 格的光照色。树表面走 tree_surface.gdshader 双通道（与地形
+	# chunk_mesher.vertex_light_color 逐位同式）：方块光暖色→EMISSION
+	# fullbright（夜晚火把光池的保证；露天 sky=15 ≥ 火把 14，合并式
+	# max(s,b) 语义的暖色调制永不触发——树干"不受放置光源影响"）；
+	# 天光→ALBEDO×u_day 受场景光。树干曾无顶点色（COLOR=(1,1,1)）。
+	# 跨块/未加载回退露天。
+	var face_normals := [
+		Vector3i(1, 0, 0), Vector3i(-1, 0, 0), Vector3i(0, 1, 0),
+		Vector3i(0, -1, 0), Vector3i(0, 0, 1), Vector3i(0, 0, -1)]
+	var light_of := func(cell: Vector3i, f: int) -> Color:
+		if world == null:
+			return Color(1, 1, 1, 1)
+		var s: int = world.config.chunk_size
+		var chunk: ChunkData = world.chunks.get(
+				VoxelCoords.world_to_chunk(cell, s))
+		if chunk == null:
+			return Color(1, 1, 1, 1)
+		var local := VoxelCoords.world_to_local(cell, s)
+		var sky := float(chunk.get_sky_light(local)) / 15.0
+		var blk := float(chunk.get_block_light(local)) / 15.0
+		var blk_c := blk * blk * blk
+		var sky_c := sky * sky * sky
+		return Color(blk_c * 1.44, blk_c, blk_c * 0.56, sky_c)
 
 	var subset_mode := not branch_subset.is_empty()
 	# 全局分叉格（子枝 start 回退一步；倒树子集只计子集内分支——
@@ -48,9 +74,10 @@ static func build_mesh(tree: TreeInstance,
 		if subset_mode and not branch_subset.has(bid):
 			continue
 		var node: TreeInstance.BranchNode = tree.branches[bid]
-		_emit_branch_segment(vertices, normals, uvs, indices,
+		_emit_branch_segment(vertices, normals, uvs, colors, indices,
 				tree, node, origin, fork_cells,
-				uv_o, uv_ot, inv_cols, inv_rows)
+				uv_o, uv_ot, inv_cols, inv_rows,
+				light_of, face_normals)
 
 	if indices.is_empty():
 		return null
@@ -59,6 +86,7 @@ static func build_mesh(tree: TreeInstance,
 	arrays[Mesh.ARRAY_VERTEX] = vertices
 	arrays[Mesh.ARRAY_NORMAL] = normals
 	arrays[Mesh.ARRAY_TEX_UV] = uvs
+	arrays[Mesh.ARRAY_COLOR] = colors
 	arrays[Mesh.ARRAY_INDEX] = indices
 	var mesh := ArrayMesh.new()
 	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
@@ -83,6 +111,9 @@ static func build_shadow_mesh(tree: TreeInstance) -> ArrayMesh:
 	var vertices := PackedVector3Array()
 	var normals := PackedVector3Array()
 	var dummy_uvs := PackedVector2Array()
+	# 阴影代理网格不渲染（只投影），_box 签名统一要 colors/light——
+	# 丢弃用
+	var shadow_colors := PackedColorArray()
 	var indices := PackedInt32Array()
 	for bid in tree.branches:
 		var node: TreeInstance.BranchNode = tree.branches[bid]
@@ -105,8 +136,8 @@ static func build_shadow_mesh(tree: TreeInstance) -> ArrayMesh:
 			var mn := Vector3(fx - 0.5, fy, fz - 0.5)
 			var mx := Vector3(fx + 0.5, fy + 1.0, fz + 0.5)
 			for f in 6:
-				_box(vertices, normals, dummy_uvs, indices,
-						mn, mx, f, Vector2.ZERO, 1.0, 1.0)
+				_box(vertices, normals, dummy_uvs, shadow_colors, indices,
+						mn, mx, f, Color(0, 0, 0, 1), Vector2.ZERO, 1.0, 1.0)
 		# 段锥台：A = cells[0] 端面（外扩 0.5 仅竖直段，同漂亮网格
 		# 首格下探），B = cells[末] 端面；截面半宽 w 沿轴线性插值
 		var a: Vector3i = cells[0]
@@ -253,10 +284,12 @@ static func _quad(
 ##（水平段的关节小柱不占满轴向格，曾与自身末格留 0.375 格缝隙）。
 static func _emit_branch_segment(
 		vertices: PackedVector3Array, normals: PackedVector3Array,
-		uvs: PackedVector2Array, indices: PackedInt32Array,
+		uvs: PackedVector2Array, colors: PackedColorArray,
+		indices: PackedInt32Array,
 		tree: TreeInstance, node: TreeInstance.BranchNode,
 		origin: Vector3, fork_cells: Dictionary,
-		uv_o: Vector2, uv_ot: Vector2, inv_cols: float, inv_rows: float
+		uv_o: Vector2, uv_ot: Vector2, inv_cols: float, inv_rows: float,
+		light_of: Callable, face_normals: Array
 ) -> void:
 	var cells: Array = node.cells()
 	var total: int = cells.size()
@@ -302,14 +335,16 @@ static func _emit_branch_segment(
 				var mna := Vector3(cx - wd, cy - 0.5, cz - wd)
 				var mxa := Vector3(cx + wd, cy, cz + wd)
 				for f in 6:
-					_box(vertices, normals, uvs, indices, mna, mxa, f,
+					_box(vertices, normals, uvs, colors, indices, mna, mxa, f,
+							light_of.call(cell, f),
 							uv_ot if (f == 3 and not fork_cells.has(cell)) \
 									else uv_o,
 							inv_cols, inv_rows)
 			var mn := Vector3(cx - w, cy, cz - w)
 			var mx := Vector3(cx + w, cy + 1, cz + w)
 			for f in 6:
-				_box(vertices, normals, uvs, indices, mn, mx, f,
+				_box(vertices, normals, uvs, colors, indices, mn, mx, f,
+						light_of.call(cell, f),
 						uv_ot if f == 2 and ring_top else uv_o,
 						inv_cols, inv_rows)
 		else:
@@ -358,7 +393,8 @@ static func _emit_branch_segment(
 				var ring_f: bool = no_child \
 						and ((f == tip_f and i == total - 1) \
 						or (f == root_f and i == 0))
-				_box(vertices, normals, uvs, indices, mn2, mx2, f,
+				_box(vertices, normals, uvs, colors, indices, mn2, mx2, f,
+						light_of.call(cell, f),
 						uv_ot if ring_f else uv_o, inv_cols, inv_rows)
 
 		# 2) 分叉桥：每个水平子枝方向一格桥（本体表面 → 格边界）。
@@ -392,7 +428,8 @@ static func _emit_branch_segment(
 				mxb.z = cz - inset
 				mnb.z = cz - 0.5
 			for f in 6:
-				_box(vertices, normals, uvs, indices, mnb, mxb, f,
+				_box(vertices, normals, uvs, colors, indices, mnb, mxb, f,
+						light_of.call(cell, f),
 						uv_o, inv_cols, inv_rows)
 
 
@@ -402,11 +439,12 @@ static func _emit_branch_segment(
 ## 2952 vs 预期 ~500 实锤）。需要邻接剔除逐面控制的场合同用本函数。
 static func _box(
 		vertices: PackedVector3Array, normals: PackedVector3Array,
-		uvs: PackedVector2Array, indices: PackedInt32Array,
-		mn: Vector3, mx: Vector3, f: int,
+		uvs: PackedVector2Array, colors: PackedColorArray,
+		indices: PackedInt32Array,
+		mn: Vector3, mx: Vector3, f: int, light: Color,
 		uv_o: Vector2, inv_cols: float, inv_rows: float
 ) -> void:
-	_face(vertices, normals, uvs, indices, mn, mx, f,
+	_face(vertices, normals, uvs, colors, indices, mn, mx, f, light,
 			uv_o, inv_cols, inv_rows)
 
 
@@ -414,8 +452,9 @@ static func _box(
 ## 满密度格集合只发射暴露面（内部面原本被共面邻格覆盖，纯浪费）。
 static func _face(
 		vertices: PackedVector3Array, normals: PackedVector3Array,
-		uvs: PackedVector2Array, indices: PackedInt32Array,
-		mn: Vector3, mx: Vector3, f: int,
+		uvs: PackedVector2Array, colors: PackedColorArray,
+		indices: PackedInt32Array,
+		mn: Vector3, mx: Vector3, f: int, light: Color,
 		uv_o: Vector2, inv_cols: float, inv_rows: float
 ) -> void:
 	var base := vertices.size()
@@ -496,6 +535,10 @@ static func _face(
 	normals.append(n)
 	normals.append(n)
 	normals.append(n)
+	colors.append(light)
+	colors.append(light)
+	colors.append(light)
+	colors.append(light)
 	if swap_uv:
 		uvs.append(Vector2(u0, v0))
 		uvs.append(Vector2(u0, v0 + dv))

@@ -40,6 +40,7 @@ var water_reflection: Node  # 水面镜像反射（preload 绕开类缓存）
 ## 主场景 Environment（镜像相机 SubViewport 需自己的环境光/天空——
 ## 环境按 viewport 划分，共享同一资源即可）
 var _environment: Environment
+var _sky: Sky  # 日夜循环改 sky_material 颜色
 
 var _hud_label: Label
 var _hud_accumulator := 0.0
@@ -297,6 +298,82 @@ func _process(delta: float) -> void:
 	_update_hud()
 	_update_hint(delta)
 	_update_exposure(delta)
+	_update_day_night(delta)
+
+
+## ---- 日夜循环 ----
+## t ∈ [0,1)：0=日出、0.25=正午、0.5=日落、0.75=午夜。周期 480s
+##（MC 20min 太长，首版白天/黑夜各 4min——口味旋钮）。
+## 架构：天光数值恒 15 不重传播/不重网格（MC 同款），夜暗在渲染端
+## 由 u_day 系数乘天光顶点色通道（COLOR.a=s³）；方块光暖色通道
+## （COLOR.rgb）不乘——夜晚火把/提灯自动接管照明。
+const DAY_LENGTH := 480.0
+const NIGHT_SKY := 0.22  # 午夜天光系数下限（MC 月夜可读度）
+const SUN_ENERGY := 1.2
+const MOON_ENERGY := 0.2
+# BSL 白天太阳冷白 / 落日暖橙 / 月光蓝
+const DAY_SUN := Color(0.77, 0.86, 1.0)
+const DUSK_SUN := Color(1.0, 0.62, 0.32)
+const MOON_SUN := Color(0.55, 0.65, 1.0)
+# 天空顶/地平线与环境的昼夜两端（BSL 白天蓝 → 深夜藏青）
+const DAY_SKY_TOP := Color(0.28, 0.46, 0.72)
+const DAY_SKY_HORIZON := Color(0.62, 0.72, 0.84)
+const NIGHT_SKY_TOP := Color(0.012, 0.02, 0.055)
+const NIGHT_SKY_HORIZON := Color(0.045, 0.06, 0.11)
+const DAY_AMBIENT := Color(0.29, 0.41, 0.61)
+const NIGHT_AMBIENT := Color(0.16, 0.19, 0.30)
+var _time_of_day := 0.1  # 起始上午
+var _sun: DirectionalLight3D
+
+
+func _update_day_night(delta: float) -> void:
+	_time_of_day = fmod(_time_of_day + delta / DAY_LENGTH, 1.0)
+	var t := _time_of_day
+	var elev := sin(t * TAU)  # >0 白天（太阳高度 -1..1）
+	var day01 := smoothstep(-0.12, 0.12, elev)  # 0 深夜 → 1 白昼
+	var u_day := lerpf(NIGHT_SKY, 1.0, day01)
+	if _sun == null:
+		_sun = DirectionalLight3D.new()
+		_sun.shadow_enabled = true
+		_sun.shadow_bias = 0.02
+		_sun.shadow_normal_bias = 0.0
+		add_child(_sun)
+		# 旧 _setup_environment 的太阳由这里接管（避免双光源）——
+		# 保留其水面 sun_direction 下发逻辑于下方
+	if elev >= 0.0:
+		var rise := smoothstep(0.0, 0.25, elev)  # 日出/日落渐弱
+		_sun.rotation_degrees = Vector3(-80.0 * elev, -35.0, 0.0)
+		_sun.light_energy = SUN_ENERGY * rise
+		# 掠地角时偏暖（BSL 日落橙）
+		_sun.light_color = DAY_SUN.lerp(DUSK_SUN,
+				1.0 - smoothstep(0.0, 0.18, elev))
+		_sun.light_volumetric_fog_energy = 1.6 * rise
+	else:
+		var melev := -elev
+		_sun.rotation_degrees = Vector3(-80.0 * melev, 145.0, 0.0)
+		_sun.light_energy = MOON_ENERGY * smoothstep(0.0, 0.25, melev)
+		_sun.light_color = MOON_SUN
+		_sun.light_volumetric_fog_energy = 0.0  # 夜里没有太阳光束
+	# 天空/环境：昼端取 BSL 白天色，夜端藏青
+	var sky_mat: ProceduralSkyMaterial = _sky.sky_material
+	sky_mat.sky_top_color = DAY_SKY_TOP.lerp(NIGHT_SKY_TOP, 1.0 - day01)
+	sky_mat.sky_horizon_color = DAY_SKY_HORIZON.lerp(
+			NIGHT_SKY_HORIZON, 1.0 - day01)
+	sky_mat.ground_bottom_color = sky_mat.sky_horizon_color
+	sky_mat.ground_horizon_color = sky_mat.sky_horizon_color
+	_environment.ambient_light_color = DAY_AMBIENT.lerp(
+			NIGHT_AMBIENT, 1.0 - day01)
+	# u_day 下发（地形双 shader + 水双 shader；脏检查省自然达成——
+	# 每帧都在变，过渡期外 day 稳定值重发成本可忽略）
+	for mat in [chunk_renderer.material, chunk_renderer.cutout_material,
+			chunk_renderer.water_material,
+			chunk_renderer.water_side_material]:
+		if mat is ShaderMaterial:
+			mat.set_shader_parameter("u_day", u_day)
+	# 水面反射的太阳方向（day/night 方位不同，随光重发）
+	var sun_dir: Vector3 = -_sun.global_transform.basis.z.normalized()
+	for mat in [chunk_renderer.water_material, chunk_renderer.water_side_material]:
+		mat.set_shader_parameter("sun_direction", sun_dir)
 
 
 ## 眼适应（iterationT 式人眼明暗适应；Godot 4 无内建自动曝光——
@@ -418,33 +495,14 @@ func _update_hint(delta: float) -> void:
 
 
 func _setup_environment() -> void:
-	var sun := DirectionalLight3D.new()
-	sun.rotation_degrees = Vector3(-55.0, -35.0, 0.0)
-	sun.light_energy = 1.2
-	# 太阳冷白（BSL lightDay 196,220,255）：白天阳光偏蓝而非中性白
-	sun.light_color = Color(196.0 / 255.0, 220.0 / 255.0, 1.0)
-	sun.shadow_enabled = true
-	# 阴影偏置：默认 bias 0.1 / normal_bias 2.0 会把细窄枝段的投影
-	# "推穿"，树影断成一节一节、节间漏光（俯拍对照：地面亮区
-	# 13.2%→5.1%）。调低后无自阴影痤疮（体素面是平面，深度偏置
-	# 0.02 已够兜底）
-	sun.shadow_bias = 0.02
-	sun.shadow_normal_bias = 0.0
-	# 体积雾洞口光束：太阳在雾中的散射能量。1.6 = 3.2 / 眼适应抬升
-	# 倍率（~2.1×）——曾 3.2 是适应上线前调的，洞内曝光一抬光束过曝
-	# 成白团（用户实机"太亮了"）；露天无雾不受此值影响
-	sun.light_volumetric_fog_energy = 1.6
-	add_child(sun)
-	# 水面波纹 shader 的太阳方向（UNSHADED 光照不进 shader，手动传）
-	var sun_dir: Vector3 = -sun.global_transform.basis.z.normalized()
-	for mat in [chunk_renderer.water_material, chunk_renderer.water_side_material]:
-		if mat == null:
-			continue
-		mat.set_shader_parameter("sun_direction", sun_dir)
+	# 太阳/月亮由 _update_day_night 接管（日夜循环轮）——此处只建
+	# 天空与环境；阴影偏置经验值随 _sun 重建（bias 0.02：默认 0.1/2.0
+	# 会把细窄枝段投影"推穿"成断节树影）
 	_wave_clock = 0.0
 
 	var sky := Sky.new()
 	sky.sky_material = ProceduralSkyMaterial.new()
+	_sky = sky
 	var environment := Environment.new()
 	environment.background_mode = Environment.BG_SKY
 	environment.sky = sky

@@ -11,6 +11,9 @@ uniform bool cutout_mode = false;
 // 机位置一致即正在渲染反射 RT（主相机在水上、镜像相机在水下，不会误判）
 uniform vec3 sspr_mirror_cam_pos = vec3(1.0e9, 1.0e9, 1.0e9);
 uniform float sspr_clip_y = 0.0;
+// 日夜天光系数（main 每帧下发）：天光顶点色（COLOR.a = s³）乘此系数
+// 得夜暗；方块光暖色（COLOR.rgb）不乘——夜晚火把/提灯自动接管
+uniform float u_day = 1.0;
 
 varying vec3 wpos;
 
@@ -27,7 +30,10 @@ void fragment() {
 	if (cutout_mode && tex.a < 0.5) {
 		discard;
 	}
-	ALBEDO = tex.rgb * COLOR.rgb;
+	// 顶点色双通道（见 atlas_tiling.gdshader 同款注释）：天光→ALBEDO
+	// 受场景光；方块光→EMISSION 自发光（MC fullbright 语义）
+	ALBEDO = tex.rgb * vec3(COLOR.a * u_day);
+	EMISSION = tex.rgb * COLOR.rgb;
 	ROUGHNESS = 1.0;
 	METALLIC = 0.0;
 }

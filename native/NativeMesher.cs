@@ -57,8 +57,10 @@ public partial class NativeMesher : RefCounted
         => axis == 0 ? (int)corner.X : axis == 1 ? (int)corner.Y : (int)corner.Z;
 
     /// 角点平滑光照：面外层 2x2 四格平均（实心格光照 0 天然形成 AO）。
-    /// 中间量全 double；深黑曲线 m^3 纯乘法（IEEE 确定，GD/C# 逐位一致）；
-    /// 方块光占优时色温偏暖。
+    /// 中间量全 double；深黑曲线 m^3 纯乘法（IEEE 确定，GD/C# 逐位一致）。
+    /// 顶点色拆双通道语义（日夜循环地基，m^3 与 max 可交换故数学等价）：
+    /// COLOR.rgb = 方块光暖色 × b^3，COLOR.a = 天光 s^3；着色器端
+    /// max(COLOR.a × 日夜系数, COLOR.rgb)，夜晚方块光自动接管。
     private static Color VertexLightColor(
         byte[] lightPadded, int opIndex, int tan1Stride, int tan2Stride,
         int cornerT1, int cornerT2)
@@ -73,18 +75,14 @@ public partial class NativeMesher : RefCounted
         int blk = (b0 & 15) + (b1 & 15) + (b2 & 15) + (b3 & 15);
         double s = sky * 0.25 / 15.0;
         double b = blk * 0.25 / 15.0;
-        // 深黑洞穴曲线 m^3（纯乘法 IEEE 确定，与 GDScript 逐位一致；
-        // m^1.5 观感太缓，洞内天光 10-12 区域不显暗）
-        double m = Math.Max(s, b);
-        double bright = m * m * m;
+        double skyC = s * s * s;
         // BSL blocklightColor (255,212,160)：R+44%/B-44%（与 GD 侧逐位一致）
-        double warm = 0.0;
-        if (b > s)
-            warm = Math.Clamp((b - s) * 2.0, 0.0, 1.0);
+        double blkC = b * b * b;
         return new Color(
-            (float)(bright * (1.0 + 0.44 * warm)),
-            (float)bright,
-            (float)(bright * (1.0 - 0.44 * warm)));
+            (float)(blkC * 1.44),
+            (float)blkC,
+            (float)(blkC * 0.56),
+            (float)skyC);
     }
 
     // ---- 面剔除 ----

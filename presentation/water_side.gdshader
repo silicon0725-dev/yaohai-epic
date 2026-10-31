@@ -28,6 +28,9 @@ uniform float wave_amplitude = 1.0;
 uniform float wave_speed = 1.0;
 // CPU/GPU 同源时钟（main 每帧设置，与 OceanWaves.global_time 同值）
 uniform float u_time = 0.0;
+// 日夜天光系数（main 下发）：夜晚压暗水体基色；反射采样的是
+// 已被 u_day 压暗的场景（surface），不重复乘
+uniform float u_day = 1.0;
 // 互动涟漪（WaterRipples 波动方程模拟的输出）：窗口中心与位移/法线强度
 uniform sampler2D ripple_map;
 uniform vec2 ripple_center = vec2(0.0);
@@ -177,7 +180,7 @@ void fragment() {
 	// 无几何意义——SCREEN_UV 采样到的是错乱 RT 内容（凹处水坑侧壁映出
 	// "视野外的树"实机踩坑）。竖直面的镜面反射本就无平面 RT 可采，水色
 	// +白沫+波光足够
-	ALBEDO = albedo;
+	ALBEDO = albedo * u_day;
 	EMISSION = vec3(glint * 0.8);  // 波光耀斑不受场景光照二次调制
 	// 掠射不再增不透明度（见 water_surface.gdshader 同款注释）
 	ALPHA = clamp(water_color.a + foam * 0.6, 0.0, 0.95);

@@ -26,6 +26,9 @@ uniform float wave_amplitude = 1.0;
 uniform float wave_speed = 1.0;
 // CPU/GPU 同源时钟（main 每帧设置，与 OceanWaves.global_time 同值）
 uniform float u_time = 0.0;
+// 日夜天光系数（main 下发）：夜晚压暗水体基色；反射采样的是
+// 已被 u_day 压暗的场景（surface），不重复乘
+uniform float u_day = 1.0;
 // 互动涟漪（WaterRipples 波动方程模拟的输出）：窗口中心与位移/法线强度
 uniform sampler2D ripple_map;
 uniform vec2 ripple_center = vec2(0.0);
@@ -210,6 +213,7 @@ void fragment() {
 	// （shore_fade≤0.2，1 个固体邻的角点 0.5 不受影响——v35 的 0.35
 	// 区间近岸大面积压反射，"反射消失"实机反馈）
 	refl_w *= smoothstep(0.0, 0.2, shore_fade);
+	albedo *= u_day;
 	albedo = mix(albedo, refl, refl_w);
 	ALBEDO = albedo;
 	EMISSION = vec3(glint * 0.8);  // 波光耀斑不受场景光照二次调制

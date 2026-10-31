@@ -234,8 +234,12 @@ const LIGHT_GAMMA := 1.5
 
 ## 面角点颜色（MC 平滑光照）：以角点为公共角的 2x2 四格光照平均
 ##（实心格光照 0，天然形成角部 AO 变暗，不另叠显式 AO——双重暗化
-## 过头）；亮度 = max(天光, 方块光)/15 的幂曲线；方块光占优时色温
-## 偏暖（本轮无光源方块，色温通路就位不生效）。
+## 过头）。
+## 顶点色拆双通道语义（日夜循环地基，m³ 与 max 可交换故数学等价）：
+##   COLOR.rgb = 方块光暖色 × b³（BSL blocklightColor 1.44/1.0/0.56 色温）
+##   COLOR.a   = 天光 s³（着色器端 max(COLOR.a×日夜系数, COLOR.rgb)）
+## 昼夜系数在渲染端逐帧下发（u_day），天光数值恒 15 不重传播/不重网格
+## ——夜晚方块光自动接管（火把夜战）。
 ## op_index：面外侧格的 light_padded 索引；tan1/tan2：面切向两轴的
 ## padded 步长；corner 分量 0/1（0 取 -1 方向格）。
 static func vertex_light_color(
@@ -260,17 +264,15 @@ static func vertex_light_color(
 	# 深黑洞穴曲线 m^3（纯乘法 IEEE 确定，C# 侧逐位一致）。m^1.5 太缓：
 	# 天光 10-12 的洞内区顶点色只压到 0.5-0.7，观感"进洞不变暗"；
 	# m^3 下 sky=10→0.30、8→0.16、≤6→接近黑，露天 15 不受影响
-	var m := maxf(s, b)
-	var bright := m * m * m
+	var sky_c := s * s * s
 	# 方块光暖色对齐 BSL blocklightColor (255,212,160)/255 归一化
 	# (1.44, 1.0, 0.56)：R+44%/B-44%（曾手调 +18%/-25% 偏淡）
-	var warm := 0.0
-	if b > s:
-		warm = clampf((b - s) * 2.0, 0.0, 1.0)
+	var blk_c := b * b * b
 	return Color(
-			bright * (1.0 + 0.44 * warm),
-			bright,
-			bright * (1.0 - 0.44 * warm))
+			blk_c * 1.44,
+			blk_c,
+			blk_c * 0.56,
+			sky_c)
 
 
 ## 状态感知的面贴图选择（§4.3 方块状态）：带 "axis" 状态的方块

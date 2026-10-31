@@ -35,6 +35,36 @@ var _pool: Array[AudioStreamPlayer] = []
 var _pool_idx := 0
 ## 方块放置/破坏合成音缓存：family -> {place: stream, break: stream}
 var _block_sounds := {}
+## 同族节流（ms）：级联写入防音爆（砍树占位清除一格一声等）
+var _family_last_ms := {}
+## 播放计数（测试断言用：静音/节流规则生效）
+var play_count := 0
+
+
+func _on_block_changed(pos: Vector3i, old_id: int, new_id: int) -> void:
+	# 引擎侧水流写入一律静音：WaterFlow 走 world.set_block（信号
+	# 无区分参数），洪水时 AIR↔WATER 每格一声会音爆；玩家无放/
+	# 挖水能力，无漏报
+	if old_id == VoxelTypes.WATER_ID or new_id == VoxelTypes.WATER_ID:
+		return
+	# 水位等引擎侧写入（set_block_state/水位降级 set_block(false)）
+	# 不发声——只响应玩家可见的增删（.air↔实体）
+	if (old_id == 0) == (new_id == 0):
+		return
+	var family: String = FootstepSystemScript.block_family(
+			new_id if new_id != 0 else old_id)
+	# 同族 80ms 节流：砍树占位清除等级联一格一声 → 一族一声
+	var now := Time.get_ticks_msec()
+	if family != "" and now - int(_family_last_ms.get(family, -1000)) < 80:
+		return
+	_family_last_ms[family] = now
+	var center := Vector3(pos) + Vector3(0.5, 0.5, 0.5)
+	if new_id == 0:
+		play_3d(_family_stream(old_id, "break"), center, 0.9,
+				randf_range(0.92, 1.08))
+	else:
+		play_3d(_family_stream(new_id, "place"), center, 0.8,
+				randf_range(0.92, 1.08))
 ## 声学效果引用（总线名 → 预挂效果资源，参数动态下发）
 var _lowpass := {}   # 全局水下闷化（所有总线）
 var _reverb := {}    # 房间混响（非 Ambient 总线）
@@ -140,6 +170,7 @@ func play_2d(stream: AudioStream, volume: float, pitch: float,
 		bus: String) -> void:
 	if stream == null:
 		return
+	play_count += 1
 	var p := _pool[_pool_idx]
 	_pool_idx = (_pool_idx + 1) % POOL_SIZE
 	p.bus = bus
@@ -156,6 +187,7 @@ func play_3d(stream: AudioStream, pos: Vector3, volume: float,
 		pitch: float) -> void:
 	if stream == null:
 		return
+	play_count += 1
 	var occ := 0.0
 	if _player != null and is_instance_valid(_player):
 		var eye: Vector3 = _player.global_position \
@@ -175,20 +207,6 @@ func play_3d(stream: AudioStream, pos: Vector3, volume: float,
 
 
 # ---- 方块交互音（MAtmos sfx_database 的 onplace/onbreak 语义） ----
-
-func _on_block_changed(pos: Vector3i, old_id: int, new_id: int) -> void:
-	# 水位等引擎侧写入（set_block_state/水位降级 set_block(false)）
-	# 不发声——只响应玩家可见的增删（.air↔实体）
-	if (old_id == 0) == (new_id == 0):
-		return
-	var center := Vector3(pos) + Vector3(0.5, 0.5, 0.5)
-	if new_id == 0:
-		play_3d(_family_stream(old_id, "break"), center, 0.9,
-				randf_range(0.92, 1.08))
-	else:
-		play_3d(_family_stream(new_id, "place"), center, 0.8,
-				randf_range(0.92, 1.08))
-
 
 ## 家族放置/破坏音（懒合成缓存）：place=短闷击（family 特征低频体）、
 ## break=碎裂（噪声簇更长）

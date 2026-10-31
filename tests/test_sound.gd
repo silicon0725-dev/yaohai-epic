@@ -21,6 +21,39 @@ func run() -> void:
 	_test_bus_layout()
 	_test_occlusion()
 	_test_room_reverb()
+	_test_block_sound_filtering()
+
+
+## 交互音过滤回归：水位引擎写入静音（洪水 AIR↔WATER 曾每格一声
+## 音爆）+ 同族 80ms 节流（砍树占位清除等级联一格一声）
+func _test_block_sound_filtering() -> void:
+	var mgr: Node = ManagerScript.new()
+	# 玩家侧：泥土挖放正常发声
+	mgr.play_count = 0
+	mgr._on_block_changed(Vector3i.ZERO, VoxelTypes.DIRT_ID,
+			VoxelTypes.AIR_ID)
+	check(mgr.play_count == 1, "玩家挖泥土发声")
+	# 引擎侧水位写入：AIR↔WATER 一律静音（WaterFlow 走 set_block，
+	# 信号无区分——洪水时每格一声会音爆）
+	mgr.play_count = 0
+	mgr._on_block_changed(Vector3i.ZERO, VoxelTypes.AIR_ID,
+			VoxelTypes.WATER_ID)
+	mgr._on_block_changed(Vector3i.ZERO, VoxelTypes.WATER_ID,
+			VoxelTypes.AIR_ID)
+	check(mgr.play_count == 0, "水位写入静音（洪水防音爆）")
+	# 同族节流：连挖两块石头只响一声（80ms 内）
+	mgr.play_count = 0
+	mgr._family_last_ms.clear()
+	mgr._on_block_changed(Vector3i.ZERO, VoxelTypes.STONE_ID,
+			VoxelTypes.AIR_ID)
+	mgr._on_block_changed(Vector3i.ONE, VoxelTypes.STONE_ID,
+			VoxelTypes.AIR_ID)
+	check(mgr.play_count == 1, "同族 80ms 节流去重（级联防音爆）")
+	# 不同族不受节流影响
+	mgr._on_block_changed(Vector3i.ZERO, VoxelTypes.DIRT_ID,
+			VoxelTypes.AIR_ID)
+	check(mgr.play_count == 2, "不同族不互斥")
+	mgr.free()
 
 
 ## 方块 ID → 材质族映射（blockmap 语义：新方块注册须同步）

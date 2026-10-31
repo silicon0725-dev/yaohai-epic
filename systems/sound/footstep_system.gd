@@ -30,22 +30,23 @@ const BLOCK_FAMILY := {
 	17: "wood", 18: "wood",
 }
 
-## 录音素材（CC0，见 assets/sounds/footsteps/ATTRIBUTION.md）：
-## 族 → 文件名表。步态播放优先录音，缺失族回退程序化合成。
+## 录音素材（CC0，见 assets/sounds/footsteps/ATTRIBUTION.md；全部
+## 经 -26dB RMS 归一为 16bit WAV——原始素材族间响度差 28dB、族内
+## 差 20dB，不归一会忽大忽小）。步态播放优先录音，缺失族回退合成。
 ## water 族录音（splash）只做入水/出水溅泼——涉水脚步短促，用合成。
 const RECORDED_DIR := "res://assets/sounds/footsteps/"
 const RECORDED_FILES := {
-	"grass": ["grass_01.ogg", "grass_02.ogg", "grass_03.ogg",
-			"grass_04.ogg"],
-	"dirt": ["dirt_01.ogg"],
-	"stone": ["stone_01.ogg", "stone_f01.ogg", "stone_f02.ogg",
-			"stone_f03.ogg", "stone_f04.ogg", "stone_f05.ogg",
-			"stone_f06.ogg"],
-	"wood": ["wood_01.ogg", "wood_02.ogg", "wood_03.ogg"],
-	"sand": ["sand_01.ogg", "sand_02.ogg", "sand_03.ogg", "sand_04.ogg",
-			"sand_05.ogg", "sand_06.ogg"],
-	"gravel": ["gravel_01.ogg"],
-	"leaves": ["leaves_01.ogg", "leaves_02.ogg"],
+	"grass": ["grass_01.wav", "grass_02.wav", "grass_03.wav",
+			"grass_04.wav"],
+	"dirt": ["dirt_01.wav"],
+	"stone": ["stone_01.wav", "stone_f01.wav", "stone_f02.wav",
+			"stone_f03.wav", "stone_f04.wav", "stone_f05.wav",
+			"stone_f06.wav"],
+	"wood": ["wood_01.wav", "wood_02.wav", "wood_03.wav"],
+	"sand": ["sand_01.wav", "sand_02.wav", "sand_03.wav", "sand_04.wav",
+			"sand_05.wav", "sand_06.wav"],
+	"gravel": ["gravel_01.wav"],
+	"leaves": ["leaves_01.wav", "leaves_02.wav"],
 	"water": ["splash_01.wav", "splash_02.wav"],
 }
 
@@ -86,11 +87,27 @@ func set_player(p_player: Node) -> void:
 	_player = p_player
 
 
-func _physics_process(_delta: float) -> void:
+func _physics_process(delta: float) -> void:
 	if _player == null or _world == null or not is_instance_valid(_player):
 		return
 	var on_floor: bool = _player.is_on_floor()
 	var vel: Vector3 = _player.velocity
+	# 涉水判定在 on_floor 早退**之前**：跳水入水瞬间 on_floor=false，
+	# 挪后则 _was_wading 不更新 → 落水无溅泼（排查发现）
+	var feet_cell := Vector3i(floori(_player.global_position.x),
+			floori(_player.global_position.y - 0.95),
+			floori(_player.global_position.z))
+	_wading = WaterFlow.water_surface_at(_world, feet_cell) \
+			- (_player.global_position.y - 1.0) > 0.1
+	# 入水/出水溅泼（边沿触发；SFX 总线比脚步响一档）——CC0 录音
+	# splash，缺失回退合成 water 变体
+	if _wading != _was_wading:
+		var splashes: Array = _splash_variants \
+				if not _splash_variants.is_empty() \
+				else _variants["water"]
+		_manager.play_2d(splashes.pick_random(), 1.3 * volume_scale,
+				randf_range(0.9, 1.1), "SFX")
+	_was_wading = _wading
 	# 落地检测（坠落速度取离地前的最大值）
 	if on_floor and not _was_on_floor:
 		var impact := -_prev_fall_speed
@@ -104,20 +121,6 @@ func _physics_process(_delta: float) -> void:
 	_was_on_floor = on_floor
 	if not on_floor:
 		return
-	# 涉水判定（与 player_controller 同式：浸深 > 0.1）
-	var feet_cell := Vector3i(floori(_player.global_position.x),
-			floori(_player.global_position.y - 0.95),
-			floori(_player.global_position.z))
-	_wading = WaterFlow.water_surface_at(_world, feet_cell) \
-			- (_player.global_position.y - 1.0) > 0.1
-	# 入水/出水溅泼（边沿触发；SFX 总线比脚步响一档）——CC0 录音
-	# splash，缺失回退合成 water 变体
-	if _wading != _was_wading:
-		var splashes: Array = _splash_variants if not _splash_variants.is_empty() \
-				else _variants["water"]
-		_manager.play_2d(splashes.pick_random(), 1.3 * volume_scale,
-				randf_range(0.9, 1.1), "SFX")
-	_was_wading = _wading
 	# 步距累计（水平速度）
 	var horizontal := Vector2(vel.x, vel.z).length()
 	if horizontal < 0.5:
@@ -126,7 +129,7 @@ func _physics_process(_delta: float) -> void:
 	var sprint: bool = horizontal > 5.5
 	var stride := STRIDE_WADE if _wading else (
 			STRIDE_SPRINT if sprint else STRIDE_WALK)
-	_stride_acc += horizontal * _delta
+	_stride_acc += horizontal * delta
 	if _stride_acc >= stride:
 		_stride_acc = 0.0
 		_play_step(1.0)

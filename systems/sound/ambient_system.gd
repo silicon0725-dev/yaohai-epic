@@ -21,6 +21,14 @@ const EVAL_PERIOD := 1.0
 const STABLE_TICKS := 2
 ## 交叉淡入时长（秒）
 const FADE_TIME := 3.0
+## 流响度补偿（dB）：原始素材流间响度差 24dB（cave_a -12dB、
+## sand/waves -35dB）——cave_a 的 vorbis 重编码会崩（libsndfile
+## native），离线归一不可行改播放端补偿；目标把极值拉回 -20/-28
+const STREAM_GAIN_DB := {
+	"cave_a": -8.0,
+	"sand": 8.0,
+	"waves_medium": 7.0,
+}
 
 ## 音景机表（优先级从高到低，首个满足者生效；night/indoor 为可选
 ## 变体流名——MAtmos stream_pair 语义）。cond 字段：
@@ -115,12 +123,14 @@ func _evaluate() -> void:
 		_start_crossfade(machine, ctx)
 
 
-## 交叉淡入：非活跃播放器起新流，双端对拉音量
+## 交叉淡入：非活跃播放器起新流，双端对拉音量（目标电平带流响度
+## 补偿——原始素材流间差 24dB）
 func _start_crossfade(machine_name: String, ctx: Dictionary) -> void:
 	var machine := _machine_by_name(machine_name)
 	if machine.is_empty():
 		return
-	var stream := _load_stream(_machine_stream(machine, ctx))
+	var stream_name := _machine_stream(machine, ctx)
+	var stream := _load_stream(stream_name)
 	if stream == null:
 		return
 	var nxt := _players[1 - _active]
@@ -130,8 +140,9 @@ func _start_crossfade(machine_name: String, ctx: Dictionary) -> void:
 	nxt.play()
 	_active = 1 - _active
 	_fade = 0.0
-	# 淡入时长取音景机配置
+	# 淡入时长取音景机配置；目标电平 = 基准 + 流补偿
 	set_meta("fade_time", float(machine.get("fade", 3.0)))
+	set_meta("gain_db", float(STREAM_GAIN_DB.get(stream_name, 0.0)))
 
 
 func _tick_fade(delta: float) -> void:
@@ -139,11 +150,12 @@ func _tick_fade(delta: float) -> void:
 		return
 	_fade += delta
 	var total: float = get_meta("fade_time", 3.0)
+	var target_db: float = -9.0 + float(get_meta("gain_db", 0.0))
 	var k := clampf(_fade / total, 0.0, 1.0)
 	var nxt := _players[_active]
 	var cur := _players[1 - _active]
-	nxt.volume_db = lerpf(-60.0, -9.0, k)
-	cur.volume_db = lerpf(-9.0, -60.0, k)
+	nxt.volume_db = lerpf(-60.0, target_db, k)
+	cur.volume_db = lerpf(target_db, -60.0, k)
 	if k >= 1.0:
 		cur.stop()
 		_fade = -1.0
@@ -165,6 +177,7 @@ func _tick_crickets(delta: float) -> void:
 		var stream := _load_stream("cricketz_night")
 		if stream != null:
 			_crickets.stream = stream
+			_crickets.volume_db = -60.0  # 淡入起点（默认 0dB 会爆）
 			_crickets.play()
 			_cricket_got = true
 	if _cricket_got:

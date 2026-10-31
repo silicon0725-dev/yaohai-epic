@@ -19,6 +19,29 @@ func run() -> void:
 	_test_grain_alignment()
 	_test_shadow_mesh_shapes()
 	_test_no_degenerate_quads()
+	_test_unloaded_fallback_no_emission()
+
+
+## 未加载邻块回退色：双通道 EMISSION 语义下回退 (1,1,1,1) 会烘成
+## 恒定全亮自发光（重进存档后树梢跨块面全亮，实机报告）——回退
+## 必须是"露天等价" (0,0,0,1)：方块光 0 无自发光、天光满。
+func _test_unloaded_fallback_no_emission() -> void:
+	var tree = TreeGenScript.generate(SpeciesScript.new(), 9,
+			Vector3i(0, 3, 0))
+	var mesh: ArrayMesh = MeshBuilderScript.build_mesh(tree)
+	check(mesh != null and mesh.get_surface_count() > 0, "树网格已构建")
+	if mesh == null or mesh.get_surface_count() == 0:
+		return
+	var arrays: Array = mesh.surface_get_arrays(0)
+	var cols: PackedColorArray = arrays[Mesh.ARRAY_COLOR]
+	var vs: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
+	check(cols.size() == vs.size() and cols.size() > 0,
+			"顶点色随网格挂载（%d/%d）" % [cols.size(), vs.size()])
+	var lit := 0
+	for c in cols:
+		if c.r != 0.0 or c.g != 0.0 or c.b != 0.0:
+			lit += 1
+	check(lit == 0, "未加载回退无自发光分量（违规 %d）" % lit)
 
 
 ## 还原网格的全部 AABB 盒（每盒 6 面 × 4 顶点 = 24 顶点）。

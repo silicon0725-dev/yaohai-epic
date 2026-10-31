@@ -34,6 +34,8 @@ var drop_spawner: Callable
 ## 光照脏树集合：光源/遮挡方块变化后需重烘顶点色的 tree_id
 var _light_dirty := {}
 var _light_dirty_wait := 0.0
+## 每帧重烘上限（初次加载后全量标脏一次，限量防单帧长卡）
+const REBUILD_BUDGET_PER_FRAME := 4
 ## 管线空闲判定（main 注入 chunk_manager.is_idle）：光照传播是排队
 ## 异步的——过早重烘会采到未更新的光照烘焙进网格（实测 0.15s 时
 ## torch 邻格仍是 blk=0）。invalid 时退回纯时间窗（测试用）。
@@ -91,6 +93,7 @@ func _mark_light_dirty(pos: Vector3i, old_id: int, new_id: int) -> void:
 
 ## chunk ACTIVE 时：影响范围覆盖此 chunk 的树引用 +1。
 func on_chunk_active(chunk_coord: Vector3i) -> void:
+	_mark_intersecting_dirty(chunk_coord)
 	# 只扫本 chunk 自身列（根列在本 chunk 的树归此 chunk 管理——
 	# 树的 mesh/碰撞是独立实体不受区块边界影响；跨区块占位由
 	# terrain_generator 的重放机制写入区块数据）。±TREE_REACH
@@ -98,6 +101,21 @@ func on_chunk_active(chunk_coord: Vector3i) -> void:
 	# 只处理 y=0 层（树根在地表层，y 层 chunk 不重复建树）。
 	if chunk_coord.y != 0:
 		return
+
+
+## 新激活区块补齐了树网格烘焙时可能缺失的邻块光照（重进存档/
+## 流式加载：树在其根列 chunk 激活瞬间构建，树梢/横枝跨着的上层
+## 与水平邻块常未就绪）。相交树标脏等空闲重烘——与 light_of 的
+## 未加载安全回退配合：先烘出无自发光的安全色，邻块到齐后重烘
+## 成正确光照。
+func _mark_intersecting_dirty(chunk_coord: Vector3i) -> void:
+	var s := world.config.chunk_size
+	var cbox := AABB(Vector3(chunk_coord) * float(s) - Vector3.ONE,
+			Vector3(s + 2, s + 2, s + 2))
+	for tid in _trees:
+		var aabb: AABB = _trees[tid]["aabb"]
+		if aabb.intersects(cbox):
+			_light_dirty[tid] = true
 	var size := world.config.chunk_size
 	var ox := chunk_coord.x * size
 	var oz := chunk_coord.z * size
@@ -186,7 +204,9 @@ func _ref_tree(col: Vector2i) -> void:
 	for cell in tree.cell_to_branch:
 		_cell_lookup[cell] = tree_id
 	_apply_cuts(tree, tree_id)
-	_build_visual(tree_id)
+	# 首建走光照脏冲刷（空闲门控）：根列 chunk 激活瞬间邻块常未
+	# 就绪，立即构建会把未加载跨块面烘成回退色——等管线空闲再烘
+	_light_dirty[tree_id] = true
 
 
 var _terrain_gen = null
@@ -587,7 +607,8 @@ func _collect_leaves_near(cells: Array[Vector3i]) -> Array[Vector3i]:
 
 func _process(delta: float) -> void:
 	# 光照脏重建：合并窗口内多次编辑；等区块管线空闲（光照传播
-	# 落定）再重烘，2s 兜底防饿死
+	# 落定、邻块到齐）再重烘，2s 兜底防饿死；每帧限量（初次加载
+	# 后全量标脏一次，防单帧长卡）
 	if not _light_dirty.is_empty():
 		_light_dirty_wait += delta
 		var ready := false
@@ -596,10 +617,15 @@ func _process(delta: float) -> void:
 		else:
 			ready = _light_dirty_wait >= 0.15
 		if ready:
+			var built := 0
 			for tid in _light_dirty.keys():
+				if built >= REBUILD_BUDGET_PER_FRAME:
+					break
+				_light_dirty.erase(tid)
 				if _trees.has(tid):
 					_build_visual(tid)
-			_light_dirty.clear()
+					built += 1
+		if _light_dirty.is_empty():
 			_light_dirty_wait = 0.0
 	for body in _falling.keys():
 		var info: Dictionary = _falling[body]

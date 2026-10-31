@@ -44,13 +44,17 @@ static func build_mesh(tree: TreeInstance,
 		Vector3i(1, 0, 0), Vector3i(-1, 0, 0), Vector3i(0, 1, 0),
 		Vector3i(0, -1, 0), Vector3i(0, 0, 1), Vector3i(0, 0, -1)]
 	var light_of := func(cell: Vector3i, f: int) -> Color:
+		# 未加载回退必须"露天等价" (0,0,0,1)：方块光 0（无自发光）、
+		# 天光满。曾回 (1,1,1,1)——旧合并语义下只是 albedo 满（无害），
+		# 双通道 EMISSION 语义下 rgb=(1,1,1) = 恒定全亮自发光（重进
+		# 存档后树梢跨块面全亮，实机报告）
 		if world == null:
-			return Color(1, 1, 1, 1)
+			return Color(0, 0, 0, 1)
 		var s: int = world.config.chunk_size
 		var chunk: ChunkData = world.chunks.get(
 				VoxelCoords.world_to_chunk(cell, s))
 		if chunk == null:
-			return Color(1, 1, 1, 1)
+			return Color(0, 0, 0, 1)
 		var local := VoxelCoords.world_to_local(cell, s)
 		var sky := float(chunk.get_sky_light(local)) / 15.0
 		var blk := float(chunk.get_block_light(local)) / 15.0

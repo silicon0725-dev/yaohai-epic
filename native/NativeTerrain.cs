@@ -19,13 +19,28 @@ namespace VoxelTerrain;
 /// </summary>
 public partial class NativeTerrain : RefCounted
 {
-    private const int GeneratorVersion = 6;
+    private const int GeneratorVersion = 7;
     private const int DirtLayerDepth = 3;
     private const int SandMaxHeight = 8;
-    private const double CoalOreThreshold = 0.60;
-    private const double IronOreThreshold = 0.68;
-    private const int IronOreMaxY = 24;
+    private const int IronOreMaxY = 20;
     private const int OreSurfaceMargin = 4;
+    // v7 洞穴与矿脉（Minetest cavegen/mg_ore 算法移植）。
+    // 阈值按归一化噪声实测分位标定（探针：W=0.88 → 隧道 ~3.5%、
+    // 剖面中位 3 格可通行；煤 ~2.1%、铁 ~0.74%）——Minetest 的
+    // 0.09/0.16/0.30 依赖其噪声 scale=3 的宽值域，FastNoiseLite
+    // 归一输出下不可直接套用。
+    private const double CaveWidth = 0.88;
+    private const double CaveFreq = 1.0 / 48.0;
+    private const int CaveOctaves = 2;
+    private const double CheeseFreq = 1.0 / 64.0;
+    private const int CheeseOctaves = 2;
+    private const double CheeseThreshold = 0.58;
+    private const int CheeseMinDepth = 8;
+    private const double VeinFreq = 1.0 / 16.0;
+    private const int VeinOctaves = 1;
+    private const double VeinJitter = 0.04;
+    private const double CoalVeinValue = 0.92;
+    private const double IronVeinValue = 0.965;
     private const int SeaLevel = 7;
     private const int KnotCount = 17;
     private const double MountainGateLo = 0.30;
@@ -65,6 +80,12 @@ public partial class NativeTerrain : RefCounted
     private readonly FastNoiseLite _precip;
     private readonly FastNoiseLite _coal;
     private readonly FastNoiseLite _iron;
+    // v7 洞穴与矿脉噪声（隧道双等值线 / 大洞厅 / 细脉双等值线）
+    private readonly FastNoiseLite _cave1;
+    private readonly FastNoiseLite _cave2;
+    private readonly FastNoiseLite _cheese;
+    private readonly FastNoiseLite _vein1;
+    private readonly FastNoiseLite _vein2;
     private readonly double[] _sourceKnots;
     private readonly int _worldHeightBlocks;
 
@@ -99,6 +120,11 @@ public partial class NativeTerrain : RefCounted
         _detail = MakeFbm(worldSeed + 505, 0.05, 2);
         _coal = MakeFbm(worldSeed + 606, 0.08, 1);
         _iron = MakeFbm(worldSeed + 707, 0.09, 1);
+        _cave1 = MakeFbm(worldSeed + 808, CaveFreq, CaveOctaves);
+        _cave2 = MakeFbm(worldSeed + 909, CaveFreq, CaveOctaves);
+        _cheese = MakeFbm(worldSeed + 1010, CheeseFreq, CheeseOctaves);
+        _vein1 = MakeFbm(worldSeed + 1111, VeinFreq, VeinOctaves);
+        _vein2 = MakeFbm(worldSeed + 1212, VeinFreq, VeinOctaves);
         _sourceKnots = BuildSourceQuantiles();
         _worldHeightBlocks = worldHeightBlocks;
     }
@@ -229,15 +255,54 @@ public partial class NativeTerrain : RefCounted
             if (sandy || height <= SandMaxHeight) return _sandstoneId;
             return _dirtId;
         }
-        if (wy <= height - OreSurfaceMargin)
+        // v7 洞穴与矿脉（地表保护层内不挖——防满地天窗；基岩上留层）
+        if (wy <= height - OreSurfaceMargin && wy >= 1)
         {
-            if (wy <= IronOreMaxY
-                && _iron.GetNoise3D(wx, wy, wz) > IronOreThreshold)
-                return _ironOreId;
-            if (_coal.GetNoise3D(wx, wy, wz) > CoalOreThreshold)
-                return _coalOreId;
+            if (IsCave(wx, wy, wz, height))
+                return 0;
+            int ore = OreVein(wx, wy, wz);
+            if (ore != 0)
+                return ore;
         }
         return _stoneId;
+    }
+
+    /// 隧道：双 3D 噪声等值线交叉（Minetest cavegen）；大洞厅：低频
+    /// 3D 噪声超阈值（更深处）。
+    private bool IsCave(int wx, int wy, int wz, int height)
+    {
+        double d1 = 1.0 - Math.Abs(_cave1.GetNoise3D(wx, wy, wz));
+        double d2 = 1.0 - Math.Abs(_cave2.GetNoise3D(wx, wy, wz));
+        if (d1 * d2 > CaveWidth)
+            return true;
+        if (wy <= height - CheeseMinDepth
+            && _cheese.GetNoise3D(wx, wy, wz) > CheeseThreshold)
+            return true;
+        return false;
+    }
+
+    /// GD 侧 _hash_unit 的位同步镜像：int64 乘异或环绕 + abs 取模。
+    private static double HashUnit(int x, int y, int z)
+    {
+        long h = (long)x * 73856093L ^ (long)y * 19349663L
+            ^ (long)z * 83492791L;
+        h = Math.Abs(h) % 65536;
+        return h / 65536.0;
+    }
+
+    /// 矿脉细脉（Minetest mg_ore OreVein）：vein 双噪声等值线交叉
+    /// + hash 抖动控制厚度；煤浅带、铁更深。
+    private int OreVein(int wx, int wy, int wz)
+    {
+        double d1 = 1.0 - Math.Abs(_vein1.GetNoise3D(wx, wy, wz));
+        double d2 = 1.0 - Math.Abs(_vein2.GetNoise3D(wx, wy, wz));
+        double jitter = HashUnit(wx, wy, wz) * 2.0 - 1.0;
+        double value = d1 * d2 + jitter * VeinJitter;
+        if (value > IronVeinValue && wy <= IronOreMaxY)
+            return _ironOreId;
+        if (value > CoalVeinValue)
+            return _coalOreId;
+        return 0;
     }
 
     /// 生成区块方块数据。返回 { ids: int[], heights: int[],

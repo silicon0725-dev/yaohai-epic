@@ -36,7 +36,33 @@ func _build(radius: int, center := Vector2i.ZERO) -> Dictionary:
 
 ## 选一根光照语义可靠的测试列：无树、内地格（非区块边界）、
 ## 地表 9..36（海平面以上、山线以下）、非裸岩。
+## 最近一次 _pick_column 是否选中深层实心列（洞穴网络外）
+var _last_pick_solid := false
+
+
 func _pick_column(generator) -> Vector2i:
+	# 优先挑深层实心列（v7 洞穴网络会让隧道经过的列渗天光——
+	# "深处全黑"断言需要无洞穴的列）
+	for wx in range(1, 48):
+		for wz in range(1, 48):
+			if posmod(wx, 16) == 0 or posmod(wz, 16) == 0:
+				continue
+			if TreeGeneratorScript.has_tree_at(TEST_SEED, Vector2i(wx, wz)):
+				continue
+			var prof: Dictionary = generator.column_profile(wx, wz)
+			var h := int(prof["height"])
+			if h < 9 or h > 36 or bool(prof["rocky"]):
+				continue
+			var solid_deep := true
+			for wy in range(1, 6):
+				if generator.block_for_column(prof, false, false,
+						wx, wy, wz, h) == VoxelTypes.AIR_ID:
+					solid_deep = false
+					break
+			if solid_deep:
+				_last_pick_solid = true
+				return Vector2i(wx, wz)
+	# 回退：任意合规列（深层断言由调用方放宽）
 	for wx in range(1, 48):
 		for wz in range(1, 48):
 			if posmod(wx, 16) == 0 or posmod(wz, 16) == 0:
@@ -70,7 +96,13 @@ func _test_rebuild_and_light() -> void:
 	var above := Rebuilder.light_at(world, Vector3i(col.x, h + 1, col.y))
 	check_eq(int(above["sky"]), 15, "无树列地表上格天光 15（垂直直射）")
 	var deep := Rebuilder.light_at(world, Vector3i(col.x, 1, col.y))
-	check_eq(int(deep["sky"]), 0, "深层地下天光 0")
+	if _last_pick_solid:
+		check_eq(int(deep["sky"]), 0, "深层地下天光 0")
+	else:
+		# v7 洞穴网络：隧道经过的列天光从洞口渗入（衰减上界 8，
+		# 防"深层全亮"回归）
+		check(int(deep["sky"]) <= 8, "深层天光渗光上界（%d）"
+				% int(deep["sky"]))
 
 	var center_chunk = world.get_chunk(Vector3i(0, 0, 0))
 	var all_blk_zero := true

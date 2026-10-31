@@ -18,7 +18,7 @@ extends RefCounted
 const NativeTerrainBridge := preload("res://meshing/native_terrain_bridge.gd")
 
 ## 生成算法版本。
-const GENERATOR_VERSION := 6
+const GENERATOR_VERSION := 7
 
 # ---- 地层参数（v2 语义保留）----
 ## 表层以下 3 格为泥土（草区）或砂岩（沙区）。
@@ -26,16 +26,44 @@ const DIRT_LAYER_DEPTH := 3
 const SANDSTONE_LAYER_DEPTH := 3
 ## 地表高度不超过此值时为滩涂/干涸湖床沙地。
 const SAND_MAX_HEIGHT := 8
-## 矿脉噪声阈值（单倍频单纯形 -1..1，越高越稀疏）。
-const COAL_ORE_THRESHOLD := 0.60
-const IRON_ORE_THRESHOLD := 0.68
-## 铁矿最深出现高度（比煤更稀有且更深）。
-const IRON_ORE_MAX_Y := 24
 ## 矿石不生成的地表保护层厚度。
 const ORE_SURFACE_MARGIN := 4
 ## 海平面（v4）：低于它的空气列填水。取 7 与滩涂沙线上限（8）衔接
 ##——海岸一圈自然成沙滩；水下地表本就 ≤8 全为沙（浅海沙底）。
 const SEA_LEVEL := 7
+
+# ---- v7 洞穴与矿脉（Minetest cavegen/mg_ore 算法移植）----
+## 隧道判定：两条 3D 噪声等值线交叉——d1=1-|n1|、d2=1-|n2|，
+## d1*d2 > width 即在双等值线交叉的管状隧道内（天然互通网络，
+## 贴地表处自然开口）。width 越大隧道越宽。
+## 注意：Minetest 原参数靠噪声 scale=3（值域超 ±1）把隧道压稀，
+## FastNoiseLite FBM 输出归一 ±1，必须按实测分位重标——width=0.88
+## 在真实地下带给出 ~3.5% 隧道体积、垂直剖面中位 3 格（可通行；
+## 游程探针标定，勿改回小值，0.09 会把 99.96% 地下挖空；
+## 0.90 以上管径坍缩到 1 格高钻不进）。
+const CAVE_WIDTH := 0.88
+## 隧道噪声频率（1/48 格 = 隧道走向的弯曲尺度）与倍频。
+const CAVE_FREQ := 1.0 / 48.0
+const CAVE_OCTAVES := 2
+## 大洞厅（cheese cavern）：低频 3D 噪声超阈值即整片挖空。
+const CHEESE_FREQ := 1.0 / 64.0
+const CHEESE_OCTAVES := 2
+const CHEESE_THRESHOLD := 0.58
+## 大洞厅最小埋深（距地表）——浅层只允许细隧道（防满天窗）。
+const CHEESE_MIN_DEPTH := 8
+## 矿脉细脉判定：vein 双噪声等值线交叉 + hash 抖动。
+## value = d1*d2 + (hash*2-1)*0.04；煤 value > COAL_VEIN_VALUE、
+## 铁 value > IRON_VEIN_VALUE（更稀）且深度更带状。
+## 阈值同为归一化噪声分位标定（煤 ~2.1%、铁 ~0.74% 地下带占比，
+## 探针 p97≈0.892 / p99≈0.965——0.16/0.30 是 Minetest scale 语义
+## 的残留，在归一化输出下会产生海量矿）。
+const VEIN_FREQ := 1.0 / 16.0
+const VEIN_OCTAVES := 1
+const VEIN_JITTER := 0.04
+const COAL_VEIN_VALUE := 0.92
+const IRON_VEIN_VALUE := 0.965
+## 铁矿深度带上限（比煤更深）。
+const IRON_ORE_MAX_Y := 20
 
 # ---- v3 地形参数 ----
 ## 高程分布重映射的目标分位表（移植其分位匹配）：输入为噪声的
@@ -72,6 +100,12 @@ var _temp_noise: FastNoiseLite
 var _precip_noise: FastNoiseLite
 var _coal_noise: FastNoiseLite
 var _iron_noise: FastNoiseLite
+## v7 洞穴与矿脉噪声（隧道双等值线 / 大洞厅 / 细脉双等值线）
+var _cave1_noise: FastNoiseLite
+var _cave2_noise: FastNoiseLite
+var _cheese_noise: FastNoiseLite
+var _vein1_noise: FastNoiseLite
+var _vein2_noise: FastNoiseLite
 ## 本种子噪声的源分位节点（初始化时校准，确定性）。
 var _source_knots := PackedFloat32Array()
 
@@ -91,9 +125,20 @@ func _init(world_config: WorldConfig) -> void:
 	_ridge_noise.fractal_type = FastNoiseLite.FRACTAL_RIDGED
 	_ridge_noise.fractal_octaves = 3
 	_detail_noise = _make_fbm(world_config.world_seed + 505, 0.05, 2)
-	# 矿物（v2 语义不变）
+	# 矿物（v7 细脉网络替代 v2 单噪声阈值）
 	_coal_noise = _make_fbm(world_config.world_seed + 606, 0.08, 1)
 	_iron_noise = _make_fbm(world_config.world_seed + 707, 0.09, 1)
+	# v7 洞穴与矿脉噪声（seed 段 808+，与粗图/细节段隔离）
+	_cave1_noise = _make_fbm(world_config.world_seed + 808,
+			CAVE_FREQ, CAVE_OCTAVES)
+	_cave2_noise = _make_fbm(world_config.world_seed + 909,
+			CAVE_FREQ, CAVE_OCTAVES)
+	_cheese_noise = _make_fbm(world_config.world_seed + 1010,
+			CHEESE_FREQ, CHEESE_OCTAVES)
+	_vein1_noise = _make_fbm(world_config.world_seed + 1111,
+			VEIN_FREQ, VEIN_OCTAVES)
+	_vein2_noise = _make_fbm(world_config.world_seed + 1212,
+			VEIN_FREQ, VEIN_OCTAVES)
 	_source_knots = _build_source_quantiles()
 
 
@@ -205,13 +250,56 @@ func _block_for_column(
 			# sandy 列 depth 1..3 全为砂岩）
 			return VoxelTypes.SANDSTONE_ID
 		return VoxelTypes.DIRT_ID
-	# 矿脉（确定性单纯形，铁更深更稀有，地表保护层内不出矿）
-	if world_y <= height - ORE_SURFACE_MARGIN:
-		if world_y <= IRON_ORE_MAX_Y 				and _iron_noise.get_noise_3d(world_x, world_y, world_z) 				> IRON_ORE_THRESHOLD:
-			return VoxelTypes.IRON_ORE_ID
-		if _coal_noise.get_noise_3d(world_x, world_y, world_z) 				> COAL_ORE_THRESHOLD:
-			return VoxelTypes.COAL_ORE_ID
+	# v7 洞穴与矿脉（地表保护层内不挖——防满地天窗；基岩上留层）
+	if world_y <= height - ORE_SURFACE_MARGIN and world_y >= 1:
+		if _is_cave(world_x, world_y, world_z, height):
+			return VoxelTypes.AIR_ID
+		var ore := _ore_vein(world_x, world_y, world_z)
+		if ore != VoxelTypes.AIR_ID:
+			return ore
 	return VoxelTypes.STONE_ID
+
+
+## 隧道：双 3D 噪声等值线交叉（Minetest cavegen）；大洞厅：低频
+## 3D 噪声超阈值（更深处）。地下格才判定（调用方保证）。
+func _is_cave(world_x: int, world_y: int, world_z: int,
+		height: int) -> bool:
+	var d1 := 1.0 - absf(_cave1_noise.get_noise_3d(
+			world_x, world_y, world_z))
+	var d2 := 1.0 - absf(_cave2_noise.get_noise_3d(
+			world_x, world_y, world_z))
+	if d1 * d2 > CAVE_WIDTH:
+		return true
+	if world_y <= height - CHEESE_MIN_DEPTH \
+			and _cheese_noise.get_noise_3d(
+			world_x, world_y, world_z) > CHEESE_THRESHOLD:
+		return true
+	return false
+
+
+## 矿脉细脉（Minetest mg_ore OreVein）：vein 双噪声等值线交叉
+## + hash 抖动控制厚度；煤浅带、铁更深（IRon_ORE_MAX_Y）。
+## hash 为整型算术（GD/C# 位同步——RandomNumberGenerator 序列
+## 不可跨语言复现）。
+static func _hash_unit(x: int, y: int, z: int) -> float:
+	var h := (x * 73856093) ^ (y * 19349663) ^ (z * 83492791)
+	h = absi(h) % 65536
+	return float(h) / 65536.0
+
+
+func _ore_vein(world_x: int, world_y: int, world_z: int) -> int:
+	var d1 := 1.0 - absf(_vein1_noise.get_noise_3d(
+			world_x, world_y, world_z))
+	var d2 := 1.0 - absf(_vein2_noise.get_noise_3d(
+			world_x, world_y, world_z))
+	var jitter: float = _hash_unit(world_x, world_y, world_z) \
+			* 2.0 - 1.0
+	var value: float = d1 * d2 + jitter * VEIN_JITTER
+	if value > IRON_VEIN_VALUE and world_y <= IRON_ORE_MAX_Y:
+		return VoxelTypes.IRON_ORE_ID
+	if value > COAL_VEIN_VALUE:
+		return VoxelTypes.COAL_ORE_ID
+	return VoxelTypes.AIR_ID
 
 
 

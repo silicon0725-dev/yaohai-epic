@@ -89,8 +89,8 @@ func run() -> void:
 	check_eq(
 		first.generation_version, TerrainGenerator.GENERATOR_VERSION,
 		"区块记录生成算法版本")
-	check_eq(TerrainGenerator.GENERATOR_VERSION, 6,
-			"生成算法已升级到 v4（v3 地形 + 海平面水填充）")
+	check_eq(TerrainGenerator.GENERATOR_VERSION, 7,
+			"生成算法已升级到 v7（v6 + 洞穴网络 + 细脉矿）")
 
 	# 目标高程分位表单调递增（分位匹配的前提）
 	var target := TerrainGenerator.TARGET_HEIGHT_FRAC
@@ -176,13 +176,15 @@ func run() -> void:
 					if height >= depth + 1 \
 							and world.get_block(Vector3i(x, height - depth, z)) != expected_layer:
 						violations += 1
-			# 深处只允许石头或矿物（裸岩区表下层同样是石头，合法）
+			# 深处只允许石头/矿物/洞穴空气（v7 洞穴网络挖空；
+			# 裸岩区表下层同样是石头，合法）
 			for y in [2, 5, 9]:
 				if y <= height - TerrainGenerator.ORE_SURFACE_MARGIN:
 					var deep: int = world.get_block(Vector3i(x, y, z))
 					if deep != VoxelTypes.STONE_ID \
 							and deep != VoxelTypes.COAL_ORE_ID \
-							and deep != VoxelTypes.IRON_ORE_ID:
+							and deep != VoxelTypes.IRON_ORE_ID \
+							and deep != VoxelTypes.AIR_ID:
 						violations += 1
 	# 世界顶部必须完全是空气（防"填满到天花板"回归）
 	var top_violations := 0

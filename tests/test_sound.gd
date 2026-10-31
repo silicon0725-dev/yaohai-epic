@@ -7,6 +7,7 @@ const FootstepScript := preload("res://systems/sound/footstep_system.gd")
 const AmbientScript := preload("res://systems/sound/ambient_system.gd")
 const ManagerScript := preload("res://systems/sound/sound_manager.gd")
 const AcousticScript := preload("res://systems/sound/acoustic_system.gd")
+const ReflectionsScript := preload("res://systems/sound/early_reflections.gd")
 
 
 func run() -> void:
@@ -22,6 +23,48 @@ func run() -> void:
 	_test_occlusion()
 	_test_room_reverb()
 	_test_block_sound_filtering()
+	_test_early_reflections()
+
+
+## 1 阶镜像源早期反射：单面墙产生 1 条（延迟/镜像位/衰减合理）、
+## 开放空间 0 条、镜像路径被第二堵墙挡掉时 0 条
+func _test_early_reflections() -> void:
+	var world: VoxelWorld = make_world(16, [Vector3i.ZERO], 7)
+	var chunk: ChunkData = world.get_chunk(Vector3i.ZERO)
+	# 石墙 x=8（跨整块）：源 (4.5,8.5,8.5) → 听者 (6.5,8.5,8.5)
+	for z in 16:
+		for y in 16:
+			chunk.set_block(Vector3i(8, y, z), VoxelTypes.STONE_ID)
+	var events: Array = ReflectionsScript.plan_reflections(world,
+			Vector3(4.5, 8.5, 8.5), Vector3(6.5, 8.5, 8.5))
+	check(events.size() == 1, "单面墙 1 条反射（%d）" % events.size())
+	if events.size() == 1:
+		var ev: Dictionary = events[0]
+		# 镜像点 = 源关于 x=9 面（墙面向声源的表面 x=9.0？命中格
+		# (8,·,·) 面在 x=9.0 侧？源在 -x 侧 → 命中面 x=8.0）对称：
+		# dist=3.5 → mirror.x = 4.5+7 = 11.5
+		check(absf(ev["pos"].x - 11.5) < 0.01, "镜像点 x=11.5（%f）"
+				% ev["pos"].x)
+		# 直达 2m，反射路径 |11.5-6.5|=5m → 延迟 (5-2)/343≈8.7ms
+		check(absf(ev["delay_sec"] - 3.0 / 343.0) < 0.002,
+				"延迟=路径差/声速（%f）" % ev["delay_sec"])
+		check(ev["gain"] > 0.2 and ev["gain"] <= 0.7,
+				"反射增益合理（%f）" % ev["gain"])
+	# 开放空间：移除墙 → 0 条
+	for z in 16:
+		for y in 16:
+			chunk.set_block(Vector3i(8, y, z), VoxelTypes.AIR_ID)
+	events = ReflectionsScript.plan_reflections(world,
+			Vector3(4.5, 8.5, 8.5), Vector3(6.5, 8.5, 8.5))
+	check(events.is_empty(), "开放空间无反射")
+	# 镜像路径被第二堵墙挡掉：y 向地面反射、听者与源同在地面附近
+	# 且之间再放一堵矮墙 → y+ 镜像路径穿墙 → 0 条
+	for x in 16:
+		for z in 16:
+			chunk.set_block(Vector3i(x, 7, z), VoxelTypes.STONE_ID)
+	events = ReflectionsScript.plan_reflections(world,
+			Vector3(4.5, 6.5, 8.5), Vector3(4.5, 6.5, 8.5))
+	check(events.is_empty(), "源=听者无路径差 0 条")
 
 
 ## 交互音过滤回归：水位引擎写入静音（洪水 AIR↔WATER 曾每格一声

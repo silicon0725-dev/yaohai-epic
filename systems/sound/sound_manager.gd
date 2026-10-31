@@ -12,6 +12,8 @@ extends Node
 const FootstepSystemScript := preload("res://systems/sound/footstep_system.gd")
 const AmbientSystemScript := preload("res://systems/sound/ambient_system.gd")
 const AcousticScript := preload("res://systems/sound/acoustic_system.gd")
+const EarlyReflectionsScript := preload(
+		"res://systems/sound/early_reflections.gd")
 
 ## 各总线默认音量（dB）
 const BUS_VOLUME := {
@@ -195,10 +197,10 @@ func play_3d(stream: AudioStream, pos: Vector3, volume: float,
 		return
 	play_count += 1
 	var occ := 0.0
+	var ear := pos  # 无玩家时退化（反射规划需要 ear——跳过）
 	if _player != null and is_instance_valid(_player):
-		var eye: Vector3 = _player.global_position \
-				+ Vector3(0, EYE_HEIGHT, 0)
-		occ = AcousticScript.occlusion_between(_world, pos, eye)
+		ear = _player.global_position + Vector3(0, EYE_HEIGHT, 0)
+		occ = AcousticScript.occlusion_between(_world, pos, ear)
 	var p := AudioStreamPlayer3D.new()
 	p.bus = AcousticScript.occlusion_bus(occ)
 	p.stream = stream
@@ -210,6 +212,36 @@ func play_3d(stream: AudioStream, pos: Vector3, volume: float,
 	p.global_position = pos
 	p.finished.connect(p.queue_free)
 	p.play()
+	# 早期反射：直通（无遮挡）才规划——被闷掉的源其反射同样弱
+	if occ <= 0.01 and _world != null:
+		_spawn_reflections(stream, pos, ear, volume, pitch)
+
+
+## 早期反射声像：延迟 (path-direct)/343 秒后在镜像点播放（Resonance
+## 的 6 面反射模型体素化——真实体素面替代房间盒近似）。Timer 回调
+## 持 stream/pitch 引用，源播放器已释放无碍；镜像→听者路径已在
+## plan_reflections 验证无遮挡，反射声像走 SFX 干总线
+func _spawn_reflections(stream: AudioStream, source: Vector3,
+		ear: Vector3, volume: float, pitch: float) -> void:
+	var events: Array = EarlyReflectionsScript.plan_reflections(
+			_world, source, ear)
+	for ev in events:
+		var refl_pos: Vector3 = ev["pos"]
+		var refl_gain: float = ev["gain"]
+		var delay: float = ev["delay_sec"]
+		var timer := get_tree().create_timer(maxf(delay, 0.005))
+		timer.timeout.connect(func() -> void:
+			var rp := AudioStreamPlayer3D.new()
+			rp.bus = "SFX"
+			rp.stream = stream
+			rp.volume_db = linear_to_db(clampf(
+					volume * refl_gain, 0.0, 1.0))
+			rp.pitch_scale = pitch
+			rp.max_distance = 32.0
+			add_child(rp)
+			rp.global_position = refl_pos
+			rp.finished.connect(rp.queue_free)
+			rp.play())
 
 
 # ---- 方块交互音（MAtmos sfx_database 的 onplace/onbreak 语义） ----

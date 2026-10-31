@@ -545,6 +545,20 @@ func _setup_environment() -> void:
 	environment.volumetric_fog_temporal_reprojection_amount = 0.9
 	environment.volumetric_fog_ambient_inject = 0.0
 	environment.volumetric_fog_sky_affect = 0.0
+	# 高视距配套（v8 巨型档地形）：距离雾遮加载边界——视距圈外地形
+	# 戛然而止会露"世界边缘"，深度雾在视距 ~55% 处渐入、终点略小于
+	# 视距圈。颜色取地平线天空色（雾天空不受染，保持天幕干净）；
+	# 逆光散射让晨昏面向太阳的雾带微亮（BSL 大气透视取向）
+	var view_end := float(chunk_manager.view_distance
+			* config.chunk_size) * 0.92
+	environment.fog_enabled = true
+	environment.fog_mode = Environment.FOG_MODE_DEPTH
+	environment.fog_light_color = Color(0.62, 0.74, 0.90)
+	environment.fog_sun_scatter = 0.25
+	environment.fog_sky_affect = 0.0
+	environment.fog_depth_begin = view_end * 0.72
+	environment.fog_depth_end = view_end
+	environment.fog_depth_curve = 1.3
 	var world_env := WorldEnvironment.new()
 	world_env.environment = environment
 	add_child(world_env)
@@ -552,17 +566,19 @@ func _setup_environment() -> void:
 
 
 ## 从候选点螺旋外扩，找海平面以上的陆地列（v4 起世界有海洋）。
+## v8 大陆波长 4096 格——海可绵延上千格，24 圈（~200 格）大概率
+## 全海；扩到 80 圈（~640 格）覆盖半个大陆波长。
 func _find_land_spawn(start: Vector2i) -> Vector2i:
 	if generator.column_height(start.x, start.y) > TerrainGenerator.SEA_LEVEL:
 		return start
-	for radius in range(1, 24):
+	for radius in range(1, 80):
 		for a in 16:
 			var ang := TAU * a / 16.0
 			var cx := start.x + int(round(cos(ang) * radius * 8.0))
 			var cz := start.y + int(round(sin(ang) * radius * 8.0))
 			if generator.column_height(cx, cz) > TerrainGenerator.SEA_LEVEL:
 				return Vector2i(cx, cz)
-	push_warning("出生点 24 圈内未找到陆地，使用原出生点（可能落水）")
+	push_warning("出生点 80 圈内未找到陆地，使用原出生点（可能落水）")
 	return start
 
 

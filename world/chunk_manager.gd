@@ -18,8 +18,13 @@
 class_name ChunkManager
 extends Node
 
-## 视距（水平，区块半径）。
-@export var view_distance := 5
+## 视距（水平，区块半径）。setter 清空列排序缓存——_update_streaming
+## 只在焦点移动/视线偏转时重建列表，运行时改视距（设置菜单/调试
+## 探针）不重算就永远不扩圈
+@export var view_distance := 16:
+	set(value):
+		view_distance = value
+		_sorted_columns = []
 ## 碰撞圈（水平，区块半径）：超出该圈的区块只建网格不建碰撞
 ## 顶点汤（Concave 形状构建/内存大头，观景视距下绝大部分区块
 ## 玩家永远物理接触不到）。玩家跨列进入碰撞圈时补建（见

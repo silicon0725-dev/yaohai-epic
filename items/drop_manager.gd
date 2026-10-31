@@ -348,8 +348,13 @@ func _build_visual(drop: ItemDrop) -> Node3D:
 func _make_model(drop: ItemDrop) -> MeshInstance3D:
 	var model := MeshInstance3D.new()
 	if cube_item(drop.item_id):
-		model.mesh = DropVisuals.cube_mesh_for(
-				item_registry.place_block_id(drop.item_id), world.registry)
+		var block_id: int = item_registry.place_block_id(drop.item_id)
+		# 火把等细柱方块用专用迷你模型（整块立方体贴图观感错误）
+		if world.registry.definition_for_id(block_id).get(
+				"render_type", "") == "cross":
+			model.mesh = DropVisuals.torch_mesh_for(block_id, world.registry)
+		else:
+			model.mesh = DropVisuals.cube_mesh_for(block_id, world.registry)
 	else:
 		model.mesh = DropVisuals.extruded_mesh_for(
 				drop.item_id, item_registry)

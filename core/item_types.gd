@@ -64,6 +64,8 @@ static func build_default_item_registry(
 		"max_stack": 64,
 		"icon": {"pixel_art": "stick"},
 	})
+	_block_item(registry, "core:torch", "Torch", "torch")
+	_block_item(registry, "core:lantern", "Lantern", "lantern")
 	return registry
 
 

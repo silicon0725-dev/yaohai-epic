@@ -2,6 +2,7 @@
 ## 区块尺寸是候选值而非永久架构约束：16^3 与 16x16x32 的取舍
 ## 由阶段 E 的基准测试决定；数值在创建存档时固定（阶段 D 写入存档头）。
 ## 阶段 C 起水平方向无限流式加载，只有垂直高度固定。
+@tool
 class_name WorldConfig
 extends RefCounted
 

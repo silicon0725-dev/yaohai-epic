@@ -102,11 +102,13 @@ func apply_mesh(
 			"water_side_indices", PackedInt32Array()).size()
 	var cutout: int = mesh_arrays.get(
 			"cutout_indices", PackedInt32Array()).size()
+	var cross: int = mesh_arrays.get(
+			"cross_indices", PackedInt32Array()).size()
 	# 地形（不透明+树叶）与水面分属两个 instance：水面要在独立
 	# instance 上设 visibility layer 2，镜像相机（水面反射 RT）经
 	# cull_mask 排除它——水面双面材质会铺满反射画面挡住倒影
 	var terrain_mesh: ArrayMesh = null
-	if opaque > 0 or cutout > 0:
+	if opaque > 0 or cutout > 0 or cross > 0:
 		terrain_mesh = MeshBuilder.arrays_to_mesh(
 				mesh_arrays, material, null, null, cutout_material, false)
 	var water_mesh: ArrayMesh = null
@@ -142,7 +144,7 @@ func apply_mesh(
 		PhysicsServer3D.body_add_shape(entry.body, shape.get_rid())
 		entry.shape = shape
 		entry.has_collision = true
-	var new_faces := (opaque + water + water_side + cutout) / 6
+	var new_faces := (opaque + water + water_side + cutout + cross) / 6
 	total_faces += new_faces - int(_chunk_faces.get(coord, 0))
 	_chunk_faces[coord] = new_faces
 

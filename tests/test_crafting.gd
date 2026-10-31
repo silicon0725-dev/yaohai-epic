@@ -13,7 +13,7 @@ func run() -> void:
 
 
 func _test_recipe_definitions(items: ItemRegistry) -> void:
-	check_eq(CraftingRecipes.all().size(), 4, "v1 配方 4 条")
+	check(CraftingRecipes.all().size() >= 4, "配方 >= 4 条（曾硬编码 4，加配方即挂）")
 	for recipe in CraftingRecipes.all():
 		check(String(recipe.get("id", "")) != "", "配方有 id")
 		var output: Array = recipe.get("output", [])

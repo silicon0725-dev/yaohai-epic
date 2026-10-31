@@ -7,6 +7,9 @@ extends RefCounted
 ## 贴侧放 = 横放并沿该法线轴向）。
 const ORIENTED_BLOCKS := [VoxelTypes.LOG_ID]
 
+## 需要支撑的方块（火把/提灯）：正下方必须是注册表固体（防浮空）
+const SUPPORTED_BLOCKS := [VoxelTypes.TORCH_ID, VoxelTypes.LANTERN_ID]
+
 
 static func place(
 		world: VoxelWorld,
@@ -20,6 +23,31 @@ static func place(
 	# 水视同空气：可以往水里放方块（替换水）
 	if world.get_block(target_pos) != VoxelTypes.AIR_ID 			and world.get_block(target_pos) != VoxelTypes.WATER_ID:
 		return false
+	# 支撑检查（火把）：下方碰撞固体 -> 落地火把；否则若贴着点击的
+	# 墙面（face_normal 水平）-> 墙挂火把（写 attach 状态，模型贴墙）。
+	# 曾只支持落地且静默拒绝——对墙放置"放下没模型"（用户实机）
+	if SUPPORTED_BLOCKS.has(block_id):
+		# 玩家重叠检查（与常规路径同规则——曾漏：火把可放进身体里）
+		if exclude_aabb.intersects(AABB(Vector3(target_pos), Vector3.ONE)):
+			return false
+		var below := world.get_block(target_pos + Vector3i(0, -1, 0))
+		var floor_ok := bool(world.registry.definition_for_id(below).get(
+				"collision", true))
+		# 提灯只落地（MC 悬挂版需要天花挂点状态，后续再做）
+		if block_id == VoxelTypes.LANTERN_ID and not floor_ok:
+			return false
+		var wall_normal := Vector3i.ZERO
+		if not floor_ok:
+			if face_normal.y != 0 or face_normal == Vector3i.ZERO:
+				return false  # 顶/底面或零法线且无地面 -> 拒绝
+			wall_normal = face_normal
+		if not world.set_block(target_pos, block_id):
+			return false
+		if wall_normal != Vector3i.ZERO:
+			world.set_block_state(target_pos, "attach",
+					"%d,%d,%d" % [wall_normal.x, wall_normal.y,
+							wall_normal.z], true)
+		return true
 	var block_aabb := AABB(Vector3(target_pos), Vector3.ONE)
 	# 边界相接也算重叠：站在方块上时不允许往脚下格放置
 	if exclude_aabb.intersects(block_aabb):

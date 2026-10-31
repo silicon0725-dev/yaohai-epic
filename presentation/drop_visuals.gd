@@ -84,6 +84,68 @@ static func cube_mesh_for(block_id: int, registry: VoxelRegistry) -> ArrayMesh:
 	return mesh
 
 
+## 火把迷你模型：世界细柱小盒的缩小版（2x2x12px 比例），中心在
+## 原点。掉落物/手持共用（方块物品默认迷你立方体——火把是细柱，
+## 整块贴图立方体观感错误，用户实机反馈）。
+static func torch_mesh_for(block_id: int, registry: VoxelRegistry) -> ArrayMesh:
+	if _cube_mesh_cache.has(block_id):
+		return _cube_mesh_cache[block_id]
+	var textures: Dictionary = registry.definition_for_id(block_id).get(
+			"textures", {})
+	var vertices := PackedVector3Array()
+	var normals := PackedVector3Array()
+	var uvs := PackedVector2Array()
+	var indices := PackedInt32Array()
+	# 尺寸：世界盒 (2/16, 12/16, 2/16) 等比迷你（迷你方块 0.25，
+	# 火把略高 0.3 更醒目）
+	var h := 0.3
+	var w := h * (2.0 / 12.0)
+	var tile := TextureAtlasLoader.tile_grid(
+			String(textures.get("side", "")))
+	var o_x := float(tile.x) * _INV_COLS
+	var o_y := float(tile.y) * _INV_ROWS
+	var x0 := 7.0 / 16.0
+	var x1 := 9.0 / 16.0
+	var y1 := 12.0 / 16.0
+	var top_v0 := 11.0 / 16.0
+	var face_rect := {
+		0: [x0, 0.0, x1, y1], 1: [x0, 0.0, x1, y1],
+		2: [x0, top_v0, x1, y1],
+		4: [x0, 0.0, x1, y1], 5: [x0, 0.0, x1, y1],
+	}
+	for f in [0, 1, 2, 4, 5]:
+		var corners: Array = ChunkMesher.FACES[f]["corners"]
+		var corner_uvs: Array = ChunkMesher.FACES[f]["corner_uvs"]
+		var rect: Array = face_rect[f]
+		var base := vertices.size()
+		for c in 4:
+			var corner: Vector3 = corners[c]
+			vertices.append(Vector3(
+					(corner.x - 0.5) * w,
+					(corner.y - 0.5) * h,
+					(corner.z - 0.5) * w))
+			normals.append(Vector3(ChunkMesher.FACES[f]["normal"]))
+			var cuv: Vector2 = corner_uvs[c]
+			uvs.append(Vector2(
+					o_x + (rect[0] + cuv.x * (rect[2] - rect[0])) * _INV_COLS,
+					o_y + (rect[1] + cuv.y * (rect[3] - rect[1])) * _INV_ROWS))
+		indices.append_array(PackedInt32Array([
+			base, base + 2, base + 1,
+			base, base + 3, base + 2,
+		]))
+	var arrays := []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = vertices
+	arrays[Mesh.ARRAY_NORMAL] = normals
+	arrays[Mesh.ARRAY_TEX_UV] = uvs
+	arrays[Mesh.ARRAY_INDEX] = indices
+	var mesh := ArrayMesh.new()
+	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+	mesh.surface_set_material(0, atlas_material())
+	_cube_mesh_cache[block_id] = mesh
+	return mesh
+
+
 ## 平面物品的挤出网格：每个不透明像素挤出一个小方柱（MC 2D 物品
 ## 模型的"厚贴图"观感），整体位于 XY 平面（法线沿 Z），中心在原点。
 ## 侧面只在轮廓边缘生成（相邻像素透明处），顶/底每像素各一面。

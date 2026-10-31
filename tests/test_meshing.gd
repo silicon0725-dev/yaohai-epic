@@ -72,7 +72,9 @@ func run() -> void:
 			for px in ts:
 				if atlas.get_pixel(g.x * ts + px, g.y * ts + py).a > 0.5:
 					opaque += 1
-		check(opaque > 100, "tile %s 非空（%d 不透明像素）" % [tile_name, opaque])
+		# 镂空类 tile（火把十字面片）刻意大面积透明：放宽阈值
+		var min_opaque := 20 if tile_name == "torch" else 100
+		check(opaque > min_opaque, "tile %s 非空（%d 不透明像素）" % [tile_name, opaque])
 	var lt := TextureAtlasLoader.tile_grid("leaves")
 	var holes := 0
 	for py in ts:

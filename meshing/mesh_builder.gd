@@ -97,6 +97,24 @@ static func arrays_to_mesh(
 				"cutout_indices", PackedInt32Array())
 		mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, cutout_arrays)
 		mesh.surface_set_material(mesh.get_surface_count() - 1, cutout_material)
+	# cross 表面（火把等十字面片）：独立顶点数组（UV 图集空间）+
+	# cutout 材质（alpha 裁切成洞）；索引独立桶，碰撞构建不读
+	if cutout_material != null and mesh_arrays.get("cross_indices",
+			PackedInt32Array()).size() > 0:
+		var cross_arrays := []
+		cross_arrays.resize(Mesh.ARRAY_MAX)
+		cross_arrays[Mesh.ARRAY_VERTEX] = mesh_arrays.get(
+				"cross_vertices", PackedVector3Array())
+		cross_arrays[Mesh.ARRAY_NORMAL] = mesh_arrays.get(
+				"cross_normals", PackedVector3Array())
+		cross_arrays[Mesh.ARRAY_TEX_UV] = mesh_arrays.get(
+				"cross_uvs", PackedVector2Array())
+		cross_arrays[Mesh.ARRAY_COLOR] = mesh_arrays.get(
+				"cross_colors", PackedColorArray())
+		cross_arrays[Mesh.ARRAY_INDEX] = mesh_arrays.get(
+				"cross_indices", PackedInt32Array())
+		mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, cross_arrays)
+		mesh.surface_set_material(mesh.get_surface_count() - 1, cutout_material)
 	return mesh
 
 

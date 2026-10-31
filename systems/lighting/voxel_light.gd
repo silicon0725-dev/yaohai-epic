@@ -15,6 +15,7 @@
 ## 传播规则（MC 式）：步进衰减 max(1, opacity)；天光特例——向下传播且
 ## 当前 15 级且目标完全透光时保持 15（垂直直射）。光照数组为 transient
 ## 派生数据：不入库，重算即恢复（WaterFlow _pending 同模式）。
+@tool
 extends Node
 
 const MAX_LEVEL := 15

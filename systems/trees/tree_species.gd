@@ -1,5 +1,6 @@
 ## 树种配置（结构化树系统 v1）。
 ## 只读数据 Resource：生长几何规则与方块绑定。Inspector 可调。
+@tool
 class_name TreeSpecies
 extends Resource
 

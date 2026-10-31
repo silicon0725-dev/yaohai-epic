@@ -1,6 +1,7 @@
 ## 方块注册表：稳定语义名称 <-> 运行时数值 ID 的唯一映射（开发文档 §2.2）。
 ## 数值 ID 只用于运行时紧凑存储；存档层（阶段 D）必须保存稳定名称
 ## 或带版本映射的数值 ID，防止重排注册表破坏旧存档。
+@tool
 class_name VoxelRegistry
 extends RefCounted
 

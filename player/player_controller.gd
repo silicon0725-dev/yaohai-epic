@@ -305,14 +305,17 @@ func _try_place() -> void:
 	if block_id < 0:
 		return  # 手持的不是放置类物品（工具/材料）
 	var hit := _raycast_from_camera()
-	if hit.hit and hit.normal != Vector3i.ZERO \
-			and BlockPlacement.place(
-					world,
-					hit.block_pos + hit.normal,
-					block_id,
-					_player_aabb(),
-					hit.normal):
+	if not hit.hit or hit.normal == Vector3i.ZERO:
+		return
+	if BlockPlacement.place(world, hit.block_pos + hit.normal,
+			block_id, _player_aabb(), hit.normal):
 		inventory.remove_at(selected_index, 1)
+	else:
+		# 放置被拒要有反馈（无支撑/与身体重叠）——静默拒绝曾被
+		# 用户误读为"模型丢失"
+		var parent_node := get_parent()
+		if parent_node != null and parent_node.has_method("show_hint"):
+			parent_node.show_hint("无法放置：位置无支撑或与身体重叠")
 
 
 func _raycast_from_camera() -> Dictionary:

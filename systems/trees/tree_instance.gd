@@ -2,6 +2,7 @@
 ## 网格与碰撞只是表现；一切查询/砍伐/存档都以此为准。
 ## 坐标全部使用**世界绝对坐标**（树生成后位置永不变，避免局部/
 ## 世界转换错误；渲染局部化只发生在 MeshBuilder 内部）。
+@tool
 class_name TreeInstance
 extends RefCounted
 

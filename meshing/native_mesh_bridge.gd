@@ -16,6 +16,8 @@ const TILE_NAMES := [
 	"grass_top", "grass_side", "dirt", "stone", "bedrock",
 	"log_top", "log_side", "planks", "cobblestone", "bricks",
 	"sand", "sandstone", "gravel", "coal_ore", "iron_ore", "leaves",
+	"torch",
+	"lantern",
 ]
 
 
@@ -110,6 +112,7 @@ static func build(
 	var lookup := ChunkMesher.build_lookup_tables(registry)
 	var solid: PackedByteArray = lookup["solid"]
 	var occl: PackedByteArray = lookup["occludes"]
+	var render_kind: PackedByteArray = lookup["render_kind"]
 	# 光照填充缓存（C# 顶点色采样；GD 侧 build_light_padded 是唯一真值，
 	# 双语言共享同一份输入避免两套 padded 组装逻辑漂移）
 	var light_padded := ChunkMesher.build_light_padded(chunk, neighbors)
@@ -123,7 +126,7 @@ static func build(
 			tables["top"], tables["side"], tables["bottom"],
 			chunk.sparse_block_states,
 			TextureAtlasLoader.COLS, TextureAtlasLoader.ROWS,
-			VoxelTypes.BRANCH_ID,
+			render_kind,
 			light_padded)
 	else:
 		result = _native.BuildNaive(
@@ -133,7 +136,7 @@ static func build(
 			tables["top"], tables["side"], tables["bottom"],
 			chunk.sparse_block_states,
 			TextureAtlasLoader.COLS, TextureAtlasLoader.ROWS,
-			VoxelTypes.BRANCH_ID, VoxelTypes.LEAVES_ID,
+			render_kind,
 			light_padded)
 	if result == null:
 		return {}

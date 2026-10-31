@@ -59,6 +59,7 @@ func run() -> void:
 	_test_cross_chunk_spread()
 	_test_vertical_direct_feed_down()
 	_test_activation_order_independent()
+	_test_torch_emission()
 	_test_water_attenuates()
 	_test_leaves_attenuate()
 	_test_recompute_idempotent()
@@ -326,4 +327,30 @@ func _test_wide_pit_seal_restores() -> void:
 	check(center <= 1, "封盖后密闭坑中心应全黑，实际 %d" % center)
 	var corner := _sky(world, Vector3i(6, 2, 6))
 	check(corner <= 2, "封盖后坑角落应近全黑，实际 %d" % corner)
+	light.free()
+
+
+## 火把发光（光照轮）：emission 14 入 BFS 方块光通道，横向逐级 -1
+## 衰减；拆除后减光回收（增量路径）
+func _test_torch_emission() -> void:
+	var world := _make_world([Vector3i.ZERO])
+	var light: Node = _make_light(world)
+	var chunk: ChunkData = world.get_chunk(Vector3i.ZERO)
+	var nbs := []
+	for d in NEIGHBOR_DIRS:
+		nbs.append(world.get_chunk(Vector3i.ZERO + d))
+	light.init_chunk_light(chunk, nbs)
+	light.on_chunk_ready(chunk)
+	world.set_block(Vector3i(8, 2, 8), VoxelTypes.TORCH_ID)
+	check(chunk.get_block_light(Vector3i(8, 2, 8)) >= 13,
+			"火把格本光 ~14（实际 %d）" % chunk.get_block_light(Vector3i(8, 2, 8)))
+	check(chunk.get_block_light(Vector3i(10, 2, 8)) >= 11,
+			"2 格外 >= 12（实际 %d）" % chunk.get_block_light(Vector3i(10, 2, 8)))
+	check(chunk.get_block_light(Vector3i(8, 2, 13)) <= 9,
+			"5 格外 <= 9 衰减正确（实际 %d）" % chunk.get_block_light(Vector3i(8, 2, 13)))
+	world.set_block(Vector3i(8, 2, 8), VoxelTypes.AIR_ID)
+	check(chunk.get_block_light(Vector3i(8, 2, 8)) == 0,
+			"拆除后本格归零（减光回收）")
+	check(chunk.get_block_light(Vector3i(10, 2, 8)) <= 2,
+			"拆除后邻域回收（实际 %d）" % chunk.get_block_light(Vector3i(10, 2, 8)))
 	light.free()

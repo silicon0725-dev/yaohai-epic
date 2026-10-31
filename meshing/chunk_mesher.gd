@@ -63,21 +63,43 @@ const FACES := [
 
 
 ## 按数值 ID 预查注册表属性（供热循环使用，GreedyMesher 共用）。
+## 渲染分发桶枚举（render_kind 表的值；GD/C# 两侧语义一致）
+const RENDER_SKIP := 0     # 空气/水/枝干：走专用通道或不渲染
+const RENDER_OPAQUE := 1   # 不透明桶
+const RENDER_CUTOUT := 2   # 镂空桶（树叶；进碰撞）
+const RENDER_CROSS := 3    # 十字面片（火把；不进碰撞，cutout 材质）
+
 static func build_lookup_tables(registry: VoxelRegistry) -> Dictionary:
 	var block_count := registry.block_count()
 	var solid_by_id := PackedByteArray()
 	var occludes_by_id := PackedByteArray()
 	solid_by_id.resize(block_count)
 	occludes_by_id.resize(block_count)
+	var render_kind := PackedByteArray()
+	render_kind.resize(block_count)
 	var textures_by_id: Array = []
 	textures_by_id.resize(block_count)
 	for id in block_count:
 		solid_by_id[id] = 1 if registry.is_solid(id) else 0
 		occludes_by_id[id] = 1 if registry.occludes(id) else 0
+		# 渲染分发桶（dispatch 表）：registry render_type 驱动——替换
+		# 网格器里散落的硬编码 ID 判断，加新形态方块只改注册表
+		var kind := RENDER_SKIP
+		match String(registry.definition_for_id(id).get("render_type", "opaque")):
+			"opaque":
+				kind = RENDER_OPAQUE
+			"cutout":
+				kind = RENDER_CUTOUT
+			"cross", "model":
+				# cross=十字面片（火把）；model=盒件模型（提灯）——
+				# 同桶：区块网格跳过，实体渲染（Torch/LanternRenderer）
+				kind = RENDER_CROSS
+		render_kind[id] = kind
 		textures_by_id[id] = registry.definition_for_id(id).get("textures", {})
 	return {
 		"solid": solid_by_id,
 		"occludes": occludes_by_id,
+		"render_kind": render_kind,
 		"textures": textures_by_id,
 	}
 
@@ -323,6 +345,7 @@ static func _build_gd(
 	var tables := build_lookup_tables(registry)
 	var solid_by_id: PackedByteArray = tables["solid"]
 	var occludes_by_id: PackedByteArray = tables["occludes"]
+	var render_kind: PackedByteArray = tables["render_kind"]
 	var textures_by_id: Array = tables["textures"]
 	var padded := build_padded_cache(chunk, neighbors)
 
@@ -379,16 +402,24 @@ static func _build_gd(
 	# 树叶面单独成桶（cutout 表面：alpha 裁切镂空材质）；顶点/UV
 	# 与不透明网格共享，仅索引分流——碰撞构建合并两桶
 	var cutout_indices := PackedInt32Array()
+	# cross 桶（火把）：循环只收集格位，循环后统一发射（独立数组/
+	# 独立表面——不进碰撞，UV 图集空间与主数组解耦）
+	var cross_cells: Array = []
 
 	for z in s:
 		for y in s:
 			for x in s:
 				var pidx := (z + 1) * stride_z + (y + 1) * stride_y + (x + 1)
 				var block_id := padded[pidx]
-				# 水走独立半透明表面（append_water_faces）；枝干走专用
-				# 几何通道（append_branch_faces，radius 状态驱动），
-				# 均不进普通不透明网格
-				if block_id == VoxelTypes.AIR_ID or block_id == VoxelTypes.WATER_ID 						or block_id == VoxelTypes.BRANCH_ID 						or solid_by_id[block_id] == 0:
+				# dispatch 表分发（曾硬编码 AIR/WATER/BRANCH ID 判断）：
+				# skip = 专用通道（水/枝干）或不渲染；cross = 十字面片
+				var kind: int = render_kind[block_id]
+				if kind == RENDER_SKIP or solid_by_id[block_id] == 0:
+					if kind != RENDER_CROSS:
+						continue
+				if kind == RENDER_CROSS:
+					# cross 桶方块（火把）由实体渲染器呈现（TorchRenderer），
+					# 网格不出几何——chunk cross 路径曾用户实机不可见（绕行）
 					continue
 				var textures: Dictionary = textures_by_id[block_id]
 				var state: Dictionary = EMPTY_STATE
@@ -443,7 +474,7 @@ static func _build_gd(
 					# 树叶面进 cutout 桶（独立渲染表面），其余进不透明桶。
 					# 直接 append 六索引——曾 append_array(PackedInt32Array([...]))
 					# 每面分配临时数组，数千面/区块纯 GC 压力
-					if block_id == VoxelTypes.LEAVES_ID:
+					if kind == RENDER_CUTOUT:
 						cutout_indices.append(base_index)
 						cutout_indices.append(base_index + 2)
 						cutout_indices.append(base_index + 1)
@@ -465,6 +496,10 @@ static func _build_gd(
 		"indices": indices,
 		"cutout_indices": cutout_indices,
 	}
+	for cell in cross_cells:
+		append_torch_faces(result, cell[0], cell[1], cell[2],
+				textures_by_id[padded[cell[3]]], light_padded, ps,
+				cell[3], inv_cols, inv_rows, cell[4])
 	var c := chunk.chunk_coord
 	var d := chunk.dimensions
 	append_water_faces(padded, ps, result,
@@ -472,6 +507,103 @@ static func _build_gd(
 					else collect_water_levels_world(chunk, neighbors),
 			Vector3i(c.x * d.x, c.y * d.y, c.z * d.z))
 	return result
+
+
+## ---- 细柱小盒（dispatch 表 cross 桶：火把等无碰撞薄方块）----
+## MC 式火把模型：2x2x12 像素竖柱（非十字面片——整格高的面片近看
+## 是"一大面墙"，用户实机"模型不对"）。侧面采样 tile 中柱条带
+## u∈[7,9]/16（焰头在条带顶），顶面采焰核，底面采木色。共享 cutout
+## 顶点数组（材质同树叶），索引走独立 cross_indices 桶——碰撞构建
+## 不读，天然无碰撞。光照取本格平光。**等价红线：C# 逐位复刻**。
+const TORCH_X0 := 7.0 / 16.0
+const TORCH_X1 := 9.0 / 16.0
+const TORCH_Y1 := 12.0 / 16.0
+
+## attach：墙挂法线（"1,0,0" 语义，落地火把为 ZERO）——盒体贴墙
+## 偏移 -attach*6/16（水平）。等价红线：C# 同步。
+static func torch_attach_offset(attach: Vector3i) -> Vector3:
+	return Vector3(
+			-float(attach.x) * (6.0 / 16.0), 0.0,
+			-float(attach.z) * (6.0 / 16.0))
+
+
+static func parse_attach(state: Dictionary) -> Vector3i:
+	var raw := String(state.get("attach", ""))
+	if raw.is_empty():
+		return Vector3i.ZERO
+	var parts := raw.split(",")
+	if parts.size() != 3:
+		return Vector3i.ZERO
+	return Vector3i(int(parts[0]), int(parts[1]), int(parts[2]))
+
+
+static func append_torch_faces(
+		out: Dictionary, x: int, y: int, z: int,
+		textures: Dictionary, light_padded: PackedByteArray,
+		ps: int, pidx: int, inv_cols: float, inv_rows: float,
+		attach: Vector3i = Vector3i.ZERO
+) -> void:
+	var vertices: PackedVector3Array = out.get(
+			"cross_vertices", PackedVector3Array())
+	var normals: PackedVector3Array = out.get(
+			"cross_normals", PackedVector3Array())
+	var uvs: PackedVector2Array = out.get(
+			"cross_uvs", PackedVector2Array())
+	var colors: PackedColorArray = out.get(
+			"cross_colors", PackedColorArray())
+	var cross_indices: PackedInt32Array = out.get(
+			"cross_indices", PackedInt32Array())
+	var tile_name := String(textures.get("side", ""))
+	var tile := TextureAtlasLoader.tile_grid(tile_name)
+	var o_x := float(tile.x) * inv_cols
+	var o_y := float(tile.y) * inv_rows
+	var light := vertex_light_color(light_padded, ps, pidx, 1, 1, 1, 1)
+	# 各面 UV 矩形 [u0,v0,u1,v1]（图集空间）：四侧 = 中柱条带全高；
+	# 顶 = 焰核；底面贴地省略。角点 UV 走 FACES corner_uvs 表矩形
+	# 插值（与整方块同映射，防镜像/倒置——cube_mesh_for 同法）
+	var side_u0 := o_x + TORCH_X0 * inv_cols
+	var side_u1 := o_x + TORCH_X1 * inv_cols
+	var side_v0 := o_y
+	var side_v1 := o_y + TORCH_Y1 * inv_rows
+	var top_v0 := o_y + (11.0 / 16.0) * inv_rows
+	var face_rect := {
+		0: [side_u0, side_v0, side_u1, side_v1],  # +x
+		1: [side_u0, side_v0, side_u1, side_v1],  # -x
+		2: [side_u0, top_v0, side_u1, side_v1],   # +y（焰核）
+		4: [side_u0, side_v0, side_u1, side_v1],  # +z
+		5: [side_u0, side_v0, side_u1, side_v1],  # -z
+	}
+	var off := torch_attach_offset(attach)
+	# FACES 角点 0/1 分量映射进小盒范围；跳过 -y（底面不可见）
+	for f in [0, 1, 2, 4, 5]:
+		var corners: Array = FACES[f]["corners"]
+		var corner_uvs: Array = FACES[f]["corner_uvs"]
+		var normal_vec: Vector3 = FACES[f]["normal"]
+		var rect: Array = face_rect[f]
+		var base := vertices.size()
+		for c in 4:
+			var corner: Vector3 = corners[c]
+			vertices.append(Vector3(
+					x + TORCH_X0 + corner.x * (TORCH_X1 - TORCH_X0) + off.x,
+					y + corner.y * TORCH_Y1,
+					z + TORCH_X0 + corner.z * (TORCH_X1 - TORCH_X0) + off.z))
+			normals.append(normal_vec)
+			var cuv: Vector2 = corner_uvs[c]
+			uvs.append(Vector2(
+					rect[0] + cuv.x * (rect[2] - rect[0]),
+					rect[1] + cuv.y * (rect[3] - rect[1])))
+			colors.append(light)
+		cross_indices.append(base)
+		cross_indices.append(base + 2)
+		cross_indices.append(base + 1)
+		cross_indices.append(base)
+		cross_indices.append(base + 3)
+		cross_indices.append(base + 2)
+	out["cross_vertices"] = vertices
+	out["cross_normals"] = normals
+	out["cross_uvs"] = uvs
+	out["cross_colors"] = colors
+	out["cross_indices"] = cross_indices
 
 
 ## ---- 水面（§6.5：与不透明网格分离的半透明表面）----

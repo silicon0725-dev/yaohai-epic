@@ -7,6 +7,7 @@
 ##   requires_tool 可选 {"class": "pickaxe", "min_tier": 2}：
 ##                 工具 class 匹配时按工具 speed 加速；
 ##                 tier 不足则 4 倍减速且不掉落物品（可挖开但白挖）
+@tool
 class_name VoxelTypes
 extends RefCounted
 
@@ -27,6 +28,8 @@ const IRON_ORE_ID := 13
 const WATER_ID := 14
 const BRANCH_ID := 15
 const LEAVES_ID := 16
+const TORCH_ID := 17
+const LANTERN_ID := 18
 
 ## 光照不透明度（光照阶段 2）：索引 = 数值 ID（与上方常量顺序一致，
 ## 由 registry 一致性测试保护）。0 = 完全透光；实心方块 15 全挡；
@@ -38,12 +41,16 @@ const LIGHT_OPACITY := [
 	2,   # water
 	1,   # branch（细枝透光）
 	1,   # leaves
+	0,
+	0,
 ]
 
 ## 方块光发射等级（0-15）：光源方块在此登记（火把等，下轮接入；
 ## 本轮框架就位、表全 0——无实际光源）。
 const LIGHT_EMISSION := [
 	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+	14,
+	15,
 ]
 
 
@@ -209,6 +216,31 @@ static func build_default_registry() -> VoxelRegistry:
 		"render_type": "cutout",
 		"textures": {"top": "leaves", "side": "leaves", "bottom": "leaves"},
 		"collision": true,
+		"occludes_neighbors": false,
+		"hardness": 0.3,
+	})
+	# 火把（光照轮）：十字面片渲染（render_type "cross"——dispatch 表
+	# 桶，不进碰撞/遮挡），无工具秒拆，发光 14（BSL/黑体3000K 定格
+	# 暖色在网格器顶点色侧）。必须追加在注册表末尾（存档按名解析，
+	# ID 顺序不可重排）
+	registry.register_block({
+		"id": "core:torch",
+		"render_type": "cross",
+		"textures": {"top": "torch", "side": "torch", "bottom": "torch"},
+		"collision": false,
+		"occludes_neighbors": false,
+		"hardness": 0.1,
+	})
+	# 提灯（模型方块轮）：render_type "model"——MC/Blockbench 盒件
+	# 模型实体渲染（presentation/lantern_renderer.gd），dispatch 桶与
+	# cross 同（网格跳过）。落地放置（无墙挂），发光 15（比火把亮一档）。
+	# 必须追加在注册表末尾（存档按名解析，ID 顺序不可重排）
+	registry.register_block({
+		"id": "core:lantern",
+		"render_type": "model",
+		"textures": {"top": "lantern", "side": "lantern",
+				"bottom": "lantern"},
+		"collision": false,
 		"occludes_neighbors": false,
 		"hardness": 0.3,
 	})

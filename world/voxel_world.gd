@@ -4,6 +4,7 @@
 ## 渲染网格不是世界数据的事实来源；任何方块修改必须经过
 ## get_block / set_block / replace_block，以便统一标记网格、
 ## 碰撞与存档过期，其他系统不得直接改区块数组。
+@tool
 class_name VoxelWorld
 extends RefCounted
 

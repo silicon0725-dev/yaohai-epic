@@ -95,7 +95,7 @@ public partial class NativeMesher : RefCounted
         Variant tileTopV, Variant tileSideV, Variant tileBottomV,
         Variant statesV,
         int atlasCols, int atlasRows,
-        int branchId, int leavesId,
+        Variant renderKindV,
         Variant lightPaddedV)
     {
         int[] blockIds = blockIdsV.AsInt32Array();
@@ -108,6 +108,8 @@ public partial class NativeMesher : RefCounted
         int[] bottomTile = tileBottomV.AsInt32Array();
         var states = statesV.AsGodotDictionary();
         bool hasStates = states != null && states.Count > 0;
+        // dispatch 表（render_kind）：0=SKIP 1=OPAQUE 2=CUTOUT 3=CROSS
+        byte[] renderKind = (byte[])renderKindV;
 
         int[] padded = BuildPaddedCache(chunkCoord, s, blockIds,
             neighborIds, neighborExists);
@@ -118,6 +120,7 @@ public partial class NativeMesher : RefCounted
         List<int> indices = new();
         List<int> cutIndices = new();
         List<Color> colors = new();
+        List<int[]> crossCells = new();
         int ps = s + 2;
         float invCols = 1f / atlasCols;
         float invRows = 1f / atlasRows;
@@ -130,11 +133,14 @@ public partial class NativeMesher : RefCounted
         {
             int pidx = (z + 1) * ps * ps + (y + 1) * ps + (x + 1);
             int blockId = padded[pidx];
-            // branchId：动态树占位（渲染走树实体独立网格，不出区块几何）
-            // waterId：水走独立半透明通道（BuildWater；solid 表对水为 1，
-            // 不能靠表排除——GDScript 侧同为显式判断）
-            if (blockId == 0 || blockId == branchId || blockId == WaterId
-                || solid[blockId] == 0)
+            // dispatch 表分发（曾硬编码 AIR/WATER/BRANCH/LEAVES ID）：
+            // cross = 十字面片（火把），循环后统一发射
+            byte kind = renderKind[blockId];
+            // cross 桶（火把）由实体渲染器呈现，网格不出几何（用户实机
+            // chunk cross 路径不可见——绕行）
+            if (kind == 3)
+                continue;
+            if (kind == 0 || solid[blockId] == 0)
                 continue;
             string axisState = hasStates
                 ? GetAxisState(states, new Vector3I(x, y, z))
@@ -167,13 +173,89 @@ public partial class NativeMesher : RefCounted
                         CornerComponent(corner, FaceTanAxes[f][0]),
                         CornerComponent(corner, FaceTanAxes[f][1])));
                 }
-                // leavesId：叶面走 cutout 桶（alpha 裁切材质，独立表面）
-                var bucket = blockId == leavesId ? cutIndices : indices;
+                // cutout 桶（树叶，alpha 裁切材质，独立表面）——kind 查表
+                var bucket = kind == 2 ? cutIndices : indices;
                 bucket.Add(baze); bucket.Add(baze + 2); bucket.Add(baze + 1);
                 bucket.Add(baze); bucket.Add(baze + 3); bucket.Add(baze + 2);
             }
         }
+        // cross 桶循环后统一发射（与 GDScript 同序：主循环收集）
+        if (crossCells.Count > 0)
+        {
+            var cVerts = new List<Vector3>();
+            var cNorms = new List<Vector3>();
+            var cUvs = new List<Vector2>();
+            var cColors = new List<Color>();
+            var cIdx = new List<int>();
+            foreach (var cell in crossCells)
+                AppendTorchFaces(cVerts, cNorms, cUvs, cColors, cIdx,
+                    cell[0], cell[1], cell[2], sideTile[padded[cell[3]]],
+                    lightPadded, cell[3], ps, invCols, invRows, atlasCols,
+                    new Vector3I(cell[4], cell[5], cell[6]));
+            return PackResult(verts, norms, uvs, null, indices, -1,
+                cutIndices, colors, cVerts, cNorms, cUvs, cIdx, cColors);
+        }
         return PackResult(verts, norms, uvs, null, indices, -1, cutIndices, colors);
+    }
+
+    // ---- 细柱小盒（cross 桶；与 GDScript ChunkMesher.append_torch_faces
+    // 逐位一致：2x2x12px 竖柱、FACES 角点表映射、条带 UV、平光取本格） ----
+    private const double TorchX0 = 7.0 / 16.0;
+    private const double TorchX1 = 9.0 / 16.0;
+    private const double TorchY1 = 12.0 / 16.0;
+
+    private static void AppendTorchFaces(
+        List<Vector3> cVerts, List<Vector3> cNorms, List<Vector2> cUvs,
+        List<Color> cColors, List<int> cIdx,
+        int x, int y, int z, int tile,
+        byte[] lightPadded, int pidx, int ps,
+        float invCols, float invRows, int atlasCols,
+        Vector3I attach)
+    {
+        double ox = (tile % atlasCols) * (double)invCols;
+        double oy = (tile / atlasCols) * (double)invRows;
+        Color light = VertexLightColor(lightPadded, pidx, 1, 1, 1, 1);
+        double sideU0 = ox + TorchX0 * (double)invCols;
+        double sideU1 = ox + TorchX1 * (double)invCols;
+        double sideV0 = oy;
+        double sideV1 = oy + TorchY1 * (double)invRows;
+        double topV0 = oy + (11.0 / 16.0) * (double)invRows;
+        // 各面 UV 矩形 [u0,v0,u1,v1]（+y 顶面采焰核；底面省略）
+        double[][] rects = {
+            new[] { sideU0, sideV0, sideU1, sideV1 },  // +x
+            new[] { sideU0, sideV0, sideU1, sideV1 },  // -x
+            new[] { sideU0, topV0, sideU1, sideV1 },   // +y
+            null,                                      // -y（省略）
+            new[] { sideU0, sideV0, sideU1, sideV1 },  // +z
+            new[] { sideU0, sideV0, sideU1, sideV1 },  // -z
+        };
+        // 墙挂偏移（GD torch_attach_offset 同式：-attach*6/16 水平）
+        double offX = -(double)attach.X * (6.0 / 16.0);
+        double offZ = -(double)attach.Z * (6.0 / 16.0);
+        int[] faces = { 0, 1, 2, 4, 5 };
+        foreach (int f in faces)
+        {
+            double[] rect = rects[f];
+            Vector3 normal = NormalFor(FaceNormalAxis[f], FaceNormalSign[f]);
+            int baze = cVerts.Count;
+            for (int c = 0; c < 4; c++)
+            {
+                Vector3 corner = FaceCorners[f][c];
+                // f64 插值后单次 f32 舍入（GD 同路径）
+                cVerts.Add(new Vector3(
+                    (float)(x + TorchX0 + (double)corner.X * (TorchX1 - TorchX0) + offX),
+                    (float)(y + (double)corner.Y * TorchY1),
+                    (float)(z + TorchX0 + (double)corner.Z * (TorchX1 - TorchX0) + offZ)));
+                cNorms.Add(normal);
+                Vector2 cu = FaceCornerUvs[f][c];
+                cUvs.Add(new Vector2(
+                    (float)(rect[0] + (double)cu.X * (rect[2] - rect[0])),
+                    (float)(rect[1] + (double)cu.Y * (rect[3] - rect[1]))));
+                cColors.Add(light);
+            }
+            cIdx.Add(baze); cIdx.Add(baze + 2); cIdx.Add(baze + 1);
+            cIdx.Add(baze); cIdx.Add(baze + 3); cIdx.Add(baze + 2);
+        }
     }
 
     // ---- Greedy ----
@@ -184,9 +266,10 @@ public partial class NativeMesher : RefCounted
         Variant tileTopV, Variant tileSideV, Variant tileBottomV,
         Variant statesV,
         int atlasCols, int atlasRows,
-        int branchId,
+        Variant renderKindV,
         Variant lightPaddedV)
     {
+        byte[] renderKind = (byte[])renderKindV;
         int[] blockIds = blockIdsV.AsInt32Array();
         int[] neighborIds = neighborIdsV.AsInt32Array();
         byte[] neighborExists = (byte[])neighborExistsV;
@@ -241,14 +324,14 @@ public partial class NativeMesher : RefCounted
                     }
                     // branchId：动态树占位不作发射方（区块无枝几何）；
                     // 作遮挡方时由 occl 表承担（占位 = 0 透明，不挡邻居面）
-                    if (aReal && a != branchId && solid[a] != 0 && occl[b] == 0)
+                    if (aReal && renderKind[a] != 0 && solid[a] != 0 && occl[b] == 0)
                     {
                         Vector3I local = ComposeLocal(axis, boundary - 1, uAxis, u, vAxis, v);
                         encoded = FaceTile(a, hasStates
                                 ? GetAxisState(states, local) : null, axis, true,
                                 topTile, sideTile, bottomTile) + 1;
                     }
-                    else if (bReal && b != branchId && solid[b] != 0 && occl[a] == 0)
+                    else if (bReal && renderKind[b] != 0 && solid[b] != 0 && occl[a] == 0)
                     {
                         Vector3I local = ComposeLocal(axis, boundary, uAxis, u, vAxis, v);
                         encoded = -(FaceTile(b, hasStates
@@ -318,6 +401,7 @@ public partial class NativeMesher : RefCounted
                 }
             }
         }
+        // cross 桶（火把）走实体渲染（TorchRenderer），网格不出几何
         return PackResult(verts, norms, uvs, uv2s, indices, quads, null, colors);
     }
 
@@ -416,6 +500,19 @@ public partial class NativeMesher : RefCounted
         if (axis == 0) return new Vector3(sign, 0f, 0f);
         if (axis == 1) return new Vector3(0f, sign, 0f);
         return new Vector3(0f, 0f, sign);
+    }
+
+    // 墙挂法线（火把 attach 状态："x,y,z"；缺省零向量 = 落地）
+    private static Vector3I GetAttachState(
+        Godot.Collections.Dictionary states, Vector3I local)
+    {
+        if (!states.ContainsKey(local)) return Vector3I.Zero;
+        var entry = states[local].AsGodotDictionary();
+        if (entry == null || !entry.ContainsKey("attach")) return Vector3I.Zero;
+        var parts = entry["attach"].AsString().Split(',');
+        if (parts.Length != 3) return Vector3I.Zero;
+        return new Vector3I(
+            int.Parse(parts[0]), int.Parse(parts[1]), int.Parse(parts[2]));
     }
 
     private static string GetAxisState(Godot.Collections.Dictionary states, Vector3I local)
@@ -870,7 +967,10 @@ public partial class NativeMesher : RefCounted
     private static Variant PackResult(
         List<Vector3> verts, List<Vector3> norms, List<Vector2> uvs,
         List<Vector2> uv2s, List<int> indices, int quads,
-        List<int> cutoutIndices, List<Color> colors = null)
+        List<int> cutoutIndices, List<Color> colors = null,
+        List<Vector3> crossVerts = null, List<Vector3> crossNorms = null,
+        List<Vector2> crossUvs = null, List<int> crossIndices = null,
+        List<Color> crossColors = null)
     {
         var result = new Godot.Collections.Dictionary
         {
@@ -887,6 +987,15 @@ public partial class NativeMesher : RefCounted
             result["cutout_indices"] = Variant.CreateFrom(cutoutIndices.ToArray());
         if (colors != null)
             result["colors"] = Variant.CreateFrom(colors.ToArray());
+        // cross 桶（火把等十字面片；独立数组/表面，不进碰撞）
+        if (crossIndices != null && crossIndices.Count > 0)
+        {
+            result["cross_vertices"] = Variant.CreateFrom(crossVerts.ToArray());
+            result["cross_normals"] = Variant.CreateFrom(crossNorms.ToArray());
+            result["cross_uvs"] = Variant.CreateFrom(crossUvs.ToArray());
+            result["cross_colors"] = Variant.CreateFrom(crossColors.ToArray());
+            result["cross_indices"] = Variant.CreateFrom(crossIndices.ToArray());
+        }
         return Variant.CreateFrom(result);
     }
 }

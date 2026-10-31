@@ -6,6 +6,7 @@
 ## 进程中断不会留下半截文件；写入失败保留旧文件并报错。
 ## 区块文件容器：u32 magic "VCSF" + u16 容器版本 + u32 原始长度
 ## + zstd 压缩的 ChunkSerializer 载荷。
+@tool
 class_name WorldSave
 extends RefCounted
 

@@ -27,6 +27,8 @@ var drop_manager: DropManager
 var water_flow: WaterFlow
 var voxel_light: Node  # VoxelLightSystem（preload 绕开类缓存）
 var cave_fog: Node  # 洞口体积雾管理器（preload 绕开类缓存）
+var torch_renderer: Node  # 火把实体渲染器（preload 绕开类缓存）
+var lantern_renderer: Node  # 提灯实体渲染器（模型方块轮）
 const VoxelLightScript := preload("res://systems/lighting/voxel_light.gd")
 var tree_manager: Node  # TreeManager（preload 绕开类缓存）
 const TreeManagerScript := preload("res://systems/trees/tree_manager.gd")
@@ -46,6 +48,8 @@ var _wave_clock := 0.0
 var _last_storm_scale := -1.0  # uniform 脏检查（storm 变化才重发）
 var _last_ripple_tex = null  # 涟漪纹理/中心脏检查
 var _last_ripple_center = null
+var _hint_text := ""
+var _hint_expire := 0.0
 const OceanWavesScript := preload("res://presentation/ocean_waves.gd")
 
 ## 加载阶段（预生成 + 预加载 + 加载界面）：进入游戏前把初始视距
@@ -139,8 +143,25 @@ func _ready() -> void:
 	# 掉落物撞得上树干：掉落走体素碰撞感知不到树 StaticBody，
 	# 主干实心由树管理器实时查询补齐（枝干无碰撞，与玩家一致）
 	drop_manager.trunk_solid_probe = tree_manager.is_solid_for_items
-	chunk_manager.on_chunk_active_cb = tree_manager.on_chunk_active
-	chunk_manager.on_chunk_unloaded_cb = tree_manager.on_chunk_unloaded
+	const TorchRendererScript := preload("res://presentation/torch_renderer.gd")
+	torch_renderer = TorchRendererScript.new()
+	add_child(torch_renderer)
+	torch_renderer.setup(world, VoxelTypes.TORCH_ID)
+	lantern_renderer = preload(
+			"res://presentation/lantern_renderer.gd").new()
+	add_child(lantern_renderer)
+	lantern_renderer.setup(world, VoxelTypes.LANTERN_ID)
+	# 区块激活/卸载回调分发（单 Callable 槽——树/火把/提灯实体共用）：
+	# 火把实体渲染见 presentation/torch_renderer.gd（chunk cross
+	# 路径曾用户实机不可见，绕行实体管线）；提灯见 lantern_renderer
+	chunk_manager.on_chunk_active_cb = func(coord: Vector3i) -> void:
+		tree_manager.on_chunk_active(coord)
+		torch_renderer.on_chunk_active(coord)
+		lantern_renderer.on_chunk_active(coord)
+	chunk_manager.on_chunk_unloaded_cb = func(coord: Vector3i) -> void:
+		tree_manager.on_chunk_unloaded(coord)
+		torch_renderer.on_chunk_unloaded(coord)
+		lantern_renderer.on_chunk_unloaded(coord)
 	chunk_manager.extra_meta_provider = _tree_and_drops_bundle
 
 	# 水流动模拟：挖掘/放置扰动水位元胞自动机（v2）
@@ -274,6 +295,7 @@ func _process(delta: float) -> void:
 	if _loading:
 		_loading_tick(delta)
 	_update_hud()
+	_update_hint(delta)
 	_update_exposure(delta)
 
 
@@ -304,6 +326,9 @@ func _update_exposure(delta: float) -> void:
 	var target := lerpf(EXPOSURE_MAX_LIFT, 1.0, t)
 	_exposure = lerpf(_exposure, target, 1.0 - exp(-EXPOSURE_SPEED * delta))
 	_environment.tonemap_exposure = _exposure
+	# 自发光体（火把火焰/炭头）随曝光反除——否则洞内曝光抬升把
+	# 色带整体削顶成黄白（色相塌缩，火焰观感发糊）
+	torch_renderer.set_exposure(_exposure)
 
 
 ## HUD：0.25s 节流刷新统计（曾藏在 _update_ripples 尾部 early-return
@@ -312,7 +337,9 @@ func _update_hud() -> void:
 	if _hud_accumulator < 0.25 or _hud_label == null:
 		return
 	_hud_accumulator = 0.0
+	var hint_line := ("[ " + _hint_text + " ]") if not _hint_text.is_empty() else ""
 	_hud_label.text = "\n".join([
+		hint_line,
 		"Voxel Terrain MVP - Items Layer (inventory + tools + ground drops)",
 		"chunks: %d    faces: %d    in-flight: %d    saved: %d    drops: %d" % [
 			world.chunk_count(), chunk_renderer.total_faces,
@@ -374,6 +401,20 @@ func _update_ripples(_delta: float) -> void:
 			mat.set_shader_parameter("ripple_window", WaterRipplesScript.WINDOW)
 	_last_ripple_tex = water_ripples.texture()
 	_last_ripple_center = water_ripples.texture_center()
+
+
+## HUD 短时提示（放置被拒等操作反馈——静默拒绝曾被用户误读成
+## "模型丢失"，排查绕了大弯）
+func show_hint(text: String) -> void:
+	_hint_text = text
+	_hint_expire = 2.5
+
+
+func _update_hint(delta: float) -> void:
+	if _hint_expire > 0.0:
+		_hint_expire -= delta
+		if _hint_expire <= 0.0:
+			_hint_text = ""
 
 
 func _setup_environment() -> void:

@@ -7,6 +7,7 @@ func _make_world() -> VoxelWorld:
 
 
 func run() -> void:
+	_test_torch_placement_support()
 	var world := _make_world()
 	var chunk := world.get_chunk(Vector3i.ZERO)
 	chunk.set_block_raw(Vector3i(1, 1, 1), VoxelTypes.STONE_ID)
@@ -130,3 +131,29 @@ func run() -> void:
 		"往水里放方块（替换水）")
 	check_eq(water_world.get_block(Vector3i(1, 1, 2)), VoxelTypes.DIRT_ID,
 		"水格被方块替换")
+
+
+## 火把放置规则：下方固体才可放（SUPPORTED_BLOCKS）
+func _test_torch_placement_support() -> void:
+	var world := _make_world()
+	var far := AABB(Vector3(100, 100, 100), Vector3.ONE)  # 远离目标格的"玩家"盒
+	# 悬空（下方空气）拒绝
+	check(not BlockPlacement.place(world, Vector3i(2, 3, 2),
+			VoxelTypes.TORCH_ID, far), "悬空火把拒绝")
+	# 下方石头成功
+	world.set_block(Vector3i(2, 2, 2), VoxelTypes.STONE_ID)
+	check(BlockPlacement.place(world, Vector3i(2, 3, 2),
+			VoxelTypes.TORCH_ID, far), "石上放置成功")
+	check(world.get_block(Vector3i(2, 3, 2)) == VoxelTypes.TORCH_ID,
+			"放置后读回火把")
+	# 下方是水（非固体）且零法线拒绝
+	world.set_block(Vector3i(2, 2, 2), VoxelTypes.WATER_ID)
+	world.set_block(Vector3i(2, 3, 2), VoxelTypes.AIR_ID)
+	check(not BlockPlacement.place(world, Vector3i(2, 3, 2),
+			VoxelTypes.TORCH_ID, far), "水上火把拒绝（零法线）")
+	# 墙挂：水平法线 + 墙格成功，写 attach 状态
+	check(BlockPlacement.place(world, Vector3i(2, 3, 2),
+			VoxelTypes.TORCH_ID, far, Vector3i(1, 0, 0)),
+			"墙挂火把成功（水平法线）")
+	check(String(world.get_block_state(Vector3i(2, 3, 2)).get(
+			"attach", "")) == "1,0,0", "attach 状态写入")

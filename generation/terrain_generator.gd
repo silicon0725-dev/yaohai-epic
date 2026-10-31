@@ -10,6 +10,7 @@
 ##      裸岩山地 / 滩涂沙地。
 ## 调整任何参数都必须递增版本——未修改区域会用新算法重建，已保存
 ## 的完整区块数据不受影响（§5.1、§9）。
+@tool
 class_name TerrainGenerator
 extends RefCounted
 

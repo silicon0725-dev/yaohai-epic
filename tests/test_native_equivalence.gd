@@ -50,6 +50,19 @@ func run() -> void:
 	worlds.append({"world": w4, "coord": Vector3i(0, 0, 0), "label": "真实地形"})
 	worlds.append({"world": w4, "coord": Vector3i(1, 1, 0), "label": "真实地形(边界)"})
 
+	# 5. 火把十字面片（dispatch cross 桶）：角格 + 中心 + 贴实心——
+	# GD/C# 双侧 cross 几何（内缩/绕序/平光/UV）逐位一致的唯一防线
+	var w4b := _make_world()
+	w4b.set_block(Vector3i(0, 1, 0), VoxelTypes.STONE_ID)   # 角格承托
+	w4b.set_block(Vector3i(0, 2, 0), VoxelTypes.TORCH_ID)   # 区块角格
+	w4b.set_block(Vector3i(2, 1, 2), VoxelTypes.STONE_ID)
+	w4b.set_block(Vector3i(2, 2, 2), VoxelTypes.TORCH_ID)   # 中心
+	w4b.set_block(Vector3i(3, 1, 1), VoxelTypes.TORCH_ID)   # 贴边格
+	# 墙挂火把：贴 x- 侧墙（attach 状态驱动模型贴墙偏移）
+	w4b.set_block(Vector3i(1, 1, 3), VoxelTypes.TORCH_ID)
+	w4b.set_block_state(Vector3i(1, 1, 3), "attach", "-1,0,0", true)
+	worlds.append({"world": w4b, "coord": Vector3i.ZERO, "label": "火把十字"})
+
 	# ---- 逐世界对比 C# 与 GDScript 输出 ----
 	# 先对每个世界跑体素光照初始化：colors 顶点色需要非平凡光照值
 	# 才能真正验证双语言采样/公式一致（全 0 光照下两侧恒等黑）
@@ -92,6 +105,22 @@ func run() -> void:
 
 			check(native_result["vertices"] == gd_result["vertices"],
 				"%s %s：顶点一致" % [label, mode])
+			# cross 桶逐键一致（火把；4³ 火把用例是唯一覆盖源）
+			check(native_result.get("cross_vertices", PackedVector3Array())
+					== gd_result.get("cross_vertices", PackedVector3Array()),
+				"%s %s：cross 顶点一致" % [label, mode])
+			check(native_result.get("cross_indices", PackedInt32Array())
+					== gd_result.get("cross_indices", PackedInt32Array()),
+				"%s %s：cross 索引一致" % [label, mode])
+			check(native_result.get("cross_uvs", PackedVector2Array())
+					== gd_result.get("cross_uvs", PackedVector2Array()),
+				"%s %s：cross UV 一致" % [label, mode])
+			check(native_result.get("cross_normals", PackedVector3Array())
+					== gd_result.get("cross_normals", PackedVector3Array()),
+				"%s %s：cross 法线一致" % [label, mode])
+			check(native_result.get("cross_colors", PackedColorArray())
+					== gd_result.get("cross_colors", PackedColorArray()),
+				"%s %s：cross 顶点色一致" % [label, mode])
 			check(native_result["normals"] == gd_result["normals"],
 				"%s %s：法线一致" % [label, mode])
 			check(native_result["indices"] == gd_result["indices"],
@@ -151,15 +180,19 @@ func run() -> void:
 			continue
 		var wkeys := ["water_vertices", "water_normals", "water_indices",
 				"water_colors", "water_side_vertices", "water_side_normals",
-				"water_side_indices", "water_side_colors"]
+				"water_side_indices", "water_side_colors",
+				"cross_vertices", "cross_normals", "cross_uvs",
+				"cross_colors", "cross_indices"]
 		var any_water := false
 		for wkey in wkeys:
 			var gd_arr = gd_naive.get(wkey, PackedInt32Array())
+			var cs_arr = cs_water.get(wkey, PackedInt32Array())
 			if gd_arr.size() > 0:
 				any_water = true
-			check(cs_water[wkey] == gd_arr,
+			# .get 双侧默认（水通道结果无 cross 键——裸访问软报错吞检查）
+			check(cs_arr == gd_arr,
 					"%s：%s 一致（%d vs %d）" % [
-						wlabel, wkey, cs_water[wkey].size(), gd_arr.size()])
+						wlabel, wkey, cs_arr.size(), gd_arr.size()])
 		check(any_water, "%s：GD 水面非空（用例有效性）" % wlabel)
 		# 组合门面：整体输出（C# opaque+water vs GD 全程）等价
 		var cs_combo := ChunkMesher.build_mesh_arrays(registry, wchunk, wneigh)

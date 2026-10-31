@@ -2,6 +2,7 @@
 ## block_ids 使用紧凑整数数组保存方块数值 ID（经注册表映射到稳定名称）。
 ## 特殊状态（朝向、开关、容器内容）先用稀疏表占位，
 ## MVP 不为普通方块支付额外存储成本。
+@tool
 class_name ChunkData
 extends RefCounted
 

@@ -2,6 +2,7 @@
 ## 优先使用 assets/textures/ 下的真实材质包文件（按 tile 名称），
 ## 缺失的 tile 回退到程序化占位图——保证任何情况下图集完整可用。
 ## 真实贴图的来源与许可证记录见 assets/textures/CREDITS.md。
+@tool
 class_name TextureAtlasLoader
 extends RefCounted
 
@@ -9,7 +10,7 @@ extends RefCounted
 ## 的全部几何都从本常量推导，切换材质包只改这一处。
 const TILE_SIZE := 32
 const COLS := 16
-const ROWS := 1
+const ROWS := 2  # 第 17 个 tile（torch）起换行
 
 ## 真实材质包目录（tile 名.png）；置空则完全使用程序化占位图。
 const TEXTURE_PACK_DIR := "res://assets/textures"
@@ -33,6 +34,8 @@ const TILES := [
 	"coal_ore",
 	"iron_ore",
 	"leaves",
+	"torch",
+	"lantern",
 ]
 
 ## 矿石斑点中心（程序化占位图用，确定性团簇）。
@@ -194,6 +197,35 @@ static func _pixel_color(
 			if _near_spot(px, py, IRON_SPOTS, 1.5):
 				return _vary(Color("c49a6a"), rng)
 			return _vary(Color("8b8b90"), rng)
+		"torch":
+			# 十字面片火把：中轴木棍（底 10px）+ 暖色火焰头；其余透明
+			#（cutout alpha<0.5 裁切）。火焰配色对齐 BSL/黑体 3000K 暖橙
+			if px >= 7 and px <= 8 and py >= 6:
+				return _vary(Color("6e5433") if px == 7 else Color("5a4428"), rng)
+			if px >= 6 and px <= 9 and py >= 2 and py <= 5:
+				if px >= 7 and px <= 8 and py >= 3 and py <= 4:
+					return Color("fff3c2")  # 焰心亮黄白
+				return _vary(Color("e07b1f"), rng)  # 焰体外橙
+			return Color(0.0, 0.0, 0.0, 0.0)  # 透明（cutout 裁掉）
+		"lantern":
+			# 提灯图标：满幅深色金属底 + 金属框提手环 + 暖色发光窗
+			#（观感对齐实体模型/Pastoral 提灯；满幅无 alpha——掉落物
+			# 默认立方六面即它，镂空会在立方上呈黑角）
+			var metal := Color("3d4148")
+			var plate := _vary(Color("26282c"), rng)  # 满幅底板
+			if py >= 4 and py <= 6 and (px == 7 or px == 8):
+				return _vary(metal, rng)  # 提手柱
+			if py == 3 and px >= 6 and px <= 9:
+				return _vary(metal, rng)  # 提手横梁
+			if px >= 5 and px <= 10 and py >= 7 and py <= 8:
+				return _vary(metal, rng)  # 顶盖
+			if px >= 6 and px <= 9 and py >= 9 and py <= 13:
+				if px >= 7 and px <= 8 and py >= 10 and py <= 12:
+					return Color("ffd98f")  # 暖窗
+				return _vary(metal, rng)  # 窗框
+			if px >= 5 and px <= 10 and py == 14:
+				return _vary(metal, rng)  # 底座
+			return plate
 		_:
 			# 未登记的 tile 用洋红色暴露问题（材质缺失回退策略 §11.2）
 			return Color.MAGENTA

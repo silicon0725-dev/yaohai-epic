@@ -56,6 +56,8 @@ static func _build_gd(
 	var tile_lookup := _build_tile_lookup(textures_by_id)
 
 	var ps := s + 2
+	var inv_cols := 1.0 / TextureAtlasLoader.COLS
+	var inv_rows := 1.0 / TextureAtlasLoader.ROWS
 	var vertices := PackedVector3Array()
 	var normals := PackedVector3Array()
 	var uvs := PackedVector2Array()
@@ -185,6 +187,7 @@ static func _build_gd(
 		"indices": indices,
 		"quads": quads,
 	}
+	# cross 桶（火把）走实体渲染（TorchRenderer），网格不出几何
 	# 水走独立半透明表面（与面剔除同一条水通道，不参与贪心合并）
 	var wc := chunk.chunk_coord
 	var wd := chunk.dimensions

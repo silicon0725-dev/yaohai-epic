@@ -25,9 +25,19 @@ const RECIPES := [
 		"output": ["core:wooden_pickaxe", 1],
 	},
 	{
+		"id": "core:torch",
+		"inputs": [["core:stick", 1], ["core:coal", 1]],
+		"output": ["core:torch", 4],
+	},
+	{
 		"id": "core:stone_pickaxe",
 		"inputs": [["core:cobblestone", 3], ["core:stick", 2]],
 		"output": ["core:stone_pickaxe", 1],
+	},
+	{
+		"id": "core:lantern",
+		"inputs": [["core:torch", 1], ["core:cobblestone", 4]],
+		"output": ["core:lantern", 1],
 	},
 ]
 

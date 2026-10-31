@@ -195,13 +195,15 @@ static func reverb_params(profile: Dictionary) -> Dictionary:
 	var sky_frac: float = profile["sky_frac"]
 	var refl: float = profile["reflectivity"]
 	var room_factor := clampf(float(room) / float(CAVE_FILL_MAX), 0.0, 1.0)
-	# 露天腔体（天光直通占比高）混响趋零；上限 512 格封顶的大腔按
-	# 封顶算（大厅/峡谷仍有一定湿润度）
+	# 露天腔体（天光直通占比高）混响趋零；小封闭腔（玩家自建盒、
+	# 小石屋）恰恰是回声最强场景——room_factor×6 让 ~85 格以上
+	# 的封闭腔即达满湿（×2 时 18 格小盒 wet≈0.08 几乎不可闻，实机
+	# 报告"封闭盒子没回声"的第二个根因）
 	var enclosure := (1.0 - clampf(sky_frac * 1.4, 0.0, 1.0)) \
-			* clampf(room_factor * 2.0, 0.0, 1.0)
+			* clampf(room_factor * 6.0, 0.0, 1.0)
 	return {
 		"room_size": clampf(0.25 + room_factor * 0.55, 0.25, 0.8),
-		"wet": clampf(0.02 + enclosure * 0.5 * refl, 0.02, 0.5),
+		"wet": clampf(0.03 + enclosure * 0.6 * refl, 0.03, 0.5),
 		"damping": clampf(0.85 - refl * 0.6, 0.2, 0.85),
 		"hipass": 0.1,
 	}

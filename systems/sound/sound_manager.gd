@@ -23,8 +23,11 @@ const BUS_VOLUME := {
 }
 ## 播放器池大小（2D 一次性音效并发上限）
 const POOL_SIZE := 8
-## 玩家眼高（脚位→视线/声学采样点）
-const EYE_HEIGHT := 1.6
+## 玩家眼高（相对胶囊**中心**——global_position 是中心不是脚；
+## 曾写成 1.6（当脚位偏移）→ 眼格戳进两格高盒子的顶壁 → 腔体
+## 评估起点恒在不透明方块 → 封闭空间永远没混响（实机报告）。
+## 与 player_controller.EYE_HEIGHT=0.7 一致）
+const EYE_HEIGHT := 0.7
 
 var footstep: Node  # FootstepSystem
 var ambient: Node  # AmbientSystem

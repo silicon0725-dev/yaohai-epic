@@ -329,3 +329,23 @@ func _test_room_reverb() -> void:
 			% profile["room"])
 	check(AcousticScript.reverb_params(profile)["wet"] <= 0.05,
 			"水下湿端趋零")
+	# 玩家真实站姿的两格高封闭盒：眼=中心+0.7 曾被写成 +1.6 →
+	# 眼格戳进顶壁 → 空腔 → 永远没混响（实机报告）
+	var box_world: VoxelWorld = make_world(16, [Vector3i.ZERO], 7)
+	var bchunk: ChunkData = box_world.get_chunk(Vector3i.ZERO)
+	for x in range(4, 9):
+		for y in range(4, 8):
+			for z in range(4, 9):
+				var shell: bool = x == 4 or x == 8 or y == 4 \
+						or y == 7 or z == 4 or z == 8
+				bchunk.set_block(Vector3i(x, y, z),
+						VoxelTypes.STONE_ID if shell
+						else VoxelTypes.AIR_ID)
+	activate_light(box_world, Vector3i.ZERO)
+	profile = AcousticScript.evaluate_room(box_world,
+			Vector3(6.5, 6.7, 6.5))  # 中心(6.5,6.0,6.5)+眼高0.7
+	check(int(profile["room"]) > 0, "两格高盒腔体非空（room=%s）"
+			% profile["room"])
+	check(AcousticScript.reverb_params(profile)["wet"] > 0.12,
+			"小封闭盒回声可闻（wet=%f）"
+			% AcousticScript.reverb_params(profile)["wet"])

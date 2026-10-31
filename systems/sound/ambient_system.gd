@@ -37,6 +37,10 @@ const STREAM_GAIN_DB := {
 const MACHINES := [
 	{"name": "underwater", "cond": {"deep_water": true},
 		"stream": "underwater_direct", "fade": 1.5},
+	# 涉水（脚部浸水未没顶）也有水声——曾只有浸没/大水域两台，
+	# 小溪浅滩涉水静默（实机报告）。快淡入淡出贴合进出水
+	{"name": "wading", "cond": {"wading": true},
+		"stream": "water_medium", "fade": 1.5},
 	{"name": "cave", "cond": {"roof_depth_min": CAVE_DEPTH_MIN},
 		"stream": "cave_a", "fade": 3.0},
 	{"name": "lakeside", "cond": {"water_nearby_min": 120},
@@ -208,6 +212,13 @@ func _scan() -> Dictionary:
 	var roof_depth := y - pc.y - overhead - 1
 	var deep_water := _is_water(pc + Vector3i(0, 1, 0)) \
 			and _is_water(pc + Vector3i(0, 2, 0))
+	# 涉水：脚部浸深 > 0.1（与 footstep_system 同式——脚位 y-0.95
+	# 配 water_surface_at 向上扫）
+	var feet_y: float = _player.global_position.y - 1.0
+	var feet_cell := Vector3i(floori(_player.global_position.x),
+			floori(feet_y + 0.05), floori(_player.global_position.z))
+	var wading: bool = WaterFlow.water_surface_at(_world, feet_cell) \
+			- feet_y > 0.1
 	var water := 0
 	var sand := 0
 	var leaves := 0
@@ -224,6 +235,7 @@ func _scan() -> Dictionary:
 		"overhead_air": overhead,
 		"roof_depth": roof_depth,
 		"deep_water": deep_water,
+		"wading": wading,
 		"water_nearby": water,
 		"sand_nearby": sand,
 		"leaves_nearby": leaves,
@@ -264,6 +276,8 @@ static func _cond_met(cond: Dictionary, ctx: Dictionary) -> bool:
 	if cond.is_empty():
 		return true
 	if cond.get("deep_water", false) and not ctx["deep_water"]:
+		return false
+	if cond.get("wading", false) and not ctx.get("wading", false):
 		return false
 	for key in COND_TO_CTX:
 		if cond.has(key) and int(ctx[COND_TO_CTX[key]]) < int(cond[key]):

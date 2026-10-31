@@ -163,6 +163,17 @@ func _test_ambient_selector() -> void:
 	check_eq(sel.call({"deep_water": true, "roof_depth": 0,
 			"water_nearby": 0, "sand_nearby": 0, "leaves_nearby": 0}),
 			"underwater", "深水→underwater")
+	# 涉水（脚浸水未没顶）：deep 优先，无 deep 才 wading——小溪浅滩
+	# 也有水声（实机报告：曾只有浸没/大水域两台，涉水静默）
+	check_eq(sel.call({"deep_water": true, "wading": true,
+			"roof_depth": 0, "water_nearby": 0, "sand_nearby": 0,
+			"leaves_nearby": 0}), "underwater", "浸没优先于涉水")
+	check_eq(sel.call({"deep_water": false, "wading": true,
+			"roof_depth": 2, "water_nearby": 0, "sand_nearby": 0,
+			"leaves_nearby": 0}), "wading", "涉水→wading 水声")
+	check_eq(sel.call({"deep_water": false, "wading": false,
+			"roof_depth": 2, "water_nearby": 0, "sand_nearby": 0,
+			"leaves_nearby": 0}), "plains", "未涉水走原链")
 	check_eq(sel.call({"deep_water": false, "roof_depth": 10,
 			"water_nearby": 0, "sand_nearby": 0, "leaves_nearby": 0}),
 			"cave", "深顶盖→cave")

@@ -38,6 +38,7 @@ var _stride_acc := 0.0
 var _was_on_floor := true
 var _prev_fall_speed := 0.0
 var _wading := false
+var _was_wading := false
 ## 音量倍率（main 注入：潜行/静音等）
 var volume_scale := 1.0
 
@@ -79,6 +80,11 @@ func _physics_process(_delta: float) -> void:
 			floori(_player.global_position.z))
 	_wading = WaterFlow.water_surface_at(_world, feet_cell) \
 			- (_player.global_position.y - 1.0) > 0.1
+	# 入水/出水溅泼（边沿触发；SFX 总线比脚步响一档）
+	if _wading != _was_wading:
+		_manager.play_2d(_variants["water"].pick_random(),
+				1.3 * volume_scale, randf_range(0.9, 1.1), "SFX")
+	_was_wading = _wading
 	# 步距累计（水平速度）
 	var horizontal := Vector2(vel.x, vel.z).length()
 	if horizontal < 0.5:

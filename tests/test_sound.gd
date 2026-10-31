@@ -6,6 +6,7 @@ extends VoxelTestCase
 const FootstepScript := preload("res://systems/sound/footstep_system.gd")
 const AmbientScript := preload("res://systems/sound/ambient_system.gd")
 const ManagerScript := preload("res://systems/sound/sound_manager.gd")
+const AcousticScript := preload("res://systems/sound/acoustic_system.gd")
 
 
 func run() -> void:
@@ -16,6 +17,8 @@ func run() -> void:
 	_test_ambient_stream_variant()
 	_test_block_sound_synth()
 	_test_bus_layout()
+	_test_occlusion()
+	_test_room_reverb()
 
 
 ## 方块 ID → 材质族映射（blockmap 语义：新方块注册须同步）
@@ -141,10 +144,87 @@ func _test_bus_layout() -> void:
 	var mgr: Node = ManagerScript.new()
 	mgr._setup_buses()
 	mgr._setup_buses()  # 幂等（重进游戏不重复建）
-	for bus_name in ["Footsteps", "SFX", "Ambient"]:
+	for bus_name in ["Footsteps", "SFX", "Ambient", "SFXOcc1", "SFXOcc2"]:
 		var idx := AudioServer.get_bus_index(bus_name)
 		check(idx != -1, "总线 %s 已创建" % bus_name)
 		if idx != -1:
 			check_eq(AudioServer.get_bus_send(idx), "Master",
 					"%s 发送到 Master" % bus_name)
+			check(AudioServer.get_bus_effect_count(idx) >= 1,
+					"%s 已预挂声学效果" % bus_name)
 	mgr.free()
+
+
+## 遮挡射线：空场直通 / 石墙全挡 / 树叶弱挡 / 限程外不计
+func _test_occlusion() -> void:
+	var world: VoxelWorld = make_world(16,
+			[Vector3i.ZERO], 7)
+	# 石墙 x=8（跨整块）：源 (4,8,8) → 听 (12,8,8)
+	for z in 16:
+		for y in 16:
+			world.get_chunk(Vector3i.ZERO).set_block(
+					Vector3i(8, y, z), VoxelTypes.STONE_ID)
+	var occ: float = AcousticScript.occlusion_between(world,
+			Vector3(4.5, 8.5, 8.5), Vector3(12.5, 8.5, 8.5))
+	check(absf(occ - 1.0) < 0.01, "单层石墙遮挡=1（%f）" % occ)
+	# 树叶墙：穿透系数 0.15
+	for z in 16:
+		for y in 16:
+			world.get_chunk(Vector3i.ZERO).set_block(
+					Vector3i(8, y, z), VoxelTypes.LEAVES_ID)
+	occ = AcousticScript.occlusion_between(world,
+			Vector3(4.5, 8.5, 8.5), Vector3(12.5, 8.5, 8.5))
+	check(absf(occ - AcousticScript.TRANSPARENT_OCCLUSION) < 0.01,
+			"树叶墙遮挡=0.15（%f）" % occ)
+	# 开洞后射线恰从洞中穿过 → 直通（单层墙的洞正对射线）
+	world.get_chunk(Vector3i.ZERO).set_block(
+			Vector3i(8, 8, 8), VoxelTypes.AIR_ID)
+	occ = AcousticScript.occlusion_between(world,
+			Vector3(4.5, 8.5, 8.5), Vector3(12.5, 8.5, 8.5))
+	check(occ < 0.01, "树叶墙开洞后直通（%f）" % occ)
+	# 总线档位与音量衰减
+	check_eq(AcousticScript.occlusion_bus(0.0), "SFX", "直通走干总线")
+	check_eq(AcousticScript.occlusion_bus(0.3), "SFXOcc1", "轻挡走 Occ1")
+	check_eq(AcousticScript.occlusion_bus(2.0), "SFXOcc2", "重挡走 Occ2")
+	check(AcousticScript.occlusion_gain(0.0) == 1.0, "直通无衰减")
+	check(AcousticScript.occlusion_gain(2.0)
+			< AcousticScript.occlusion_gain(0.5), "重挡更响衰减")
+
+
+## 房间混响：封闭石室 wet 高/露天 wet≈0；映射在 Godot 域内
+func _test_room_reverb() -> void:
+	var world: VoxelWorld = make_world(16,
+			[Vector3i.ZERO], 7)
+	var chunk: ChunkData = world.get_chunk(Vector3i.ZERO)
+	# 封闭石室：壳 x/z 4..12、y 2..8，内部空气
+	for x in range(4, 13):
+		for y in range(2, 9):
+			for z in range(4, 13):
+				var shell := x == 4 or x == 12 or y == 2 or y == 8 \
+						or z == 4 or z == 12
+				chunk.set_block(Vector3i(x, y, z),
+						VoxelTypes.STONE_ID if shell else VoxelTypes.AIR_ID)
+	activate_light(world, Vector3i.ZERO)
+	var profile: Dictionary = AcousticScript.evaluate_room(world,
+			Vector3(8.5, 5.5, 8.5))
+	check(int(profile["room"]) >= 200, "封闭腔体格数（%s）"
+			% profile["room"])
+	check(profile["sky_frac"] < 0.01, "封闭腔体无天光（%f）"
+			% profile["sky_frac"])
+	check(profile["reflectivity"] > 0.8, "石壁反射率高（%f）"
+			% profile["reflectivity"])
+	var params: Dictionary = AcousticScript.reverb_params(profile)
+	check(params["wet"] > 0.15, "封闭石室混响湿端高（%f）" % params["wet"])
+	check(params["room_size"] > 0.3, "腔体尺寸感（%f）"
+			% params["room_size"])
+	check(params["damping"] < 0.5, "石壁阻尼低（声音亮）")
+	# 露天：纯空气区块 + 光照激活 → 天光满 → wet≈0.02
+	var open_world: VoxelWorld = make_world(16,
+			[Vector3i.ZERO], 7)
+	activate_light(open_world, Vector3i.ZERO)
+	profile = AcousticScript.evaluate_room(open_world,
+			Vector3(8.5, 10.5, 8.5))
+	check(profile["sky_frac"] > 0.9, "露天腔体天光满（%f）"
+			% profile["sky_frac"])
+	params = AcousticScript.reverb_params(profile)
+	check(params["wet"] <= 0.05, "露天混响趋零（%f）" % params["wet"])

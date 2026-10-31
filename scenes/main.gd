@@ -34,6 +34,8 @@ var tree_manager: Node  # TreeManager（preload 绕开类缓存）
 const TreeManagerScript := preload("res://systems/trees/tree_manager.gd")
 var water_ripples: Node  # WaterRipples（preload 绕开类缓存）
 const WaterRipplesScript := preload("res://world/water_ripples.gd")
+var sound_manager: Node  # SoundManager（preload 绕开类缓存）
+const SoundManagerScript := preload("res://systems/sound/sound_manager.gd")
 var save_system: WorldSave
 var player: PlayerController
 var water_reflection: Node  # 水面镜像反射（preload 绕开类缓存）
@@ -147,6 +149,13 @@ func _ready() -> void:
 	# 掉落物撞得上树干：掉落走体素碰撞感知不到树 StaticBody，
 	# 主干实心由树管理器实时查询补齐（枝干无碰撞，与玩家一致）
 	drop_manager.trunk_solid_probe = tree_manager.is_solid_for_items
+
+	# 声音系统：脚步（程序化材质族）+ 环境音景（MAtmos 式条件流）+
+	# 方块交互音；总线运行时创建，headless dummy 全链路安全
+	sound_manager = SoundManagerScript.new()
+	add_child(sound_manager)
+	sound_manager.setup(world, registry)
+
 	const TorchRendererScript := preload("res://presentation/torch_renderer.gd")
 	torch_renderer = TorchRendererScript.new()
 	add_child(torch_renderer)
@@ -374,6 +383,8 @@ func _update_day_night(delta: float) -> void:
 		if mat is ShaderMaterial:
 			mat.set_shader_parameter("u_day", u_day)
 	tree_manager.set_day_factor(u_day)
+	if sound_manager != null:
+		sound_manager.set_day01(day01)
 	# 水面反射的太阳方向（day/night 方位不同，随光重发）
 	var sun_dir: Vector3 = -_sun.global_transform.basis.z.normalized()
 	for mat in [chunk_renderer.water_material, chunk_renderer.water_side_material]:
@@ -564,6 +575,8 @@ func _spawn_player(spawn_block: Vector2i) -> void:
 	add_child(player)
 	drop_manager.pickup_target = player
 	drop_manager.pickup_inventory = player.inventory
+	if sound_manager != null:
+		sound_manager.attach_player(player)
 	# 脚 = 出生列最高实心方块顶面 +1（预热后数据已就绪）
 	var surface := 0
 	for y in range(config.world_height_blocks() - 1, -1, -1):

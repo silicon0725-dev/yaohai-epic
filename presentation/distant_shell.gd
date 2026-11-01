@@ -57,10 +57,12 @@ func setup(p_world, p_player: Node3D, p_environment) -> void:
 	var cam: Camera3D = _find_camera(p_player)
 	if cam != null:
 		cam.far = SHELL_RADIUS * 2.0
-	# 雾随壳半径：begin 0.55×R（256-2200 格保持清晰锐利），
+	# 雾随壳半径：begin 0.35×R（1434 格起渐入——中环带 1024-2048
+	# 必须在雾内，否则夕阳直射的裸露山面亮于地平线天="发光"实锤，
+	# PIL 真值 109>100 抓到；近 chunk 圈 256 格仍清晰），
 	# end 0.92×R（浓雾正好在地平线前吞掉壳外缘）
 	if p_environment != null:
-		p_environment.fog_depth_begin = SHELL_RADIUS * 0.55
+		p_environment.fog_depth_begin = SHELL_RADIUS * 0.35
 		p_environment.fog_depth_end = SHELL_RADIUS * 0.92
 
 
@@ -74,10 +76,13 @@ func _find_camera(player: Node3D):
 	return null
 
 
-## 日夜因子下发（main._update_day_night 每帧调；树管理器同款接口）。
-func set_day_factor(v: float) -> void:
+## 日夜状态下发（main._update_day_night 每帧调）：u_day 压暗因子 +
+## 真实太阳方向（太阳漫反射在 shader 实时算——烘焙固定方向会在
+## 黄昏/夜里与场景错位成"发光"）。
+func set_day_factor(v: float, sun_dir := Vector3(0.5, 0.89, 0.25)) -> void:
 	if _material != null:
 		_material.set_shader_parameter("u_day", v)
+		_material.set_shader_parameter("u_sun_dir", sun_dir)
 
 
 func _exit_tree() -> void:

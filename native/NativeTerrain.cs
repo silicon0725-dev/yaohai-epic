@@ -430,9 +430,6 @@ public partial class NativeTerrain : RefCounted
             (1024.0, 2048.0, 16.0),
             (2048.0, 4096.0, 32.0),
         };
-    private static readonly Vector3 ShellSunDir =
-        new Vector3(0.5f, 1.0f, 0.25f).Normalized();
-
     /// 生成以 (centerX, centerZ) 为中心的远景壳 ArrayMesh（每环一个
     /// surface = 4 draw call）。线程安全：只读噪声字段。
     public ArrayMesh GenerateShellMesh(int centerX, int centerZ)
@@ -465,6 +462,7 @@ public partial class NativeTerrain : RefCounted
 
             int vcount = (rows + 1) * w;
             var verts = new Vector3[vcount];
+            var norms = new Vector3[vcount];
             var cols = new Color[vcount];
             for (int r = 0; r <= rows; r++)
             {
@@ -484,16 +482,18 @@ public partial class NativeTerrain : RefCounted
                         centerX + (float)(Math.Cos(theta) * radius),
                         y,
                         centerZ + (float)(Math.Sin(theta) * radius));
-                    // 基色：海深蓝平面 / 裸岩灰 / 沙 / 草（主导"群系"）。
-                    // 远山观感校准（截图验收）：满照白化——lum 上限压到
-                    // 0.85、环境项 0.4；草基色加深（远景树群地毯感）
+                    // 基色（光照由 shader 用 NORMAL 实时算——太阳方向
+                    // 烘焙死会在黄昏与场景错位成"发光"，两轮实机反馈）：
+                    // 海=去饱和灰蓝（纯饱和蓝远看像灯，真海是天空反射
+                    // 灰蓝）/ 裸岩灰 / 沙 / 草（远景树群地毯感）
                     float cr, cg, cb;
-                    if (water) { cr = 0.13f; cg = 0.30f; cb = 0.45f; }
+                    if (water) { cr = 0.32f; cg = 0.40f; cb = 0.50f; }
                     else if (rockyG[r, s])
                         { cr = 0.50f; cg = 0.48f; cb = 0.46f; }
                     else if (sandyG[r, s])
                         { cr = 0.72f; cg = 0.66f; cb = 0.49f; }
                     else { cr = 0.24f; cg = 0.36f; cb = 0.18f; }
+                    cols[idx] = new Color(cr, cg, cb);
                     // 法线：grid 邻差（wrap θ；r 端用单侧差分），
                     // 海列压平为朝上
                     Vector3 n = Vector3.Up;
@@ -508,9 +508,7 @@ public partial class NativeTerrain : RefCounted
                         n = new Vector3(
                             -(float)dhdt, 1.0f, -(float)dhdr).Normalized();
                     }
-                    float diff = Math.Max(n.Dot(ShellSunDir), 0.0f);
-                    float lum = 0.4f + 0.45f * diff;
-                    cols[idx] = new Color(cr * lum, cg * lum, cb * lum);
+                    norms[idx] = n;
                 }
             }
 
@@ -535,6 +533,8 @@ public partial class NativeTerrain : RefCounted
             arrays.Resize((int)Mesh.ArrayType.Max);
             arrays[(int)Mesh.ArrayType.Vertex] =
                 Variant.CreateFrom(verts);
+            arrays[(int)Mesh.ArrayType.Normal] =
+                Variant.CreateFrom(norms);
             arrays[(int)Mesh.ArrayType.Color] =
                 Variant.CreateFrom(cols);
             arrays[(int)Mesh.ArrayType.Index] =

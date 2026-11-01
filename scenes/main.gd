@@ -341,10 +341,8 @@ const NIGHT_SKY_TOP := Color(0.012, 0.02, 0.055)
 const NIGHT_SKY_HORIZON := Color(0.045, 0.06, 0.11)
 const DAY_AMBIENT := Color(0.29, 0.41, 0.61)
 const NIGHT_AMBIENT := Color(0.16, 0.19, 0.30)
-# 远景雾色（BSL 大气透视取向）：昼=偏天蓝，夜=深蓝黑（雾色不随
-# 环境自动变化——恒亮雾让夜里远景整片发亮，实机反馈）
+# 远景雾色初值（运行时每帧被地平线天色覆盖，见 _update_day_night）
 const DAY_FOG := Color(0.62, 0.74, 0.90)
-const NIGHT_FOG := Color(0.05, 0.07, 0.13)
 var _time_of_day := 0.1  # 起始上午
 var _sun: DirectionalLight3D
 
@@ -394,19 +392,22 @@ func _update_day_night(delta: float) -> void:
 		if mat is ShaderMaterial:
 			mat.set_shader_parameter("u_day", u_day)
 	tree_manager.set_day_factor(u_day)
-	# 远景壳同款 u_day（夜里压暗——恒亮壳在夜里"自发光"，实机反馈）；
-	# 深度雾色也随昼夜（恒亮蓝白雾会让夜里远景整片发亮）
-	if distant_shell != null:
-		distant_shell.set_day_factor(u_day)
+	# 深度雾色=当前地平线天色（大气透视的物理本义：远景混向天色）。
+	# 曾用独立 DAY/NIGHT_FOG 常量 lerp day01——日落时天空已暗红而
+	# 雾还亮蓝白，雾把远山推得比天空亮 = "远处发光"（PIL 真值实测
+	# 山 25 > 天 19 抓到）；直接取 sky_horizon_color 全时段自动同步
 	if _environment != null:
-		_environment.fog_light_color = DAY_FOG.lerp(
-				NIGHT_FOG, 1.0 - day01)
+		_environment.fog_light_color = sky_mat.sky_horizon_color
 	if sound_manager != null:
 		sound_manager.set_day01(day01)
 	# 水面反射的太阳方向（day/night 方位不同，随光重发）
 	var sun_dir: Vector3 = -_sun.global_transform.basis.z.normalized()
 	for mat in [chunk_renderer.water_material, chunk_renderer.water_side_material]:
 		mat.set_shader_parameter("sun_direction", sun_dir)
+	# 壳的 u_day + 太阳漫反射方向同源下发（光照实时算——烘焙固定
+	# 正午方向在黄昏与场景错位成"发光"，恒亮夜里更明显；两轮实机反馈）
+	if distant_shell != null:
+		distant_shell.set_day_factor(u_day, sun_dir)
 
 
 ## 眼适应（iterationT 式人眼明暗适应；Godot 4 无内建自动曝光——

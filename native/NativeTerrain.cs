@@ -468,9 +468,15 @@ public partial class NativeTerrain : RefCounted
             for (int cz = 0; cz < W; cz++)
             for (int cx = 0; cx < W; cx++)
             {
-                int r = Math.Max(Math.Abs(cx - ShellRingOuter),
-                    Math.Abs(cz - ShellRingOuter));
-                if (r < ShellRingInner || r >= ShellRingOuter)
+                // 圆环判定（欧氏半径）：方环的角区比边区远 √2——雾
+                // 化梯度沿对角突变，透视下呈放射状亮楔穿水穿山（海边
+                // 低机位实机复现）；圆环雾梯度平滑（DH 同款）。格仍
+                // 方形对齐（判定圆、格方）
+                int ddx = cx - ShellRingOuter;
+                int ddz = cz - ShellRingOuter;
+                int r2 = ddx * ddx + ddz * ddz;
+                if (r2 < ShellRingInner * ShellRingInner
+                    || r2 >= ShellRingOuter * ShellRingOuter)
                     continue;
                 int ci = cz * W + cx;
                 inRing[ci] = true;
@@ -613,10 +619,17 @@ public partial class NativeTerrain : RefCounted
                             bool nbOk = cx + dx >= 0 && cx + dx < W
                                 && cz + dz >= 0 && cz + dz < W
                                 && inRing[ni];
+                            // 出环带邻居（级间边界）：裙深=一级量化步
+                            //（S）而非 y=0——曾落到 0：相邻两级的裙壁
+                            // 背对背从地底拔起，边界成深谷缝，方形环带
+                            // 边界在低机位透视下呈放射状楔形暗带穿山
+                            //（实机截图两轮实锤）。S 深的裙足够盖住级
+                            // 间量化高差，残余由雾吞；不低于海平面下 1
+                            //（浅滩格 tops≈sea 时 yb=sea-S 会穿到负值）
                             int nbTop = nbOk
                                 ? (biome[ni] == 0 ? _seaLevel - 1
                                     : tops[ni])
-                                : 0;
+                                : Math.Max(tops[ci] - S, _seaLevel - 1);
                             yt = tops[ci];
                             if (yt > nbTop)
                             {

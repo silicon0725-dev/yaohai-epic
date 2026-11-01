@@ -35,14 +35,14 @@ func _test_shell_mesh_geometry() -> void:
 				and norms.size() == v.size(),
 				"级 %d 数组齐备（v=%d）" % [si, v.size()])
 		# 方块语言断言：陆格顶面/侧壁顶点 x,z 均对齐全局格距网格
-		#（中心 32 + S 的整数倍）；裙壁顶点 y=0 存在（级间缝防护）
+		#（中心 32 + S 的整数倍）。级间边界裙深 = 一级量化步（曾落
+		# 到 y=0 的深谷缝在低机位透视下呈放射状楔形暗带，实机两轮）
 		var Ss := [4, 8, 16, 32]
 		var S: int = Ss[si]
 		var aligned := true
-		var skirt := false
+		var min_y := 1e9
 		for i in v.size():
-			if int(v[i].y) == 0:
-				skirt = true
+			min_y = minf(min_y, v[i].y)
 		for i in mini(v.size(), 4000):
 			var lx := fmod(v[i].x - 32.0, float(S))
 			var lz := fmod(v[i].z - 32.0, float(S))
@@ -55,7 +55,8 @@ func _test_shell_mesh_geometry() -> void:
 				aligned = false
 				break
 		check(aligned, "级 %d 顶点对齐 %d 格网格" % [si, S])
-		check(skirt, "级 %d 存在裙壁顶点（y=0）" % si)
+		check(min_y > 1.0, "级 %d 裙壁不落地（min y=%.0f > 1）"
+				% [si, min_y])
 		# 海平面压平：水面框顶点 y == 6.9
 		var sea_v := 0
 		for i in v.size():

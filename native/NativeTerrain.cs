@@ -456,6 +456,58 @@ public partial class NativeTerrain : RefCounted
     public ArrayMesh GenerateShellMesh(int centerX, int centerZ)
     {
         var mesh = new ArrayMesh();
+        // 整片圆盘水面（sea-0.3，略低于 chunk 水面防共面闪；内缘伸
+        // 进 chunk 圈藏在水下，外缘 4096）——水无 LOD 层级差异，曾
+        // 按级出 4 矩形框：相邻级 [60×2S,128×S] 有 8S 宽共面重叠环
+        // 带 z-fighting，框缘在低机位多层交织成放射扇纹（实机三轮）
+        {
+            var verts = new List<Vector3>();
+            var norms = new List<Vector3>();
+            var cols = new List<Color>();
+            var idxs = new List<int>();
+            const int SEG = 96;
+            float rIn = 200f;
+            float rOut = ShellRingOuter * 32f;
+            float wy = _seaLevel - 0.3f;
+            var wcol = new Color(0.32f, 0.40f, 0.50f);
+            for (int k = 0; k < SEG; k++)
+            {
+                float a0 = MathF.Tau * k / SEG;
+                float a1 = MathF.Tau * (k + 1) / SEG;
+                int v0 = verts.Count;
+                verts.Add(new Vector3(
+                    centerX + MathF.Cos(a0) * rIn, wy,
+                    centerZ + MathF.Sin(a0) * rIn));
+                verts.Add(new Vector3(
+                    centerX + MathF.Cos(a0) * rOut, wy,
+                    centerZ + MathF.Sin(a0) * rOut));
+                verts.Add(new Vector3(
+                    centerX + MathF.Cos(a1) * rOut, wy,
+                    centerZ + MathF.Sin(a1) * rOut));
+                verts.Add(new Vector3(
+                    centerX + MathF.Cos(a1) * rIn, wy,
+                    centerZ + MathF.Sin(a1) * rIn));
+                for (int t = 0; t < 4; t++)
+                {
+                    norms.Add(Vector3.Up);
+                    cols.Add(wcol);
+                }
+                idxs.Add(v0); idxs.Add(v0 + 2); idxs.Add(v0 + 1);
+                idxs.Add(v0 + 1); idxs.Add(v0 + 2); idxs.Add(v0 + 3);
+            }
+            var arrays = new Godot.Collections.Array();
+            arrays.Resize((int)Mesh.ArrayType.Max);
+            arrays[(int)Mesh.ArrayType.Vertex] =
+                Variant.CreateFrom(verts.ToArray());
+            arrays[(int)Mesh.ArrayType.Normal] =
+                Variant.CreateFrom(norms.ToArray());
+            arrays[(int)Mesh.ArrayType.Color] =
+                Variant.CreateFrom(cols.ToArray());
+            arrays[(int)Mesh.ArrayType.Index] =
+                Variant.CreateFrom(idxs.ToArray());
+            mesh.AddSurfaceFromArrays(
+                Mesh.PrimitiveType.Triangles, arrays);
+        }
         foreach (int S in ShellLevels)
         {
             int W = ShellRingOuter * 2;
@@ -540,33 +592,6 @@ public partial class NativeTerrain : RefCounted
                         0.24f * k, 0.36f * k, 0.18f * k);
                 }
             }
-
-            // 环形水面：4 矩形框（sea-0.1）——逐格水面是纯开销。
-            // 框心必须加壳中心（centerX/Z）——曾漏加写死世界原点，
-            // 壳随玩家平移后水面与陆地区域错位，各级环框交叠成放射
-            // 状条纹（实机截图实锤）
-            float wy = _seaLevel - 0.1f;
-            var wcol = new Color(0.32f, 0.40f, 0.50f);
-            float o = ShellRingOuter * (float)S;
-            float i2 = ShellRingInner * (float)S;
-            float fx = (float)centerX;
-            float fz = (float)centerZ;
-            PushQuad(new Vector3(fx - o, wy, fz - o),
-                new Vector3(fx + o, wy, fz - o),
-                new Vector3(fx + o, wy, fz - i2),
-                new Vector3(fx - o, wy, fz - i2), Vector3.Up, wcol);
-            PushQuad(new Vector3(fx - o, wy, fz + i2),
-                new Vector3(fx + o, wy, fz + i2),
-                new Vector3(fx + o, wy, fz + o),
-                new Vector3(fx - o, wy, fz + o), Vector3.Up, wcol);
-            PushQuad(new Vector3(fx - o, wy, fz - i2),
-                new Vector3(fx - i2, wy, fz - i2),
-                new Vector3(fx - i2, wy, fz + i2),
-                new Vector3(fx - o, wy, fz + i2), Vector3.Up, wcol);
-            PushQuad(new Vector3(fx + i2, wy, fz - i2),
-                new Vector3(fx + o, wy, fz - i2),
-                new Vector3(fx + o, wy, fz + i2),
-                new Vector3(fx + i2, wy, fz + i2), Vector3.Up, wcol);
 
             // 陆格顶面
             for (int cz = 0; cz < W; cz++)

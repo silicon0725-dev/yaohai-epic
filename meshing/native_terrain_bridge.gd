@@ -58,6 +58,17 @@ static func prewarm(world_seed: int, world_height_blocks: int) -> void:
 				world_seed, world_height_blocks, _block_id_table())
 
 
+## 取当前种子的 NativeTerrain 实例（远景壳等需要直接调用非生成
+## 方法的系统用；不存在时现建——调用方保证在主线程或已 prewarm）。
+static func get_native(world_seed: int, world_height_blocks: int = 64):
+	if not available():
+		return null
+	if not _native_by_seed.has(world_seed):
+		_native_by_seed[world_seed] = _factory.CreateTerrain(
+				world_seed, world_height_blocks, _block_id_table())
+	return _native_by_seed[world_seed]
+
+
 ## 生成区块（C#）。返回 { ids, heights, sandy, rocky }；空字典 = 不可用。
 ## profiles 覆盖本区块 16×16 列；±TREE_REACH 界外列由调用方回退
 ## column_profile（每树 1-2 次，成本低）。

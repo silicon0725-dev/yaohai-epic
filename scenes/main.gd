@@ -33,7 +33,9 @@ const VoxelLightScript := preload("res://systems/lighting/voxel_light.gd")
 var tree_manager: Node  # TreeManager（preload 绕开类缓存）
 const TreeManagerScript := preload("res://systems/trees/tree_manager.gd")
 var water_ripples: Node  # WaterRipples（preload 绕开类缓存）
+var distant_shell: Node  # DistantShell 远景山壳（preload 绕开类缓存）
 const WaterRipplesScript := preload("res://world/water_ripples.gd")
+const DistantShellScript := preload("res://presentation/distant_shell.gd")
 var sound_manager: Node  # SoundManager（preload 绕开类缓存）
 const SoundManagerScript := preload("res://systems/sound/sound_manager.gd")
 var save_system: WorldSave
@@ -219,6 +221,11 @@ func _ready() -> void:
 		player.inventory.apply_starting_kit(ItemTypes.STARTING_KIT)
 	chunk_manager.player_state_provider = player.get_save_state
 	chunk_manager.focus = player
+	# 远景山壳（Voxy LOD 金字塔思想）：把有效视距推到 4096 格——
+	# 在玩家就位后接线（壳中心跟随玩家焦点，首帧后台构建）
+	distant_shell = DistantShellScript.new()
+	add_child(distant_shell)
+	distant_shell.setup(world, player, _environment)
 	_setup_hud()
 	_begin_loading()
 

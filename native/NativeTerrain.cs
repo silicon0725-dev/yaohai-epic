@@ -409,4 +409,139 @@ public partial class NativeTerrain : RefCounted
         };
         return Variant.CreateFrom(result);
     }
+
+    // ---- 远景山壳（Voxy LOD 金字塔思想的纯函数特化）----
+    // 无烘焙/无存储：壳数据 = ColumnProfile 直接查询。四环极坐标
+    // 金字塔（步长 4/8/16/32 格）统一 SEGMENTS 扇区数——相邻环带
+    // 边界行顶点 XZ 完全重合（同 θ 同 r），天然无缝；壳整体下沉
+    // SHELL_SUNKEN 格且内缘在视距圈内侧（0.9×），chunk 网格从上方
+    // 覆盖交界（256 格处 ~1px 的悬崖线，不可见）。
+    // 光照：太阳漫反射烘进顶点色（grid 邻差法线，零额外采样），
+    // 材质 UNSHADED——日夜时远景色调不随时间变（静态局限，已知）。
+    private const int ShellSegments = 512;
+    private const double ShellSunkenY = 2.0;
+    // 环表约束：(outer-inner) 必须被 step 整除，且外环 inner == 内环
+    // outer——否则边界行半径错位（环带间裂缝，探针实测 2 格缝的教训）
+    private static readonly (double inner, double outer, double step)[]
+        ShellRings =
+        {
+            (240.0, 512.0, 4.0),
+            (512.0, 1024.0, 8.0),
+            (1024.0, 2048.0, 16.0),
+            (2048.0, 4096.0, 32.0),
+        };
+    private static readonly Vector3 ShellSunDir =
+        new Vector3(0.5f, 1.0f, 0.25f).Normalized();
+
+    /// 生成以 (centerX, centerZ) 为中心的远景壳 ArrayMesh（每环一个
+    /// surface = 4 draw call）。线程安全：只读噪声字段。
+    public ArrayMesh GenerateShellMesh(int centerX, int centerZ)
+    {
+        var mesh = new ArrayMesh();
+        foreach (var (inner, outer, step) in ShellRings)
+        {
+            int rows = (int)Math.Round((outer - inner) / step);
+            int w = ShellSegments;
+            // 高度场（-1 标记海列）：二遍法——先采样，再差分法线烘色
+            var hgrid = new int[rows + 1, w];
+            var rockyG = new bool[rows + 1, w];
+            var sandyG = new bool[rows + 1, w];
+            for (int r = 0; r <= rows; r++)
+            {
+                double radius = inner + r * step;
+                for (int s = 0; s < w; s++)
+                {
+                    double theta = s * Math.Tau / w;
+                    int wx = centerX + (int)Math.Round(
+                        Math.Cos(theta) * radius);
+                    int wz = centerZ + (int)Math.Round(
+                        Math.Sin(theta) * radius);
+                    var (h, rocky, sandy) = ColumnProfile(wx, wz);
+                    hgrid[r, s] = h;
+                    rockyG[r, s] = rocky;
+                    sandyG[r, s] = sandy;
+                }
+            }
+
+            int vcount = (rows + 1) * w;
+            var verts = new Vector3[vcount];
+            var cols = new Color[vcount];
+            for (int r = 0; r <= rows; r++)
+            {
+                double radius = inner + r * step;
+                // θ 向邻顶点真实弧长（法线差分分母）
+                double arc = radius * Math.Tau / w;
+                for (int s = 0; s < w; s++)
+                {
+                    int idx = r * w + s;
+                    double theta = s * Math.Tau / w;
+                    int h = hgrid[r, s];
+                    bool water = h <= SeaLevel;
+                    float y = water
+                        ? SeaLevel - 0.1f
+                        : h - (float)ShellSunkenY;
+                    verts[idx] = new Vector3(
+                        centerX + (float)(Math.Cos(theta) * radius),
+                        y,
+                        centerZ + (float)(Math.Sin(theta) * radius));
+                    // 基色：海深蓝平面 / 裸岩灰 / 沙 / 草（主导"群系"）。
+                    // 远山观感校准（截图验收）：满照白化——lum 上限压到
+                    // 0.85、环境项 0.4；草基色加深（远景树群地毯感）
+                    float cr, cg, cb;
+                    if (water) { cr = 0.13f; cg = 0.30f; cb = 0.45f; }
+                    else if (rockyG[r, s])
+                        { cr = 0.50f; cg = 0.48f; cb = 0.46f; }
+                    else if (sandyG[r, s])
+                        { cr = 0.72f; cg = 0.66f; cb = 0.49f; }
+                    else { cr = 0.24f; cg = 0.36f; cb = 0.18f; }
+                    // 法线：grid 邻差（wrap θ；r 端用单侧差分），
+                    // 海列压平为朝上
+                    Vector3 n = Vector3.Up;
+                    if (!water)
+                    {
+                        int hL = hgrid[r, (s + w - 1) % w];
+                        int hR = hgrid[r, (s + 1) % w];
+                        int hIn = hgrid[Math.Max(r - 1, 0), s];
+                        int hOut = hgrid[Math.Min(r + 1, rows), s];
+                        double dhdt = (hR - hL) / (2.0 * arc);
+                        double dhdr = (hOut - hIn) / (2.0 * step);
+                        n = new Vector3(
+                            -(float)dhdt, 1.0f, -(float)dhdr).Normalized();
+                    }
+                    float diff = Math.Max(n.Dot(ShellSunDir), 0.0f);
+                    float lum = 0.4f + 0.45f * diff;
+                    cols[idx] = new Color(cr * lum, cg * lum, cb * lum);
+                }
+            }
+
+            // 索引：quad × 2 三角，θ 方向 wrap（首尾相接）
+            var indices = new int[rows * w * 6];
+            int t = 0;
+            for (int r = 0; r < rows; r++)
+            {
+                for (int s = 0; s < w; s++)
+                {
+                    int s2 = (s + 1) % w;
+                    int a = r * w + s;
+                    int b = r * w + s2;
+                    int c = (r + 1) * w + s;
+                    int d = (r + 1) * w + s2;
+                    indices[t++] = a; indices[t++] = c; indices[t++] = b;
+                    indices[t++] = b; indices[t++] = c; indices[t++] = d;
+                }
+            }
+
+            var arrays = new Godot.Collections.Array();
+            arrays.Resize((int)Mesh.ArrayType.Max);
+            arrays[(int)Mesh.ArrayType.Vertex] =
+                Variant.CreateFrom(verts);
+            arrays[(int)Mesh.ArrayType.Color] =
+                Variant.CreateFrom(cols);
+            arrays[(int)Mesh.ArrayType.Index] =
+                Variant.CreateFrom(indices);
+            mesh.AddSurfaceFromArrays(
+                Mesh.PrimitiveType.Triangles, arrays);
+        }
+        return mesh;
+    }
 }

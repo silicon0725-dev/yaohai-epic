@@ -33,6 +33,7 @@ const TEST_CASES := [
 	"res://tests/test_lantern_entities.gd",
 	"res://tests/test_lantern_light_probe.gd",
 	"res://tests/test_leaf_probe.gd",
+	"res://tests/test_distant_shell.gd",
 	"res://tests/test_sound.gd",
 	"res://tests/test_native_equivalence.gd",
 	"res://tests/test_native_terrain.gd",
@@ -50,7 +51,9 @@ func _initialize() -> void:
 	for path in TEST_CASES:
 		var suite: VoxelTestCase = load(path).new()
 		suite.tree_root = root
-		suite.run()
+		# await 兼容异步套件（test_distant_shell 等 worker 流程）；
+		# 同步 run() 返回立即值，await 直接继续
+		await suite.run()
 		total_checks += suite.check_count
 		total_failures += suite.failures.size()
 		var status := "PASS" if suite.failures.is_empty() else "FAIL"

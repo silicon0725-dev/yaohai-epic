@@ -21,8 +21,12 @@ public partial class NativeTerrain : RefCounted
 {
     private const int GeneratorVersion = 8;
     private const int DirtLayerDepth = 3;
-    private const int SandMaxHeight = 8;
-    private const int IronOreMaxY = 20;
+    // v9 高度联动：海平面/沙线/铁矿带随世界高度派生（构造期算；
+    // GD 侧 TerrainGenerator.sea_level_for 位同步——48 高=7 逐格一致，
+    // 其余 H/8）
+    private readonly int _seaLevel;
+    private readonly int _sandMaxHeight;
+    private readonly int _ironOreMaxY;
     private const int OreSurfaceMargin = 4;
     // v7 洞穴与矿脉（Minetest cavegen/mg_ore 算法移植）。
     // 阈值按归一化噪声实测分位标定（探针：W=0.88 → 隧道 ~3.5%、
@@ -41,7 +45,6 @@ public partial class NativeTerrain : RefCounted
     private const double VeinJitter = 0.04;
     private const double CoalVeinValue = 0.92;
     private const double IronVeinValue = 0.965;
-    private const int SeaLevel = 7;
     private const int KnotCount = 17;
     // v8 地形塑形（Epic-Terrain 配比，巨型档=其尺度 ÷2）
     private const double ContinentFreq = 1.0 / 4096.0;
@@ -133,6 +136,9 @@ public partial class NativeTerrain : RefCounted
         _ironOreId = b[7];
         _waterId = b[8];
         _worldHeightBlocks = worldHeightBlocks;
+        _seaLevel = worldHeightBlocks <= 48 ? 7 : worldHeightBlocks / 8;
+        _sandMaxHeight = _seaLevel + 1;
+        _ironOreMaxY = _seaLevel + 13;
         _continental = MakeFbm(worldSeed, ContinentFreq, ContinentOctaves);
         _mountainMask = MakeFbm(worldSeed + 101, MountainMaskFreq, 3);
         _temp = MakeFbm(worldSeed + 202, MountainMaskFreq, 3);
@@ -282,16 +288,16 @@ public partial class NativeTerrain : RefCounted
         if (height < 1) height = 1;
         if (height > maxSurface) height = maxSurface;
         // v5：压掉齐平沙洲（height == SEA_LEVEL）
-        if (height == SeaLevel)
-            height = SeaLevel - 1;
+        if (height == _seaLevel)
+            height = _seaLevel - 1;
 
         bool rocky = frac >= RockSurfaceFrac;
         double temp = _temp.GetNoise2D(wx, wz)
             - TempLapse * Math.Max(0.0, frac - 0.30);
-        bool desert = !rocky && height > SandMaxHeight
+        bool desert = !rocky && height > _sandMaxHeight
             && temp > DesertTemp && frac < DesertMaxFrac
             && _precip.GetNoise2D(wx, wz) < DesertDryness;
-        bool sandy = desert || height <= SandMaxHeight;
+        bool sandy = desert || height <= _sandMaxHeight;
         return (height, rocky, sandy);
     }
 
@@ -304,13 +310,13 @@ public partial class NativeTerrain : RefCounted
         if (wy == height)
         {
             if (rocky) return _stoneId;
-            if (sandy || height <= SandMaxHeight) return _sandId;
+            if (sandy || height <= _sandMaxHeight) return _sandId;
             return _grassId;
         }
         if (wy >= height - DirtLayerDepth)
         {
             if (rocky) return _stoneId;
-            if (sandy || height <= SandMaxHeight) return _sandstoneId;
+            if (sandy || height <= _sandMaxHeight) return _sandstoneId;
             return _dirtId;
         }
         // v7 洞穴与矿脉（地表保护层内不挖——防满地天窗；基岩上留层）
@@ -356,7 +362,7 @@ public partial class NativeTerrain : RefCounted
         double d2 = 1.0 - Math.Abs(_vein2.GetNoise3D(wx, wy, wz));
         double jitter = HashUnit(wx, wy, wz) * 2.0 - 1.0;
         double value = d1 * d2 + jitter * VeinJitter;
-        if (value > IronVeinValue && wy <= IronOreMaxY)
+        if (value > IronVeinValue && wy <= _ironOreMaxY)
             return _ironOreId;
         if (value > CoalVeinValue)
             return _coalOreId;
@@ -392,7 +398,7 @@ public partial class NativeTerrain : RefCounted
                 {
                     int wy = originY + ly;
                     int blockId;
-                    if (wy > height && wy <= SeaLevel)
+                    if (wy > height && wy <= _seaLevel)
                         blockId = _waterId;
                     else
                         blockId = BlockForColumn(isRocky, isSandy, wx, wy, wz, height);
@@ -478,9 +484,9 @@ public partial class NativeTerrain : RefCounted
                     int idx = r * w + s;
                     double theta = s * Math.Tau / w;
                     int h = hgrid[r, s];
-                    bool water = h <= SeaLevel;
+                    bool water = h <= _seaLevel;
                     float y = water
-                        ? SeaLevel - 0.1f
+                        ? _seaLevel - 0.1f
                         : h - (float)ShellSunkenY;
                     verts[idx] = new Vector3(
                         centerX + (float)(Math.Cos(theta) * radius),

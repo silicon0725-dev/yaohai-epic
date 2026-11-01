@@ -588,14 +588,14 @@ func _setup_environment() -> void:
 ## v8 大陆波长 4096 格——海可绵延上千格，24 圈（~200 格）大概率
 ## 全海；扩到 80 圈（~640 格）覆盖半个大陆波长。
 func _find_land_spawn(start: Vector2i) -> Vector2i:
-	if generator.column_height(start.x, start.y) > TerrainGenerator.SEA_LEVEL:
+	if generator.column_height(start.x, start.y) > generator.sea_level:
 		return start
 	for radius in range(1, 80):
 		for a in 16:
 			var ang := TAU * a / 16.0
 			var cx := start.x + int(round(cos(ang) * radius * 8.0))
 			var cz := start.y + int(round(sin(ang) * radius * 8.0))
-			if generator.column_height(cx, cz) > TerrainGenerator.SEA_LEVEL:
+			if generator.column_height(cx, cz) > generator.sea_level:
 				return Vector2i(cx, cz)
 	push_warning("出生点 80 圈内未找到陆地，使用原出生点（可能落水）")
 	return start
@@ -649,7 +649,7 @@ func _setup_water_reflection() -> void:
 			[chunk_renderer.water_material, chunk_renderer.water_side_material],
 			[chunk_renderer.material, chunk_renderer.cutout_material],
 			_environment,
-			float(TerrainGenerator.SEA_LEVEL)
+			float(generator.sea_level)
 					+ ChunkMesher.water_surface_height(0))
 
 

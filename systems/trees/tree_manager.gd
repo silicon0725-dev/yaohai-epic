@@ -178,7 +178,7 @@ func _ref_tree(col: Vector2i) -> void:
 	# 地形合法性（与 terrain_generator 撒树同判定——曾缺此检查，
 	# 水域/沙地上凭空建出不可挖的光树干实体"幽灵树"）
 	var prof: Dictionary = _get_gen().column_profile(col.x, col.y)
-	if int(prof["height"]) <= TerrainGenerator.SEA_LEVEL:
+	if int(prof["height"]) <= _get_gen().sea_level:
 		return  # 水域/滩涂
 	if prof.get("sandy", false) or prof.get("rocky", false):
 		return  # 荒漠沙/裸岩

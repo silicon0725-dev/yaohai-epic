@@ -31,11 +31,16 @@ const GENERATOR_VERSION := 8
 const DIRT_LAYER_DEPTH := 3
 const SANDSTONE_LAYER_DEPTH := 3
 ## 地表高度不超过此值时为滩涂/干涸湖床沙地。
+## 遗留常量（48 高世界的值）；运行时一律用实例 sand_max_height
+##（= sea_level + 1，随世界高度联动）。
 const SAND_MAX_HEIGHT := 8
 ## 矿石不生成的地表保护层厚度。
 const ORE_SURFACE_MARGIN := 4
 ## 海平面（v4）：低于它的空气列填水。取 7 与滩涂沙线上限（8）衔接
 ##——海岸一圈自然成沙滩；水下地表本就 ≤8 全为沙（浅海沙底）。
+## 遗留常量（48 高世界的值）；运行时一律用实例 sea_level（v9 起
+## 随世界高度联动：48 高=7 保持老存档逐格一致，新世界 H/8——512
+## 高=64，MC 同款）。仅测试（显式 chunks_y=3）与 debug 脚本引用。
 const SEA_LEVEL := 7
 
 # ---- v7 洞穴与矿脉（Minetest cavegen/mg_ore 算法移植）----
@@ -68,7 +73,8 @@ const VEIN_OCTAVES := 1
 const VEIN_JITTER := 0.04
 const COAL_VEIN_VALUE := 0.92
 const IRON_VEIN_VALUE := 0.965
-## 铁矿深度带上限（比煤更深）。
+## 铁矿深度带上限（比煤更深）。遗留常量（48 高世界）；运行时用
+## 实例 iron_ore_max_y（= sea_level + 13，随世界高度联动）。
 const IRON_ORE_MAX_Y := 20
 
 # ---- v8 地形塑形参数（Epic-Terrain 配比，巨型档=其尺度 ÷2）----
@@ -157,9 +163,29 @@ var _vein2_noise: FastNoiseLite
 ## 本种子噪声的源分位节点（初始化时校准，确定性）。
 var _source_knots := PackedFloat32Array()
 
+# ---- v9 高度联动（世界高度可变：老存档 48 逐格一致，新世界 512）----
+## 海平面：48 高世界=7（原值逐格一致）；其余 H/8（512→64，MC 同款）。
+## 所有海/滩涂/铁矿带判定必须走实例字段，勿用遗留 const（两套值）。
+var sea_level: int
+## 滩涂/浅海沙线（= sea_level + 1，保持与 48 高世界的衔接关系）。
+var sand_max_height: int
+## 铁矿深度带上限（= sea_level + 13，原 7+13=20 逐格一致）。
+var iron_ore_max_y: int
+
+
+## 海平面随世界高度联动（静态，主场景读配置期就能算）：48 高
+## （chunks_y=3 老存档/旧测试）=7 逐格一致；其余 H/8（512→64）。
+static func sea_level_for(world_height_blocks: int) -> int:
+	if world_height_blocks <= 48:
+		return 7
+	return world_height_blocks / 8
+
 
 func _init(world_config: WorldConfig) -> void:
 	config = world_config
+	sea_level = sea_level_for(world_config.world_height_blocks())
+	sand_max_height = sea_level + 1
+	iron_ore_max_y = sea_level + 13
 	# 粗图（v8 尺度配比）：大陆板块 4096 / 山系掩码 2048 / 气候 2048
 	_continental_noise = _make_fbm(world_config.world_seed,
 			CONTINENT_FREQ, CONTINENT_OCTAVES)
@@ -292,19 +318,19 @@ func column_profile(world_x: int, world_z: int) -> Dictionary:
 	var max_surface := config.world_height_blocks() - 3
 	var height := clampi(
 			1 + int(round(frac * float(max_surface - 1))), 1, max_surface)
-	# v5：压掉"齐平沙洲"（height == SEA_LEVEL，顶面恰在海平面上
+	# v5：压掉"齐平沙洲"（height == sea_level，顶面恰在海平面上
 	# 0.125 格）——贴水视角是大片无水干沙色平台带 + 同高露头横线，
 	# 被视为"水面缺口"。降 1 格沉为 1 格水深浅滩，海滩线从 +1 开始
-	if height == SEA_LEVEL:
-		height = SEA_LEVEL - 1
+	if height == sea_level:
+		height = sea_level - 1
 
 	var rocky := frac >= ROCK_SURFACE_FRAC
 	var temp := _temp_noise.get_noise_2d(world_x, world_z) \
 			- TEMP_LAPSE * maxf(0.0, frac - 0.30)
-	var desert := not rocky and height > SAND_MAX_HEIGHT \
+	var desert := not rocky and height > sand_max_height \
 			and temp > DESERT_TEMP and frac < DESERT_MAX_FRAC \
 			and _precip_noise.get_noise_2d(world_x, world_z) < DESERT_DRYNESS
-	var sandy := desert or height <= SAND_MAX_HEIGHT
+	var sandy := desert or height <= sand_max_height
 	return { "height": height, "frac": frac, "rocky": rocky, "sandy": sandy }
 
 
@@ -329,13 +355,13 @@ func _block_for_column(
 	if world_y == height:
 		if rocky:
 			return VoxelTypes.STONE_ID
-		if sandy or height <= SAND_MAX_HEIGHT:
+		if sandy or height <= sand_max_height:
 			return VoxelTypes.SAND_ID
 		return VoxelTypes.GRASS_ID
 	if world_y >= height - DIRT_LAYER_DEPTH:
 		if rocky:
 			return VoxelTypes.STONE_ID
-		if sandy or height <= SAND_MAX_HEIGHT:
+		if sandy or height <= sand_max_height:
 			# 滩涂/荒漠沙地层：紧贴表层的次层是砂岩（测试期望
 			# sandy 列 depth 1..3 全为砂岩）
 			return VoxelTypes.SANDSTONE_ID
@@ -385,7 +411,7 @@ func _ore_vein(world_x: int, world_y: int, world_z: int) -> int:
 	var jitter: float = _hash_unit(world_x, world_y, world_z) \
 			* 2.0 - 1.0
 	var value: float = d1 * d2 + jitter * VEIN_JITTER
-	if value > IRON_VEIN_VALUE and world_y <= IRON_ORE_MAX_Y:
+	if value > IRON_VEIN_VALUE and world_y <= iron_ore_max_y:
 		return VoxelTypes.IRON_ORE_ID
 	if value > COAL_VEIN_VALUE:
 		return VoxelTypes.COAL_ORE_ID
@@ -447,7 +473,7 @@ func _fill_columns_gd(chunk: ChunkData, origin: Vector3i, size: int) -> void:
 				var world_y := origin.y + ly
 				var block_id: int
 				# 海平面填充：地表之上的空气低于海平面即为水（v1 静态水）
-				if world_y > height and world_y <= SEA_LEVEL:
+				if world_y > height and world_y <= sea_level:
 					block_id = VoxelTypes.WATER_ID
 				else:
 					block_id = _block_for_column(profile, rocky, sandy,
@@ -492,7 +518,7 @@ func _scatter_trees(chunk: ChunkData, profiles: Dictionary) -> void:
 				surf = profile["height"]
 				is_sandy = profile.get("sandy", false)
 				is_rocky = profile.get("rocky", false)
-			if surf <= SEA_LEVEL:
+			if surf <= sea_level:
 				continue  # 水域/滩涂不种树
 			# 草地判定（荒漠/裸岩不种）
 			if is_sandy or is_rocky:

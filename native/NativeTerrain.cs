@@ -421,14 +421,18 @@ public partial class NativeTerrain : RefCounted
     private const int ShellSegments = 512;
     private const double ShellSunkenY = 2.0;
     // 环表约束：(outer-inner) 必须被 step 整除，且外环 inner == 内环
-    // outer——否则边界行半径错位（环带间裂缝，探针实测 2 格缝的教训）
+    // outer——否则边界行半径错位（环带间裂缝，探针实测 2 格缝的教训）。
+    // 外两环步长 16/32 的"平面贴图感"（用户 debug 线框+实机反馈）
+    // → 细化到 8/16（径向细节 ×2，切向弧长 4096 处 50 格=0.7°视角
+    // ≈1-2px 已足够）：总顶点 ~20 万/40 万三角，构建 0.3s，fps 实测
+    // 与三角形数无关（固定开销主导）
     private static readonly (double inner, double outer, double step)[]
         ShellRings =
         {
             (240.0, 512.0, 4.0),
             (512.0, 1024.0, 8.0),
-            (1024.0, 2048.0, 16.0),
-            (2048.0, 4096.0, 32.0),
+            (1024.0, 2048.0, 8.0),
+            (2048.0, 4096.0, 16.0),
         };
     /// 生成以 (centerX, centerZ) 为中心的远景壳 ArrayMesh（每环一个
     /// surface = 4 draw call）。线程安全：只读噪声字段。
@@ -485,7 +489,9 @@ public partial class NativeTerrain : RefCounted
                     // 基色（光照由 shader 用 NORMAL 实时算——太阳方向
                     // 烘焙死会在黄昏与场景错位成"发光"，两轮实机反馈）：
                     // 海=去饱和灰蓝（纯饱和蓝远看像灯，真海是天空反射
-                    // 灰蓝）/ 裸岩灰 / 沙 / 草（远景树群地毯感）
+                    // 灰蓝）/ 裸岩灰 / 沙 / 草（远景树群地毯感）。
+                    // 同群系内混入 64 格低频扰动（±10%）——纯色大色块
+                    // 是"平面贴图感"的来源之一（用户实机反馈）
                     float cr, cg, cb;
                     if (water) { cr = 0.32f; cg = 0.40f; cb = 0.50f; }
                     else if (rockyG[r, s])
@@ -493,6 +499,17 @@ public partial class NativeTerrain : RefCounted
                     else if (sandyG[r, s])
                         { cr = 0.72f; cg = 0.66f; cb = 0.49f; }
                     else { cr = 0.24f; cg = 0.36f; cb = 0.18f; }
+                    if (!water)
+                    {
+                        int wx = (int)Math.Round(
+                            centerX + Math.Cos(theta) * radius);
+                        int wz = (int)Math.Round(
+                            centerZ + Math.Sin(theta) * radius);
+                        float tint = (float)_e4.GetNoise2D(wx, wz);
+                        cr *= 1.0f + 0.10f * tint;
+                        cg *= 1.0f + 0.10f * tint;
+                        cb *= 1.0f + 0.10f * tint;
+                    }
                     cols[idx] = new Color(cr, cg, cb);
                     // 法线：grid 邻差（wrap θ；r 端用单侧差分），
                     // 海列压平为朝上

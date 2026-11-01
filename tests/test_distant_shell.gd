@@ -47,8 +47,9 @@ func _test_shell_mesh_geometry() -> void:
 		if si == 3:
 			check(sea_v > 0, "最外环存在海面顶点（%d）" % sea_v)
 	# 总量与环表一致：4×(rows+1)×512；AABB 覆盖 2×4096
-	check(total_v >= 130000 and total_v <= 140000,
-			"金字塔顶点总量（%d，预算 ~13.5 万）" % total_v)
+	#（外两环细化 8/16 后 ~20 万）
+	check(total_v >= 190000 and total_v <= 210000,
+			"金字塔顶点总量（%d，预算 ~20 万）" % total_v)
 	var aabb: AABB = mesh.get_aabb()
 	check(aabb.size.x >= 8100.0 and aabb.size.z >= 8100.0,
 			"壳 AABB 覆盖 ~8192 格（%.0f）" % aabb.size.x)

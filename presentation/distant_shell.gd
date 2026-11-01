@@ -57,13 +57,14 @@ func setup(p_world, p_player: Node3D, p_environment) -> void:
 	var cam: Camera3D = _find_camera(p_player)
 	if cam != null:
 		cam.far = SHELL_RADIUS * 2.0
-	# 雾随壳半径：begin 0.35×R（1434 格起渐入——中环带 1024-2048
-	# 必须在雾内，否则夕阳直射的裸露山面亮于地平线天="发光"实锤，
-	# PIL 真值 109>100 抓到；近 chunk 圈 256 格仍清晰），
+	# 雾随壳半径：begin 0.45×R（1843 格）+ curve 1.6（中段薄远处浓）
+	# ——500-1800 格清晰可辨（"平面贴图感"反馈后回推；发光根因
+	# 已修死：雾色=地平线天色，进雾只会混向天色不会亮于天），
 	# end 0.92×R（浓雾正好在地平线前吞掉壳外缘）
 	if p_environment != null:
-		p_environment.fog_depth_begin = SHELL_RADIUS * 0.35
+		p_environment.fog_depth_begin = SHELL_RADIUS * 0.45
 		p_environment.fog_depth_end = SHELL_RADIUS * 0.92
+		p_environment.fog_depth_curve = 1.6
 
 
 ## 玩家节点下找相机（player_controller 的 $Camera；探针替身挂任意位置）。

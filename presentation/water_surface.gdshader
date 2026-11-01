@@ -129,10 +129,13 @@ void vertex() {
 	// 位移钳制 [-0.16, +0.56]：上涌为主的涌浪——波谷不深陷（防浅滩
 	// 露底），波峰受钳与岸衰减共同约束（空间/时间均值实测 ≈-0.03，
 	// 反射平面无需为此补偿）
-	float displacement = (wave_field(world_pos.xz, u_time * wave_speed)
-			* wave_amplitude * storm_scale * detail
-			+ ripple_height(world_pos.xz) * RIPPLE_VERTEX_DISPLACEMENT)
-			* shore_fade;
+	// 言波不做几何位移（曾 *detail 保留近场）：水面 quad 是 greedy
+	// 大方块，对角三角分割让位移后的两三角面法线撕裂——近处被高
+	// 频波纹掩盖，波纹衰减带处只剩系统性三角明暗=俯瞰辐射状大三角
+	// 拼图（空中看海实机复现）。波纹立体感由 fragment 逐像素法线
+	// 承担（无三角形问题）；顶点位移只留近场涟漪（32 格窗口低频环波）
+	float displacement = ripple_height(world_pos.xz)
+			* RIPPLE_VERTEX_DISPLACEMENT * shore_fade;
 	VERTEX.y += clamp(displacement, -0.16, 0.56);
 }
 

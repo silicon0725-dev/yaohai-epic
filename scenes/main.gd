@@ -341,6 +341,10 @@ const NIGHT_SKY_TOP := Color(0.012, 0.02, 0.055)
 const NIGHT_SKY_HORIZON := Color(0.045, 0.06, 0.11)
 const DAY_AMBIENT := Color(0.29, 0.41, 0.61)
 const NIGHT_AMBIENT := Color(0.16, 0.19, 0.30)
+# 远景雾色（BSL 大气透视取向）：昼=偏天蓝，夜=深蓝黑（雾色不随
+# 环境自动变化——恒亮雾让夜里远景整片发亮，实机反馈）
+const DAY_FOG := Color(0.62, 0.74, 0.90)
+const NIGHT_FOG := Color(0.05, 0.07, 0.13)
 var _time_of_day := 0.1  # 起始上午
 var _sun: DirectionalLight3D
 
@@ -390,6 +394,13 @@ func _update_day_night(delta: float) -> void:
 		if mat is ShaderMaterial:
 			mat.set_shader_parameter("u_day", u_day)
 	tree_manager.set_day_factor(u_day)
+	# 远景壳同款 u_day（夜里压暗——恒亮壳在夜里"自发光"，实机反馈）；
+	# 深度雾色也随昼夜（恒亮蓝白雾会让夜里远景整片发亮）
+	if distant_shell != null:
+		distant_shell.set_day_factor(u_day)
+	if _environment != null:
+		_environment.fog_light_color = DAY_FOG.lerp(
+				NIGHT_FOG, 1.0 - day01)
 	if sound_manager != null:
 		sound_manager.set_day01(day01)
 	# 水面反射的太阳方向（day/night 方位不同，随光重发）
@@ -560,7 +571,7 @@ func _setup_environment() -> void:
 			* config.chunk_size) * 0.92
 	environment.fog_enabled = true
 	environment.fog_mode = Environment.FOG_MODE_DEPTH
-	environment.fog_light_color = Color(0.62, 0.74, 0.90)
+	environment.fog_light_color = DAY_FOG
 	environment.fog_sun_scatter = 0.25
 	environment.fog_sky_affect = 0.0
 	environment.fog_depth_begin = view_end * 0.72

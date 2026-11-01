@@ -11,6 +11,7 @@
 extends Node
 
 const Bridge := preload("res://meshing/native_terrain_bridge.gd")
+const ShellShader := preload("res://presentation/distant_shell.gdshader")
 
 ## 玩家跨多少格才重建（壳中心跟随步进）。
 const REBUILD_STEP := 64
@@ -19,6 +20,7 @@ const SHELL_RADIUS := 4096.0
 
 var _native = null
 var _mesh_instance: MeshInstance3D
+var _material: ShaderMaterial
 var _focus: Node3D = null
 var _center := Vector2i(0x7FFFFFFF, 0x7FFFFFFF)  # 未建标记
 var _building := false
@@ -39,11 +41,12 @@ func setup(p_world, p_player: Node3D, p_environment) -> void:
 		return
 	_focus = p_player
 
-	var material := StandardMaterial3D.new()
-	# 光照已烘进顶点色（C# grid 差分法线 × 太阳方向）——UNSHADED
-	# 跳过场景灯/阴影计算；深度雾对 unshaded 材质仍生效
-	material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	material.vertex_color_use_as_albedo = true
+	# ShaderMaterial（u_day 联动）：光照烘在顶点色（C# grid 差分
+	# 法线 × 太阳方向），UNSHADED 跳过场景灯；u_day 由 main 日夜轮
+	# 下发（夜里压暗——StandardMaterial 恒亮会在夜里"自发光"）
+	var material := ShaderMaterial.new()
+	material.shader = ShellShader
+	_material = material
 
 	_mesh_instance = MeshInstance3D.new()
 	_mesh_instance.material_override = material
@@ -69,6 +72,12 @@ func _find_camera(player: Node3D):
 		if child is Camera3D:
 			return child
 	return null
+
+
+## 日夜因子下发（main._update_day_night 每帧调；树管理器同款接口）。
+func set_day_factor(v: float) -> void:
+	if _material != null:
+		_material.set_shader_parameter("u_day", v)
 
 
 func _exit_tree() -> void:

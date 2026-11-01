@@ -69,6 +69,17 @@ static func get_native(world_seed: int, world_height_blocks: int = 64):
 	return _native_by_seed[world_seed]
 
 
+## 列足迹（外扩一格）地表高度区间 (minH, maxH)——v9 垂直流式加载带
+## 依据。主线程调用（静态字典读写）；不可用返回 (1, 0)（min>max 哨兵，
+## 调用方走 GD 回退）。
+static func column_surface_range(world_seed: int, world_height_blocks: int,
+		col: Vector2i, chunk_size: int) -> Vector2i:
+	var native = get_native(world_seed, world_height_blocks)
+	if native == null:
+		return Vector2i(1, 0)
+	return native.ColumnSurfaceRange(col.x, col.y, chunk_size)
+
+
 ## 生成区块（C#）。返回 { ids, heights, sandy, rocky }；空字典 = 不可用。
 ## profiles 覆盖本区块 16×16 列；±TREE_REACH 界外列由调用方回退
 ## column_profile（每树 1-2 次，成本低）。

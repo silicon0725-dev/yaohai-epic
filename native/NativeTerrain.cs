@@ -416,6 +416,28 @@ public partial class NativeTerrain : RefCounted
         return Variant.CreateFrom(result);
     }
 
+    /// 列足迹地表高度区间（v9 垂直流式加载带的依据）：(s+2)² 外扩
+    /// 一格——悬崖恰在列边界时，崖壁属于高列方块却面向低列，外圈
+    /// 把低列高度纳入高列区间，保证崖壁所在层被加载（否则崖壁中段
+    /// 不加载=悬崖开洞）。返回 (minH, maxH)。
+    public Vector2I ColumnSurfaceRange(int chunkX, int chunkZ, int s)
+    {
+        int minH = int.MaxValue;
+        int maxH = int.MinValue;
+        int ox = chunkX * s - 1;
+        int oz = chunkZ * s - 1;
+        for (int z = 0; z < s + 2; z++)
+        {
+            for (int x = 0; x < s + 2; x++)
+            {
+                var (h, _, _) = ColumnProfile(ox + x, oz + z);
+                if (h < minH) minH = h;
+                if (h > maxH) maxH = h;
+            }
+        }
+        return new Vector2I(minH, maxH);
+    }
+
     // ---- 远景山壳（Voxy LOD 金字塔思想的纯函数特化）----
     // 无烘焙/无存储：壳数据 = ColumnProfile 直接查询。四环极坐标
     // 金字塔（步长 4/8/16/32 格）统一 SEGMENTS 扇区数——相邻环带

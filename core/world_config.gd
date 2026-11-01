@@ -9,7 +9,11 @@ extends RefCounted
 var chunk_size := 16
 var world_seed := 1337
 
-## 垂直区块数（世界高度 = chunks_y * chunk_size）。
+## 垂直区块数（世界高度 = chunks_y * chunk_size）。默认 3（48 高，
+## 老存档/测试语义）；新世界由 main.gd NEW_WORLD_CHUNKS_Y 设 32
+##（512 格——v8 大陆尺度需要真实垂直体积，48 高的压扁比让远山
+## 成为"平面"）。垂直流式见 chunk_manager（活跃带 = 地表带 ∪
+## 碰撞圈玩家带，非全层加载）。
 var chunks_y := 3
 
 

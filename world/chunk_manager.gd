@@ -18,6 +18,9 @@
 class_name ChunkManager
 extends Node
 
+## C# 地形桥（垂直流式的列地表区间；preload 避开类缓存坑）
+const NativeTerrainBridge := preload("res://meshing/native_terrain_bridge.gd")
+
 ## 视距（水平，区块半径）。setter 清空列排序缓存——_update_streaming
 ## 只在焦点移动/视线偏转时重建列表，运行时改视距（设置菜单/调试
 ## 探针）不重算就永远不扩圈
@@ -187,10 +190,12 @@ func is_idle() -> bool:
 	return true
 
 
-## 同步加载一列区块（出生点保底，防止玩家在流式就绪前坠落）。
-## 优先级：内存兜底 > 磁盘存档 > 重新生成。
+## 同步加载一列的活跃带（出生点保底，防止玩家在流式就绪前坠落）。
+## 优先级：内存兜底 > 磁盘存档 > 重新生成。带内自上而下（光照下界
+## 起算依赖"上方邻块缺失=带顶天空"——见 init_chunk_light）。
 func load_column_now(column: Vector2i) -> void:
-	for y in world.config.chunks_y:
+	var band := column_band(column)
+	for y in range(band.y, band.x - 1, -1):
 		var coord := Vector3i(column.x, y, column.y)
 		if world.has_chunk(coord):
 			continue
@@ -206,7 +211,7 @@ func load_column_now(column: Vector2i) -> void:
 		renderer.register_chunk(coord)
 	# 光照初始化（列内逐块：先入列的就绪块作为后续块的种子来源，
 	# 再统一 on_chunk_ready 做跨块播出；dormant 恢复块光照可能过期，同样重算）
-	for y in world.config.chunks_y:
+	for y in range(band.y, band.x - 1, -1):
 		var coord := Vector3i(column.x, y, column.y)
 		var chunk_l: ChunkData = world.get_chunk(coord)
 		if chunk_l != null and light_init_cb.is_valid():
@@ -214,7 +219,7 @@ func load_column_now(column: Vector2i) -> void:
 			if on_chunk_data_ready_cb.is_valid():
 				on_chunk_data_ready_cb.call(chunk_l)
 	# 纵向邻居全部就绪后再统一构建网格，避免列内互相触发重建
-	for y in world.config.chunks_y:
+	for y in range(band.y, band.x - 1, -1):
 		var coord := Vector3i(column.x, y, column.y)
 		var chunk: ChunkData = world.get_chunk(coord)
 		if chunk == null or not chunk.mesh_dirty:
@@ -230,13 +235,13 @@ func load_column_now(column: Vector2i) -> void:
 		chunk.mesh_dirty = false
 		chunk.collision_dirty = false
 		chunk.state = ChunkState.State.ACTIVE
-	# 激活回调（树引用等）：_commit_mesh 路径在首次提交时调，本同步
-	# 路径曾漏调——出生列树实体不建，区块内树"隐形"直到任意重网格
-	#（审查发现）。树回调内部自带 y==0 过滤
-	if on_chunk_active_cb.is_valid():
-		on_chunk_active_cb.call(Vector3i(column.x, 0, column.y))
+		# 激活回调（树按列计数等）：_commit_mesh 路径首次提交时逐块调，
+		# 本同步路径曾漏调——出生列树实体不建、区块内树"隐形"直到任意
+		# 重网格（审查发现）。逐块调用与异步路径对齐（树系统按列计数）
+		if on_chunk_active_cb.is_valid():
+			on_chunk_active_cb.call(coord)
 	# 已存在的水平邻居需要用本列的真实边界数据重建
-	for y in world.config.chunks_y:
+	for y in range(band.y, band.x - 1, -1):
 		_mark_neighbors_dirty(Vector3i(column.x, y, column.y), true)
 
 
@@ -284,15 +289,30 @@ static func priority_score(
 
 func _update_streaming() -> void:
 	var center := _focus_column()
+	var layer := _focus_chunk_y()
 	var center_moved := center != _stream_center
-	if center_moved:
-		# 1) 卸载（.keys() 取副本，避免遍历中修改）。焦点列未变时
-		# 跳过——新增区块全部来自视距内的任务提交，不会触发卸载
+	var layer_moved := layer != _stream_layer
+	if center_moved or layer_moved:
+		# 1) 卸载（.keys() 取副本，避免遍历中修改）：水平出视距 + 垂直
+		# 出活跃带（v9；带随玩家层伸缩，含滞回）。焦点未变时跳过——
+		# 新增区块全部来自带内任务提交，不会触发卸载
 		for coord in world.chunks.keys():
-			if should_unload_column(coord, center, view_distance, unload_padding):
+			if should_unload_column(coord, center, view_distance, unload_padding) \
+					or _outside_band(coord):
 				_unload_chunk(coord)
-		_stream_center = center
-		_ensure_collision_ring(center)
+		if center_moved:
+			_stream_center = center
+			_ensure_collision_ring(center)
+			_prune_band_cache(center)
+		_stream_layer = layer
+		_stream_cursor = 0  # 带变化：完整列可能重新缺层
+		# 带扩展新含入的 DATA_READY 缓冲层补网格（曾在 gate 中清了
+		# 脏标记，无其他触发源）
+		for coord in world.chunks:
+			var bchunk: ChunkData = world.chunks[coord]
+			if bchunk.state == ChunkState.State.DATA_READY \
+					and _in_band(coord):
+				bchunk.mesh_dirty = true
 	# 2) 列排序缓存：焦点列变化或视线偏转 >~30° 才重建（cos 阈值）
 	var view_dir := _view_direction()
 	if center_moved or _sorted_columns.is_empty() \
@@ -306,31 +326,57 @@ func _update_streaming() -> void:
 		_sorted_columns = columns
 		_stream_dir = view_dir
 		_stream_cursor = 0
-	# 3) 补缺（游标推进：已完整列永久跳过，in_flight 满则停在缺口处）
-	var size_y: int = world.config.chunks_y
-	while _stream_cursor < _sorted_columns.size() \
+	# 3) 补缺：每列自上而下，下层只在上层已就绪时入队（光照下界起算
+	# 要求入队快照里上方邻块存在——"上方缺失"恒等于带顶天空）。
+	# 列可能在等上层，故跨列扫描（窗口限每帧工作量）；游标只越过
+	# 前缀完整列
+	var idx := _stream_cursor
+	var scanned := 0
+	var prefix_complete := true
+	while idx < _sorted_columns.size() and scanned < SCAN_WINDOW \
 			and in_flight_count() < max_in_flight:
-		var column: Vector2i = _sorted_columns[_stream_cursor]
-		var all_present := true
-		for y in size_y:
-			var coord := Vector3i(column.x, y, column.y)
-			if world.has_chunk(coord) or _gen_by_coord.has(coord):
-				continue
-			all_present = false
-			if _dormant.has(coord):
-				var rchunk: ChunkData = _restore_dormant(coord)
-				renderer.register_chunk(coord)
-				_mark_neighbors_dirty(coord)
-				# 休眠期间光照可能过期（增量未达未加载块），恢复即重算
-				if light_init_cb.is_valid():
-					light_init_cb.call(rchunk, _collect_light_neighbors(coord))
-				if on_chunk_data_ready_cb.is_valid():
-					on_chunk_data_ready_cb.call(rchunk)
-			else:
-				# 磁盘存档由生成任务在工作线程内优先读取（见 _generate_job）
-				_enqueue_generation(coord)
-		if all_present:
-			_stream_cursor += 1
+		var complete := _fill_column(_sorted_columns[idx])
+		if complete and prefix_complete:
+			_stream_cursor = idx + 1
+		else:
+			prefix_complete = false
+		idx += 1
+		scanned += 1
+
+
+## 列补缺一步：自带顶向下找首个缺失层，在途则等，否则入队（休眠
+## 恢复/生成）。返回整列带内是否齐全。
+func _fill_column(column: Vector2i) -> bool:
+	var band := column_band(column)
+	for y in range(band.y, band.x - 1, -1):
+		var coord := Vector3i(column.x, y, column.y)
+		if world.has_chunk(coord):
+			continue
+		if _gen_by_coord.has(coord):
+			return false  # 在途：下层须等它就绪
+		if _dormant.has(coord):
+			var rchunk: ChunkData = _restore_dormant(coord)
+			renderer.register_chunk(coord)
+			_mark_neighbors_dirty(coord)
+			# 休眠期间光照可能过期（增量未达未加载块），恢复即重算
+			if light_init_cb.is_valid():
+				light_init_cb.call(rchunk, _collect_light_neighbors(coord))
+			if on_chunk_data_ready_cb.is_valid():
+				on_chunk_data_ready_cb.call(rchunk)
+			continue  # 同步就绪：可继续向下
+		# 磁盘存档由生成任务在工作线程内优先读取（见 _generate_job）
+		_enqueue_generation(coord)
+		return false
+	return true
+
+
+## 地表带缓存修剪：离开视距+缓冲的列丢弃（防长途跋涉缓存无界增长）。
+func _prune_band_cache(center: Vector2i) -> void:
+	var limit := view_distance + unload_padding + 2
+	var lim2 := limit * limit
+	for col in _surface_bands.keys():
+		if (col as Vector2i).distance_squared_to(center) > lim2:
+			_surface_bands.erase(col)
 
 
 ## 玩家跨列后：把新进入碰撞圈的已激活区块标脏补建碰撞（初建时
@@ -433,7 +479,11 @@ func _commit_generation(job: Dictionary) -> bool:
 	job["result"] = null
 	if chunk == null:
 		return false
-	if not _is_wanted(coord) or world.has_chunk(coord):
+	# 提交期用带+pad 宽判（与卸载一致）——曾用 _is_wanted 严格带判：
+	# 玩家层波动让刚生成的 pad 缓冲层在此被丢弃，state 卡 DATA_READY
+	# 且 mesh 永不建立（实测 512 世界单区块无限重入队、is_idle 恒 false）
+	if not _is_wanted(coord) or _outside_band(coord) \
+			or world.has_chunk(coord):
 		return false  # 过期任务：不再需要或已被替代，丢弃
 	chunk.state = ChunkState.State.DATA_READY
 	world.add_chunk(chunk)
@@ -447,6 +497,16 @@ func _commit_generation(job: Dictionary) -> bool:
 func _enqueue_mesh(coord: Vector3i) -> void:
 	var chunk: ChunkData = world.get_chunk(coord)
 	if chunk == null:
+		return
+	# v9 垂直缓冲层（带外 pad 内）只保数据不网格化：这些层的水平
+	# 邻按各自列带取舍大量缺失，网格化=邻居全无的孤儿（还会被带
+	# 波动反复标脏——实测单区块 6000+ 轮重网格风暴）。清脏标记
+	#（数据就绪即安定，is_idle 语义成立）；玩家层变化使带含它时
+	# 由 layer_moved 分支补标脏构建
+	if not _in_band(coord):
+		chunk.mesh_dirty = false
+		chunk.collision_dirty = false
+		chunk.state = ChunkState.State.DATA_READY
 		return
 	var neighbors := world.collect_neighbors(coord)
 	var serials := []
@@ -496,8 +556,16 @@ func _commit_mesh(job: Dictionary) -> bool:
 	var mesh_arrays: Dictionary = job["result"]
 	job["result"] = null
 	var chunk: ChunkData = world.get_chunk(coord)
-	if chunk == null or not _is_wanted(coord):
-		return false  # 已卸载或不再需要
+	if chunk == null or _outside_band(coord):
+		return false  # 已卸载/带外超 pad：不再需要（卸载即将发生）
+	if not _is_wanted(coord):
+		# 水平出视距。仍在卸载缓冲内（padding>0）的区块不会被卸载、
+		# 也无重排源——补回 mesh_dirty 触发重排，否则网格缺失卡
+		# MESH_QUEUED（_enqueue_mesh 已清标记）
+		if not should_unload_column(coord, _focus_column(),
+				view_distance, unload_padding):
+			chunk.mesh_dirty = true
+		return false
 	if chunk.mesh_dirty:
 		return false  # 任务期间又被修改：丢弃，脏标记会触发重新排队
 	# 面邻居数据序号比对（§4.4 过期任务检查）：任一变化即丢弃。
@@ -584,8 +652,97 @@ func _is_wanted(coord: Vector3i) -> bool:
 	if not world.config.in_chunk_bounds(coord):
 		return false
 	var center := _focus_column()
-	return Vector2i(coord.x, coord.z).distance_squared_to(center) \
-			<= view_distance * view_distance
+	var col := Vector2i(coord.x, coord.z)
+	if col.distance_squared_to(center) > view_distance * view_distance:
+		return false
+	var band := column_band(col)
+	return coord.y >= band.x and coord.y <= band.y
+
+
+# ---- v9 垂直流式（Cubic Chunks / Minetest 思路）----
+## chunks_y 不超过此值的世界整列加载（48 高老世界/测试语义不变）。
+const LEGACY_FULL_COLUMN_LAYERS := 4
+## 地表带下沿：列足迹最低地表再往下多少格（洞口/浅挖）。
+const BAND_BELOW_BLOCKS := 16
+## 地表带上沿：max(最高地表, 海平面) 再往上多少格（树高 ≤20）。
+const BAND_ABOVE_BLOCKS := 24
+## 玩家带：碰撞圈内列额外保证玩家所在层 ±N（挖掘/飞行/建造）。
+const PLAYER_BAND := 2
+## 垂直卸载滞回（带外再多 N 层才卸，防层边界来回横跳）。
+const V_UNLOAD_PAD := 1
+## 每帧补缺扫描的列数上限（列可能在等上层就绪，需跨列推进）。
+const SCAN_WINDOW := 96
+
+var _surface_bands := {}  # Vector2i 列 -> Vector2i(min_layer, max_layer)
+var _stream_layer := -2147483648
+
+
+## 列的垂直活跃带（含两端的 chunk 层索引）：地表带 ∪ 碰撞圈内玩家带，
+## 连续区间——光照自上而下初始化要求带内无空洞。
+func column_band(col: Vector2i) -> Vector2i:
+	var cy: int = world.config.chunks_y
+	if cy <= LEGACY_FULL_COLUMN_LAYERS:
+		return Vector2i(0, cy - 1)
+	var band := _surface_band(col)
+	if col.distance_squared_to(_focus_column()) \
+			<= collision_radius * collision_radius:
+		var py := _focus_chunk_y()
+		band = Vector2i(mini(band.x, py - PLAYER_BAND),
+				maxi(band.y, py + PLAYER_BAND))
+	return Vector2i(clampi(band.x, 0, cy - 1), clampi(band.y, 0, cy - 1))
+
+
+## 地表带（缓存）：C# 精确算列足迹（外扩一格）地表区间；无 C# 时
+## 回退 GD 逐列 profile（慢，仅兜底）。
+func _surface_band(col: Vector2i) -> Vector2i:
+	if _surface_bands.has(col):
+		return _surface_bands[col]
+	var s: int = world.config.chunk_size
+	var r: Vector2i = NativeTerrainBridge.column_surface_range(
+			world.config.world_seed, world.config.world_height_blocks(),
+			col, s)
+	if r.x > r.y:
+		# C# 不可用：GD 回退（外扩一格同语义）
+		r = Vector2i(2147483647, -2147483648)
+		for dz in range(-1, s + 1):
+			for dx in range(-1, s + 1):
+				var h := generator.column_height(col.x * s + dx, col.y * s + dz)
+				r = Vector2i(mini(r.x, h), maxi(r.y, h))
+	var lo := r.x - BAND_BELOW_BLOCKS
+	var hi := maxi(r.y, generator.sea_level) + BAND_ABOVE_BLOCKS
+	var band := Vector2i(VoxelCoords.floordiv(lo, s), VoxelCoords.floordiv(hi, s))
+	_surface_bands[col] = band
+	return band
+
+
+func _focus_chunk_y() -> int:
+	var y := focus.global_position.y if focus != null else 0.0
+	return VoxelCoords.floordiv(int(floor(y)), world.config.chunk_size)
+
+
+## 区块是否在其列活跃带内（严格，不含 pad——网格化资格判据）。
+func _in_band(coord: Vector3i) -> bool:
+	if world.config.chunks_y <= LEGACY_FULL_COLUMN_LAYERS:
+		return true
+	var band := column_band(Vector2i(coord.x, coord.z))
+	return coord.y >= band.x and coord.y <= band.y
+
+
+## 区块是否在其列活跃带外（含滞回）——垂直卸载判据。
+func _outside_band(coord: Vector3i) -> bool:
+	if world.config.chunks_y <= LEGACY_FULL_COLUMN_LAYERS:
+		return false
+	var band := column_band(Vector2i(coord.x, coord.z))
+	return coord.y < band.x - V_UNLOAD_PAD or coord.y > band.y + V_UNLOAD_PAD
+
+
+## 垂直带估算的区块总数（加载进度条分母）。
+func estimate_band_chunks(columns: Array[Vector2i]) -> int:
+	var total := 0
+	for col in columns:
+		var band := column_band(col)
+		total += band.y - band.x + 1
+	return maxi(1, total)
 
 
 func _focus_column() -> Vector2i:

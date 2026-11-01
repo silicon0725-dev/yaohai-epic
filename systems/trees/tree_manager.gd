@@ -24,6 +24,10 @@ var species: TreeSpecies
 var _cell_lookup := {}
 ## tree_id -> {instance, mesh_node, body, refs, cuts_applied}
 var _trees := {}
+## v9 按列计数生命周期：已计数的活跃区块（防同步/异步两路重复计数）
+## 与每列活跃区块数（归零才回收根列在本列的树）
+var _active_chunks := {}  # Vector3i -> true
+var _col_active := {}     # Vector2i -> int
 ## 活动倒树：RigidBody3D -> {cells: int, tree_origin, timer, settled}
 var _falling := {}
 ## 砍伐事件流（存档）：按发生顺序
@@ -97,16 +101,22 @@ func _mark_light_dirty(pos: Vector3i, old_id: int, new_id: int) -> void:
 
 # ---- 生命周期（chunk_manager 钩子驱动） ----
 
-## chunk ACTIVE 时：影响范围覆盖此 chunk 的树引用 +1。
+## chunk ACTIVE 时：相交树光照标脏；列内首个区块激活时撒树。
+## v9 按列计数（垂直流式：列的活跃层随加载带伸缩，y==0 多半不
+## 加载——曾按 y==0 回收，带内的树永不回收=泄漏）。只扫本列根列
+## （树 mesh/碰撞是独立实体不受区块边界影响；跨区块占位由
+## terrain_generator 的重放机制写入区块数据）。±TREE_REACH 扫描曾
+## 导致每树被 ~25 个 chunk 重复建、视距内爆出 1221 棵。
 func on_chunk_active(chunk_coord: Vector3i) -> void:
 	_mark_intersecting_dirty(chunk_coord)
-	# 只扫本 chunk 自身列（根列在本 chunk 的树归此 chunk 管理——
-	# 树的 mesh/碰撞是独立实体不受区块边界影响；跨区块占位由
-	# terrain_generator 的重放机制写入区块数据）。±TREE_REACH
-	# 扫描曾导致每树被 ~25 个 chunk 重复建、视距内爆出 1221 棵。
-	# 只处理 y=0 层（树根在地表层，y 层 chunk 不重复建树）。
-	if chunk_coord.y != 0:
+	if _active_chunks.has(chunk_coord):
 		return
+	_active_chunks[chunk_coord] = true
+	var col := Vector2i(chunk_coord.x, chunk_coord.z)
+	var n: int = int(_col_active.get(col, 0)) + 1
+	_col_active[col] = n
+	if n == 1:
+		_scan_column_trees(col)
 
 
 ## 新激活区块补齐了树网格烘焙时可能缺失的邻块光照（重进存档/
@@ -122,9 +132,13 @@ func _mark_intersecting_dirty(chunk_coord: Vector3i) -> void:
 		var aabb: AABB = _trees[tid]["aabb"]
 		if aabb.intersects(cbox):
 			_light_dirty[tid] = true
+
+
+## 本列 16×16 根列撒树（确定性重建，_ref_tree 内做地形合法性判定）。
+func _scan_column_trees(col: Vector2i) -> void:
 	var size := world.config.chunk_size
-	var ox := chunk_coord.x * size
-	var oz := chunk_coord.z * size
+	var ox := col.x * size
+	var oz := col.y * size
 	for wx in range(ox, ox + size):
 		for wz in range(oz, oz + size):
 			if TreeGenerator.has_tree_at(world.config.world_seed,
@@ -132,18 +146,25 @@ func _mark_intersecting_dirty(chunk_coord: Vector3i) -> void:
 				_ref_tree(Vector2i(wx, wz))
 
 
-## chunk 卸载时：引用 -1，归零销毁实体。
+## chunk 卸载时：列内最后一个活跃区块卸载才回收根列在本列的树。
 func on_chunk_unloaded(chunk_coord: Vector3i) -> void:
-	if chunk_coord.y != 0:
+	if not _active_chunks.has(chunk_coord):
+		return  # 未激活即卸载（仅 DATA_READY）：未计数
+	_active_chunks.erase(chunk_coord)
+	var col := Vector2i(chunk_coord.x, chunk_coord.z)
+	var n: int = int(_col_active.get(col, 1)) - 1
+	if n > 0:
+		_col_active[col] = n
 		return
-	# 只减根列在本 chunk 的树（与 on_chunk_active 对称）
+	_col_active.erase(col)
 	var size := world.config.chunk_size
-	var ox := chunk_coord.x * size
-	var oz := chunk_coord.z * size
+	var ox := col.x * size
+	var oz := col.y * size
 	for tree_id in _trees.keys():
 		var entry: Dictionary = _trees[tree_id]
 		var origin: Vector3i = entry["instance"].origin
-		if origin.x >= ox and origin.x < ox + size 				and origin.z >= oz and origin.z < oz + size:
+		if origin.x >= ox and origin.x < ox + size \
+				and origin.z >= oz and origin.z < oz + size:
 			_destroy_tree(tree_id)
 
 

@@ -737,10 +737,15 @@ public partial class NativeMesher : RefCounted
     /// 返回新 light 数组；跨块播出由 GDScript 主线程路径负责。
     /// neighborLights：6 面邻块 light（顺序 +x,-x,+y,-y,+z,-z），
     /// exists=0 的项忽略。opacity/emission 表由桥注入（数值 ID 索引）。
+    /// skyAbove：本块正上方确为天空（世界顶层/垂直加载带顶）时才做
+    /// 列直射 15 起算；否则从 0 起算（下界估计），由上方邻块边界播入
+    /// 补齐——曾无条件 15 起算，深埋于区块顶层的洞穴格被灌满天光
+    ///（合成探针实锤：上方邻块全实心仍得 sky=15）。
     public Variant InitChunkLight(
         int s,
         Variant blockIdsV, Variant opacityV, Variant emissionV,
-        Variant neighborLightsV, Variant neighborExistsV)
+        Variant neighborLightsV, Variant neighborExistsV,
+        bool skyAbove)
     {
         int[] ids = blockIdsV.AsInt32Array();
         byte[] opacity = (byte[])opacityV;
@@ -751,6 +756,8 @@ public partial class NativeMesher : RefCounted
         byte[] light = new byte[s * s * s];
 
         // 1) 列直射天光：每列自顶向下，opacity 0 保持、逐层衰减、实心断链
+        //    （仅 skyAbove；否则直射由上方邻块面播入 feedDown 规则延续）
+        if (skyAbove)
         for (int z = 0; z < s; z++)
         for (int x = 0; x < s; x++)
         {

@@ -46,14 +46,21 @@ func setup(p_world: VoxelWorld) -> void:
 ## neighbors：主线程快照的 6 面邻块引用，顺序同 DIRS
 ##（+x,-x,+y,-y,+z,-z），缺失为 null。可重复调用 = 重置重算。
 ## C# 优先（真实地形 GD p50 23ms / C# ~1ms 级），GD 为回退与等价真值。
+## 列直射天光仅当上方邻块缺失（世界顶/垂直加载带顶——头上确为
+## 天空）时从 15 起算；上方存在时从 0 起算、由其边界播入补齐
+##（曾无条件 15 起算：深埋于区块顶层的洞穴格被灌满天光，合成
+## 探针实锤上方全实心仍 sky=15）。chunk_manager 保证列内自上而下
+## 入队，故"上方缺失"在游戏路径中恒等于"带顶"。
 func init_chunk_light(chunk: ChunkData, neighbors: Array) -> void:
-	if _init_chunk_light_native(chunk, neighbors):
+	var sky_above: bool = neighbors[2] == null
+	if _init_chunk_light_native(chunk, neighbors, sky_above):
 		return
-	_init_chunk_light_gd(chunk, neighbors)
+	_init_chunk_light_gd(chunk, neighbors, sky_above)
 
 
 ## C# InitChunkLight：返回 true 表示已写入 chunk.light。
-func _init_chunk_light_native(chunk: ChunkData, neighbors: Array) -> bool:
+func _init_chunk_light_native(chunk: ChunkData, neighbors: Array,
+		sky_above := true) -> bool:
 	if not NativeMeshBridge.available():
 		return false
 	var s := chunk.dimensions.x
@@ -71,19 +78,21 @@ func _init_chunk_light_native(chunk: ChunkData, neighbors: Array) -> bool:
 			s, chunk.block_ids,
 			PackedByteArray(VoxelTypes.LIGHT_OPACITY),
 			PackedByteArray(VoxelTypes.LIGHT_EMISSION),
-			nlights, nexists)
+			nlights, nexists, sky_above)
 	if result == null:
 		return false
 	chunk.light = result
 	return true
 
 
-func _init_chunk_light_gd(chunk: ChunkData, neighbors: Array) -> void:
+func _init_chunk_light_gd(chunk: ChunkData, neighbors: Array,
+		sky_above := true) -> void:
 	var dims := chunk.dimensions
 	chunk.light.fill(0)
 	# 1) 列直射天光：每列自顶向下；opacity 0 保持（15 不衰减直落），
-	#    0<op<15 逐层衰减，实心（op>=15）后下方全 0（break）
-	for z in dims.z:
+	#    0<op<15 逐层衰减，实心（op>=15）后下方全 0（break）。
+	#    仅 sky_above（上方确为天空）；否则由上方邻块面播入延续
+	for z in (dims.z if sky_above else 0):
 		for x in dims.x:
 			var level := MAX_LEVEL
 			for y in range(dims.y - 1, -1, -1):
@@ -289,7 +298,7 @@ func _on_block_changed(pos: Vector3i, old_id: int, new_id: int) -> void:
 		var six := []
 		for d in DIRS:
 			six.append(_chunk_at(chunk.chunk_coord + d))
-		if _init_chunk_light_native(chunk, six) \
+		if _init_chunk_light_native(chunk, six, six[2] == null) \
 				and chunk.light != before_light:
 			chunk.mesh_dirty = true
 	else:

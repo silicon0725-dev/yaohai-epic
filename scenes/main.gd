@@ -8,6 +8,8 @@ const PLAYER_SCENE := preload("res://player/player.tscn")
 const NativeTerrainBridgeRef := preload("res://meshing/native_terrain_bridge.gd")
 
 const WORLD_SEED := 1337
+## 新世界的垂直区块数（512 格高；老存档由 meta 恢复其原值）。
+const NEW_WORLD_CHUNKS_Y := 32
 ## 默认存档目录（集成检查可改写 save_root 隔离）。
 const DEFAULT_SAVE_ROOT := "user://saves/world1"
 ## 默认出生点（世界方块坐标，仅新世界使用；老世界用存档位置）。
@@ -86,6 +88,7 @@ func _ready() -> void:
 	var meta := save_system.load_meta()
 	if meta.is_empty():
 		config.world_seed = WORLD_SEED
+		config.chunks_y = NEW_WORLD_CHUNKS_Y
 	else:
 		config.world_seed = int(meta.get("world_seed", WORLD_SEED))
 		var saved_config: Dictionary = meta.get("world_config", {})
@@ -243,7 +246,11 @@ func _begin_loading() -> void:
 					int(player.global_position.z), config.chunk_size))
 	var columns := ChunkManager.desired_columns(
 			spawn_col, chunk_manager.view_distance)
-	_loading_target = maxi(1, columns.size() * config.chunks_y)
+	# v9 垂直流式：进度分母按列活跃带估算（512 世界非 32 层全载；
+	# estimate 内部含玩家带并做了带缓存预热）
+	_loading_target = chunk_manager.estimate_band_chunks(columns) \
+			if config.chunks_y > ChunkManager.LEGACY_FULL_COLUMN_LAYERS \
+			else maxi(1, columns.size() * config.chunks_y)
 	_saved_budgets = {
 		"gen": chunk_manager.gen_commit_budget,
 		"mesh": chunk_manager.mesh_commit_budget,

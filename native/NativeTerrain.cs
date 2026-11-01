@@ -438,152 +438,253 @@ public partial class NativeTerrain : RefCounted
         return new Vector2I(minH, maxH);
     }
 
-    // ---- 远景山壳（Voxy LOD 金字塔思想的纯函数特化）----
-    // 无烘焙/无存储：壳数据 = ColumnProfile 直接查询。四环极坐标
-    // 金字塔（步长 4/8/16/32 格）统一 SEGMENTS 扇区数——相邻环带
-    // 边界行顶点 XZ 完全重合（同 θ 同 r），天然无缝；壳整体下沉
-    // SHELL_SUNKEN 格且内缘在视距圈内侧（0.9×），chunk 网格从上方
-    // 覆盖交界（256 格处 ~1px 的悬崖线，不可见）。
-    // 光照：太阳漫反射烘进顶点色（grid 邻差法线，零额外采样），
-    // 材质 UNSHADED——日夜时远景色调不随时间变（静态局限，已知）。
-    private const int ShellSegments = 512;
-    private const double ShellSunkenY = 2.0;
-    // 环表约束：(outer-inner) 必须被 step 整除，且外环 inner == 内环
-    // outer——否则边界行半径错位（环带间裂缝，探针实测 2 格缝的教训）。
-    // 外两环步长 16/32 的"平面贴图感"（用户 debug 线框+实机反馈）
-    // → 细化到 8/16（径向细节 ×2，切向弧长 4096 处 50 格=0.7°视角
-    // ≈1-2px 已足够）：总顶点 ~20 万/40 万三角，构建 0.3s，fps 实测
-    // 与三角形数无关（固定开销主导）
-    private static readonly (double inner, double outer, double step)[]
-        ShellRings =
-        {
-            (240.0, 512.0, 4.0),
-            (512.0, 1024.0, 8.0),
-            (1024.0, 2048.0, 8.0),
-            (2048.0, 4096.0, 16.0),
-        };
-    /// 生成以 (centerX, centerZ) 为中心的远景壳 ArrayMesh（每环一个
-    /// surface = 4 draw call）。线程安全：只读噪声字段。
+    // ---- 远景山壳 v2（方块风 LOD，Distant Horizons 式）----
+    // 用户定调：LOD 必须保持体素语言——每级用更粗的"方块"渲染
+    //（格距 4/8/16/32，垂直量化 S/2），近处方块阶梯、远处大块方
+    // 柱，与 chunk 体素同一视觉语言（平滑高度场网格像"平面贴图"，
+    // 实机否决）。方形环带：各级都是切比雪夫格距 [60,128) 的环
+    //（×S = 240-512 / 480-1024 / 960-2048 / 1920-4096），全局对齐
+    // 网格（格坐标×S=世界坐标，重建不游移）。格高 = 2×2 采样最大
+    // 值向下量化；水=整片环形水面 4 矩形（sea-0.1，消逐格顶面）；
+    // 陆格出顶面 + 侧壁（邻居更低才出，等截面 run 合并），环带内外
+    // 缘裙壁到 y=0 防级间缝。光照沿用 ShaderMaterial：NORMAL 轴
+    // 对齐，太阳漫反射天然给出面向亮度差（参考图效果）。
+    private static readonly int[] ShellLevels = { 4, 8, 16, 32 };
+    private const int ShellRingInner = 60;
+    private const int ShellRingOuter = 128;
+
     public ArrayMesh GenerateShellMesh(int centerX, int centerZ)
     {
         var mesh = new ArrayMesh();
-        foreach (var (inner, outer, step) in ShellRings)
+        foreach (int S in ShellLevels)
         {
-            int rows = (int)Math.Round((outer - inner) / step);
-            int w = ShellSegments;
-            // 高度场（-1 标记海列）：二遍法——先采样，再差分法线烘色
-            var hgrid = new int[rows + 1, w];
-            var rockyG = new bool[rows + 1, w];
-            var sandyG = new bool[rows + 1, w];
-            for (int r = 0; r <= rows; r++)
+            int W = ShellRingOuter * 2;
+            int vs = Math.Max(1, S / 2);
+            int q = Math.Max(1, S / 4);
+            var tops = new int[W * W];
+            var biome = new byte[W * W];   // 0 水 1 草 2 岩 3 沙
+            var tint = new float[W * W];
+            var inRing = new bool[W * W];
+            for (int cz = 0; cz < W; cz++)
+            for (int cx = 0; cx < W; cx++)
             {
-                double radius = inner + r * step;
-                for (int s = 0; s < w; s++)
+                int r = Math.Max(Math.Abs(cx - ShellRingOuter),
+                    Math.Abs(cz - ShellRingOuter));
+                if (r < ShellRingInner || r >= ShellRingOuter)
+                    continue;
+                int ci = cz * W + cx;
+                inRing[ci] = true;
+                int bx = centerX + (cx - ShellRingOuter) * S;
+                int bz = centerZ + (cz - ShellRingOuter) * S;
+                int hMax = int.MinValue;
+                int grass = 0, rock = 0, sand = 0, waterN = 0;
+                for (int sz = 0; sz < 2; sz++)
+                for (int sx = 0; sx < 2; sx++)
                 {
-                    double theta = s * Math.Tau / w;
-                    int wx = centerX + (int)Math.Round(
-                        Math.Cos(theta) * radius);
-                    int wz = centerZ + (int)Math.Round(
-                        Math.Sin(theta) * radius);
-                    var (h, rocky, sandy) = ColumnProfile(wx, wz);
-                    hgrid[r, s] = h;
-                    rockyG[r, s] = rocky;
-                    sandyG[r, s] = sandy;
+                    var (h, isRocky, isSandy) = ColumnProfile(
+                        bx + (sx == 0 ? q : S - 1 - q),
+                        bz + (sz == 0 ? q : S - 1 - q));
+                    if (h > hMax) hMax = h;
+                    if (h <= _seaLevel) waterN++;
+                    else if (isRocky) rock++;
+                    else if (isSandy) sand++;
+                    else grass++;
+                }
+                tint[ci] = (float)_e4.GetNoise2D(bx, bz);
+                if (waterN == 4)
+                {
+                    biome[ci] = 0;
+                    tops[ci] = _seaLevel - 1;
+                }
+                else
+                {
+                    biome[ci] = rock >= sand && rock >= grass ? (byte)2
+                        : sand >= grass ? (byte)3 : (byte)1;
+                    int hq = hMax / vs * vs;
+                    tops[ci] = Math.Max(hq, _seaLevel);
                 }
             }
 
-            int vcount = (rows + 1) * w;
-            var verts = new Vector3[vcount];
-            var norms = new Vector3[vcount];
-            var cols = new Color[vcount];
-            for (int r = 0; r <= rows; r++)
+            var verts = new List<Vector3>();
+            var norms = new List<Vector3>();
+            var cols = new List<Color>();
+            var idxs = new List<int>();
+
+            void PushQuad(Vector3 a, Vector3 b, Vector3 c, Vector3 d,
+                Vector3 n, Color col)
             {
-                double radius = inner + r * step;
-                // θ 向邻顶点真实弧长（法线差分分母）
-                double arc = radius * Math.Tau / w;
-                for (int s = 0; s < w; s++)
+                int v0 = verts.Count;
+                verts.Add(a); verts.Add(b); verts.Add(c); verts.Add(d);
+                norms.Add(n); norms.Add(n); norms.Add(n); norms.Add(n);
+                cols.Add(col); cols.Add(col); cols.Add(col); cols.Add(col);
+                idxs.Add(v0); idxs.Add(v0 + 2); idxs.Add(v0 + 1);
+                idxs.Add(v0 + 1); idxs.Add(v0 + 2); idxs.Add(v0 + 3);
+            }
+
+            Color Base(byte b, float t)
+            {
+                float k = 1.0f + 0.08f * t;
+                switch (b)
                 {
-                    int idx = r * w + s;
-                    double theta = s * Math.Tau / w;
-                    int h = hgrid[r, s];
-                    bool water = h <= _seaLevel;
-                    float y = water
-                        ? _seaLevel - 0.1f
-                        : h - (float)ShellSunkenY;
-                    verts[idx] = new Vector3(
-                        centerX + (float)(Math.Cos(theta) * radius),
-                        y,
-                        centerZ + (float)(Math.Sin(theta) * radius));
-                    // 基色（光照由 shader 用 NORMAL 实时算——太阳方向
-                    // 烘焙死会在黄昏与场景错位成"发光"，两轮实机反馈）：
-                    // 海=去饱和灰蓝（纯饱和蓝远看像灯，真海是天空反射
-                    // 灰蓝）/ 裸岩灰 / 沙 / 草（远景树群地毯感）。
-                    // 同群系内混入 64 格低频扰动（±10%）——纯色大色块
-                    // 是"平面贴图感"的来源之一（用户实机反馈）
-                    float cr, cg, cb;
-                    if (water) { cr = 0.32f; cg = 0.40f; cb = 0.50f; }
-                    else if (rockyG[r, s])
-                        { cr = 0.50f; cg = 0.48f; cb = 0.46f; }
-                    else if (sandyG[r, s])
-                        { cr = 0.72f; cg = 0.66f; cb = 0.49f; }
-                    else { cr = 0.24f; cg = 0.36f; cb = 0.18f; }
-                    if (!water)
-                    {
-                        int wx = (int)Math.Round(
-                            centerX + Math.Cos(theta) * radius);
-                        int wz = (int)Math.Round(
-                            centerZ + Math.Sin(theta) * radius);
-                        float tint = (float)_e4.GetNoise2D(wx, wz);
-                        cr *= 1.0f + 0.10f * tint;
-                        cg *= 1.0f + 0.10f * tint;
-                        cb *= 1.0f + 0.10f * tint;
-                    }
-                    cols[idx] = new Color(cr, cg, cb);
-                    // 法线：grid 邻差（wrap θ；r 端用单侧差分），
-                    // 海列压平为朝上
-                    Vector3 n = Vector3.Up;
-                    if (!water)
-                    {
-                        int hL = hgrid[r, (s + w - 1) % w];
-                        int hR = hgrid[r, (s + 1) % w];
-                        int hIn = hgrid[Math.Max(r - 1, 0), s];
-                        int hOut = hgrid[Math.Min(r + 1, rows), s];
-                        double dhdt = (hR - hL) / (2.0 * arc);
-                        double dhdr = (hOut - hIn) / (2.0 * step);
-                        n = new Vector3(
-                            -(float)dhdt, 1.0f, -(float)dhdr).Normalized();
-                    }
-                    norms[idx] = n;
+                    case 2: return new Color(
+                        0.50f * k, 0.48f * k, 0.46f * k);
+                    case 3: return new Color(
+                        0.72f * k, 0.66f * k, 0.49f * k);
+                    default: return new Color(
+                        0.24f * k, 0.36f * k, 0.18f * k);
                 }
             }
 
-            // 索引：quad × 2 三角，θ 方向 wrap（首尾相接）
-            var indices = new int[rows * w * 6];
-            int t = 0;
-            for (int r = 0; r < rows; r++)
+            // 环形水面：4 矩形框（sea-0.1）——逐格水面是纯开销
+            float wy = _seaLevel - 0.1f;
+            var wcol = new Color(0.32f, 0.40f, 0.50f);
+            float o = ShellRingOuter * (float)S;
+            float i2 = ShellRingInner * (float)S;
+            PushQuad(new Vector3(-o, wy, -o), new Vector3(o, wy, -o),
+                new Vector3(o, wy, -i2), new Vector3(-o, wy, -i2),
+                Vector3.Up, wcol);
+            PushQuad(new Vector3(-o, wy, i2), new Vector3(o, wy, i2),
+                new Vector3(o, wy, o), new Vector3(-o, wy, o),
+                Vector3.Up, wcol);
+            PushQuad(new Vector3(-o, wy, -i2), new Vector3(-i2, wy, -i2),
+                new Vector3(-i2, wy, i2), new Vector3(-o, wy, i2),
+                Vector3.Up, wcol);
+            PushQuad(new Vector3(i2, wy, -i2), new Vector3(o, wy, -i2),
+                new Vector3(o, wy, i2), new Vector3(i2, wy, i2),
+                Vector3.Up, wcol);
+
+            // 陆格顶面
+            for (int cz = 0; cz < W; cz++)
+            for (int cx = 0; cx < W; cx++)
             {
-                for (int s = 0; s < w; s++)
+                int ci = cz * W + cx;
+                if (!inRing[ci] || biome[ci] == 0)
+                    continue;
+                float x0 = centerX + (cx - ShellRingOuter) * (float)S;
+                float z0 = centerZ + (cz - ShellRingOuter) * (float)S;
+                float y = tops[ci];
+                PushQuad(new Vector3(x0, y, z0),
+                    new Vector3(x0 + S, y, z0),
+                    new Vector3(x0, y, z0 + S),
+                    new Vector3(x0 + S, y, z0 + S),
+                    Vector3.Up, Base(biome[ci], tint[ci]));
+            }
+
+            // 侧壁：4 方向；同行等(顶,底,群系) run 合并。环带外缘
+            // 邻居未知 → 裙壁到 y=0（级间缝防护，雾中不可见）
+            int[] dxs = { 1, -1, 0, 0 };
+            int[] dzs = { 0, 0, 1, -1 };
+            for (int dir = 0; dir < 4; dir++)
+            {
+                int dx = dxs[dir], dz = dzs[dir];
+                var n = new Vector3(dx, 0, dz);
+                for (int a = 0; a < W; a++)
                 {
-                    int s2 = (s + 1) % w;
-                    int a = r * w + s;
-                    int b = r * w + s2;
-                    int c = (r + 1) * w + s;
-                    int d = (r + 1) * w + s2;
-                    indices[t++] = a; indices[t++] = c; indices[t++] = b;
-                    indices[t++] = b; indices[t++] = c; indices[t++] = d;
+                    int runStart = -1;
+                    int runTop = 0, runBot = 0;
+                    byte runBiome = 0;
+                    float runX0 = 0, runZ0 = 0;
+                    int runB = 0;
+                    for (int b = 0; b <= W; b++)
+                    {
+                        int cx = dx != 0 ? b : a;
+                        int cz = dz != 0 ? b : a;
+                        int ci = -1;
+                        if (b < W)
+                        {
+                            ci = cz * W + cx;
+                            if (!inRing[ci] || biome[ci] == 0)
+                                ci = -1;
+                        }
+                        bool wall = false;
+                        int yt = 0, yb = 0;
+                        if (ci >= 0)
+                        {
+                            int ni = (cz + dz) * W + (cx + dx);
+                            bool nbOk = cx + dx >= 0 && cx + dx < W
+                                && cz + dz >= 0 && cz + dz < W
+                                && inRing[ni];
+                            int nbTop = nbOk
+                                ? (biome[ni] == 0 ? _seaLevel - 1
+                                    : tops[ni])
+                                : 0;
+                            yt = tops[ci];
+                            if (yt > nbTop)
+                            {
+                                wall = true;
+                                yb = nbTop;
+                            }
+                        }
+                        float cx0 = centerX
+                            + (cx - ShellRingOuter) * (float)S;
+                        float cz0 = centerZ
+                            + (cz - ShellRingOuter) * (float)S;
+                        bool cont = wall && runStart >= 0
+                            && yt == runTop && yb == runBot
+                            && ci >= 0 && biome[ci] == runBiome
+                            && b == runB + 1;
+                        if (wall && !cont)
+                        {
+                            if (runStart >= 0)
+                                EmitWall(runStart, runB);
+                            runStart = b;
+                            runB = b;
+                            runTop = yt; runBot = yb;
+                            runBiome = biome[ci];
+                            runX0 = cx0; runZ0 = cz0;
+                        }
+                        else if (!wall && runStart >= 0)
+                        {
+                            EmitWall(runStart, runB);
+                            runStart = -1;
+                            runB = -1;
+                        }
+                        else if (wall)
+                        {
+                            runB = b;
+                        }
+                        // 局部函数：发射 [runStart, runB] 段墙
+                        void EmitWall(int b0, int b1)
+                        {
+                            int ca = dz != 0 ? b0 : a;
+                            int ca2 = dx != 0 ? b0 : a;
+                            var col = Base(runBiome,
+                                tint[ca * W + ca2]) * 0.9f;
+                            float len = (b1 - b0 + 1) * (float)S;
+                            Vector3 p0;
+                            Vector3 t;
+                            if (dx != 0)
+                            {
+                                p0 = new Vector3(
+                                    runX0 + (dx > 0 ? S : 0),
+                                    runBot, runZ0);
+                                t = new Vector3(0, 0, len);
+                            }
+                            else
+                            {
+                                p0 = new Vector3(runX0, runBot,
+                                    runZ0 + (dz > 0 ? S : 0));
+                                t = new Vector3(len, 0, 0);
+                            }
+                            var up = new Vector3(0,
+                                runTop - runBot, 0);
+                            PushQuad(p0, p0 + t, p0 + up,
+                                p0 + t + up, n, col);
+                        }
+                    }
                 }
             }
 
             var arrays = new Godot.Collections.Array();
             arrays.Resize((int)Mesh.ArrayType.Max);
             arrays[(int)Mesh.ArrayType.Vertex] =
-                Variant.CreateFrom(verts);
+                Variant.CreateFrom(verts.ToArray());
             arrays[(int)Mesh.ArrayType.Normal] =
-                Variant.CreateFrom(norms);
+                Variant.CreateFrom(norms.ToArray());
             arrays[(int)Mesh.ArrayType.Color] =
-                Variant.CreateFrom(cols);
+                Variant.CreateFrom(cols.ToArray());
             arrays[(int)Mesh.ArrayType.Index] =
-                Variant.CreateFrom(indices);
+                Variant.CreateFrom(idxs.ToArray());
             mesh.AddSurfaceFromArrays(
                 Mesh.PrimitiveType.Triangles, arrays);
         }

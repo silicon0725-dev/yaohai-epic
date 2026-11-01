@@ -22,51 +22,55 @@ func _test_shell_mesh_geometry() -> void:
 	check(mesh != null, "壳 mesh 生成非空")
 	if mesh == null:
 		return
-	check_eq(mesh.get_surface_count(), 4, "四环带各一 surface")
+	check_eq(mesh.get_surface_count(), 4, "四级格距各一 surface")
 	var total_v := 0
 	for si in mesh.get_surface_count():
 		var arrays: Array = mesh.surface_get_arrays(si)
 		var v: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
 		var idx: PackedInt32Array = arrays[Mesh.ARRAY_INDEX]
 		var cols: PackedColorArray = arrays[Mesh.ARRAY_COLOR]
+		var norms: PackedVector3Array = arrays[Mesh.ARRAY_NORMAL]
 		total_v += v.size()
-		check(v.size() > 0 and idx.size() == v.size() / 2 * 6 - 0
-				or idx.size() > 0, "环带 %d 索引非空" % si)
-		check(cols.size() == v.size(), "环带 %d 顶点色齐备" % si)
-		# 海平面压平：海列顶点 y == SEA_LEVEL-0.1（6.9 伪水面）；
-		# 陆列裙边下沉 2 格——滩涂最低 h=8 → 6.0 是设计内下界，
-		# 断言抓的是塌陷异常（算法错时洞穴/低谷会打出 y≤5）
-		var sea_v := 0
-		var min_y := 1e9
+		check(idx.size() > 0 and cols.size() == v.size()
+				and norms.size() == v.size(),
+				"级 %d 数组齐备（v=%d）" % [si, v.size()])
+		# 方块语言断言：陆格顶面/侧壁顶点 x,z 均对齐全局格距网格
+		#（中心 32 + S 的整数倍）；裙壁顶点 y=0 存在（级间缝防护）
+		var Ss := [4, 8, 16, 32]
+		var S: int = Ss[si]
+		var aligned := true
+		var skirt := false
 		for i in v.size():
-			min_y = minf(min_y, v[i].y)
+			if int(v[i].y) == 0:
+				skirt = true
+		for i in mini(v.size(), 4000):
+			var lx := fmod(v[i].x - 32.0, float(S))
+			var lz := fmod(v[i].z - 32.0, float(S))
+			if absf(lx) > 0.01 and absf(lx + float(S)) > 0.01 \
+					and absf(lx - float(S)) > 0.01:
+				aligned = false
+				break
+			if absf(lz) > 0.01 and absf(lz + float(S)) > 0.01 \
+					and absf(lz - float(S)) > 0.01:
+				aligned = false
+				break
+		check(aligned, "级 %d 顶点对齐 %d 格网格" % [si, S])
+		check(skirt, "级 %d 存在裙壁顶点（y=0）" % si)
+		# 海平面压平：水面框顶点 y == 6.9
+		var sea_v := 0
+		for i in v.size():
 			if absf(v[i].y - 6.9) < 0.05:
 				sea_v += 1
-		check(min_y >= 5.95, "环带 %d 无深度塌陷顶点（min %.2f）"
-				% [si, min_y])
-		if si == 3:
-			check(sea_v > 0, "最外环存在海面顶点（%d）" % sea_v)
-	# 总量与环表一致：4×(rows+1)×512；AABB 覆盖 2×4096
-	#（外两环细化 8/16 后 ~20 万）
-	check(total_v >= 190000 and total_v <= 210000,
-			"金字塔顶点总量（%d，预算 ~20 万）" % total_v)
+		if si == 0:
+			check(sea_v >= 16, "级 0 水面框顶点存在（%d）" % sea_v)
+	# 总量预算：方块风 ~68 万顶点 / 34 万三角
+	check(total_v >= 500000 and total_v <= 900000,
+			"方块风顶点总量（%d，预算 ~68 万）" % total_v)
 	var aabb: AABB = mesh.get_aabb()
 	check(aabb.size.x >= 8100.0 and aabb.size.z >= 8100.0,
 			"壳 AABB 覆盖 ~8192 格（%.0f）" % aabb.size.x)
-	# 环带缝：surf0 最外行（r=68，半径 240+68*4=512）与 surf1 最内行
-	#（r=0，半径 512）顶点逐点重合（统一 512 扇区 + 整除环表）
-	var a0: Array = mesh.surface_get_arrays(0)
-	var a1: Array = mesh.surface_get_arrays(1)
-	var v0: PackedVector3Array = a0[Mesh.ARRAY_VERTEX]
-	var v1: PackedVector3Array = a1[Mesh.ARRAY_VERTEX]
-	var w := 512
-	var mismatches := 0
-	for s in 16:
-		var p0: Vector3 = v0[68 * w + (s * 31) % w]
-		var p1: Vector3 = v1[(s * 31) % w]
-		if p0.distance_to(p1) > 0.01:
-			mismatches += 1
-	check_eq(mismatches, 0, "环带边界顶点逐点重合（0-1 环）")
+	check(absf(aabb.position.x + 4096.0) < 1.0,
+			"壳 AABB 不越界（x=%.0f）" % aabb.position.x)
 
 
 ## GD 壳节点：setup 后首帧触发 worker 构建，mesh 就位；跨 64 格

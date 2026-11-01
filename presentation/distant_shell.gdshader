@@ -6,7 +6,9 @@
 // 用户反馈）——谷底更暗、受光面亮，总亮度不超天（发光的根因
 // 是雾色亮于天与方向错位，已在雾与太阳方向侧修死）。
 shader_type spatial;
-render_mode unshaded;
+// cull_disabled：方块风 LOD 的侧壁/裙壁四向朝外，双面渲染免去
+// 绕序依赖（远景几何成本可忽略）
+render_mode unshaded, cull_disabled;
 
 uniform float u_day = 1.0;
 uniform vec3 u_sun_dir = vec3(0.5, 0.89, 0.25);

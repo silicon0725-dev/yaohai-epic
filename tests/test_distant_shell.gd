@@ -69,8 +69,8 @@ func _test_shell_mesh_geometry() -> void:
 	var aabb: AABB = mesh.get_aabb()
 	check(aabb.size.x >= 8100.0 and aabb.size.z >= 8100.0,
 			"壳 AABB 覆盖 ~8192 格（%.0f）" % aabb.size.x)
-	check(absf(aabb.position.x + 4096.0) < 1.0,
-			"壳 AABB 不越界（x=%.0f）" % aabb.position.x)
+	check(absf(aabb.position.x - (32.0 - 4096.0)) < 1.0,
+			"壳 AABB 随中心（x=%.0f，水面框含 centerX）" % aabb.position.x)
 
 
 ## GD 壳节点：setup 后首帧触发 worker 构建，mesh 就位；跨 64 格

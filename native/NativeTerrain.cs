@@ -535,23 +535,32 @@ public partial class NativeTerrain : RefCounted
                 }
             }
 
-            // 环形水面：4 矩形框（sea-0.1）——逐格水面是纯开销
+            // 环形水面：4 矩形框（sea-0.1）——逐格水面是纯开销。
+            // 框心必须加壳中心（centerX/Z）——曾漏加写死世界原点，
+            // 壳随玩家平移后水面与陆地区域错位，各级环框交叠成放射
+            // 状条纹（实机截图实锤）
             float wy = _seaLevel - 0.1f;
             var wcol = new Color(0.32f, 0.40f, 0.50f);
             float o = ShellRingOuter * (float)S;
             float i2 = ShellRingInner * (float)S;
-            PushQuad(new Vector3(-o, wy, -o), new Vector3(o, wy, -o),
-                new Vector3(o, wy, -i2), new Vector3(-o, wy, -i2),
-                Vector3.Up, wcol);
-            PushQuad(new Vector3(-o, wy, i2), new Vector3(o, wy, i2),
-                new Vector3(o, wy, o), new Vector3(-o, wy, o),
-                Vector3.Up, wcol);
-            PushQuad(new Vector3(-o, wy, -i2), new Vector3(-i2, wy, -i2),
-                new Vector3(-i2, wy, i2), new Vector3(-o, wy, i2),
-                Vector3.Up, wcol);
-            PushQuad(new Vector3(i2, wy, -i2), new Vector3(o, wy, -i2),
-                new Vector3(o, wy, i2), new Vector3(i2, wy, i2),
-                Vector3.Up, wcol);
+            float fx = (float)centerX;
+            float fz = (float)centerZ;
+            PushQuad(new Vector3(fx - o, wy, fz - o),
+                new Vector3(fx + o, wy, fz - o),
+                new Vector3(fx + o, wy, fz - i2),
+                new Vector3(fx - o, wy, fz - i2), Vector3.Up, wcol);
+            PushQuad(new Vector3(fx - o, wy, fz + i2),
+                new Vector3(fx + o, wy, fz + i2),
+                new Vector3(fx + o, wy, fz + o),
+                new Vector3(fx - o, wy, fz + o), Vector3.Up, wcol);
+            PushQuad(new Vector3(fx - o, wy, fz - i2),
+                new Vector3(fx - i2, wy, fz - i2),
+                new Vector3(fx - i2, wy, fz + i2),
+                new Vector3(fx - o, wy, fz + i2), Vector3.Up, wcol);
+            PushQuad(new Vector3(fx + i2, wy, fz - i2),
+                new Vector3(fx + o, wy, fz - i2),
+                new Vector3(fx + o, wy, fz + i2),
+                new Vector3(fx + i2, wy, fz + i2), Vector3.Up, wcol);
 
             // 陆格顶面
             for (int cz = 0; cz < W; cz++)

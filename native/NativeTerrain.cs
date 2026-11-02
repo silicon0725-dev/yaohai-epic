@@ -554,12 +554,24 @@ public partial class NativeTerrain : RefCounted
                     biome[ci] = 0;
                     tops[ci] = _seaLevel - 1;
                 }
+                else if (waterN > 0)
+                {
+                    // 半水格（2×2 采样部分水）：曾按陆格量化 max(hq,sea)
+                    // ——浅滩区大量格顶恰好=海平面，连成贴水方块层盖在
+                    // 水面圆盘之上（顶点色明暗拼块，"水的方块拼贴"实机
+                    // 八轮定位）。整格藏水下 2 格，滩面由周围全陆格表达
+                    biome[ci] = rock >= sand && rock >= grass ? (byte)2
+                        : sand >= grass ? (byte)3 : (byte)1;
+                    tops[ci] = _seaLevel - 2;
+                }
                 else
                 {
                     biome[ci] = rock >= sand && rock >= grass ? (byte)2
                         : sand >= grass ? (byte)3 : (byte)1;
                     int hq = hMax / vs * vs;
-                    tops[ci] = Math.Max(hq, _seaLevel);
+                    // 全陆滩格至少露出一个量化步（曾 max(hq,sea)：
+                    // 量化恰=海平面的滩格贴水成方块层同病）
+                    tops[ci] = Math.Max(hq, _seaLevel + vs);
                 }
             }
 

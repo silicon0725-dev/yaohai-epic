@@ -60,8 +60,11 @@ func setup(
 	mirror_cam.near = 0.2
 	mirror_cam.far = 160.0
 	# 水面 instance 挂 visibility layer 2（1<<1）：镜像相机排除之，
-	# 双面水材质才不会铺满镜像画面挡住倒影
-	mirror_cam.cull_mask = 0xFFFFF & ~(1 << 1)
+	# 双面水材质才不会铺满镜像画面挡住倒影。
+	# layer3（1<<2）排除=远景壳：其水面圆盘贴着镜像相机 near-clip
+	# 边缘被锯齿裁切，裁切伪影进 RT 贴回真实水面=以玩家为圆心的
+	# 辐射三角拼块（空中俯瞰实机定位；壳远低于倒影价值）
+	mirror_cam.cull_mask = 0xFFFFF & ~(1 << 1) & ~(1 << 2)
 	viewport.add_child(mirror_cam)
 	var rt := viewport.get_texture()
 	for mat in _water_materials:

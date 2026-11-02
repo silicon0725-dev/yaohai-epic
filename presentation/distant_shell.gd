@@ -51,6 +51,11 @@ func setup(p_world, p_player: Node3D, p_environment) -> void:
 	_mesh_instance = MeshInstance3D.new()
 	_mesh_instance.material_override = material
 	_mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	# layer1（主相机可见）+ layer3 标记：镜像反射相机剔除 layer3——
+	# 壳水面圆盘在水面下 0.3 格，恰在镜像相机 near-clip 边缘被锯齿
+	# 裁切，放射状裁切伪影进反射 RT 贴回真实水面=以玩家为圆心的
+	# 辐射三角拼块（空中俯瞰实机九轮定位；水面自身同款排除先例）
+	_mesh_instance.layers = 1 | (1 << 2)
 	add_child(_mesh_instance)
 
 	# 壳外缘 4096 > 相机默认 far 4000——放远裁剪面

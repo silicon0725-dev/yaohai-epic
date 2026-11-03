@@ -630,8 +630,11 @@ public partial class NativeTerrain : RefCounted
                     continue;
                 float x0 = centerX + (cx - ShellRingOuter) * (float)S;
                 float z0 = centerZ + (cz - ShellRingOuter) * (float)S;
+                // 水格顶面=真水面(sea+0.875)下 2cm：真水半透明
+                // (alpha≤0.95)，曾放 sea-0.125 透过水可见且浅滩区
+                // 与海床贴面——移动视差+深度竞争=真水闪烁（实机）
                 float y = biome[ci] == 0
-                    ? _seaLevel - 0.125f
+                    ? _seaLevel + 0.853f
                     : tops[ci];
                 PushQuad(new Vector3(x0, y, z0),
                     new Vector3(x0 + S, y, z0),

@@ -22,26 +22,9 @@ func _test_shell_mesh_geometry() -> void:
 	check(mesh != null, "壳 mesh 生成非空")
 	if mesh == null:
 		return
-	check_eq(mesh.get_surface_count(), 5, "水面盘 + 四级格距各一 surface")
+	check_eq(mesh.get_surface_count(), 4, "四级格距各一 surface（水面已并入格顶面）")
 	var total_v := 0
-	# surface 0 = 整片圆盘水面（曾按级 4 矩形框：级间 8S 宽共面重叠
-	# z-fighting 在低机位交织成放射扇纹，实机三轮——水无 LOD 分级）
-	var warrays: Array = mesh.surface_get_arrays(0)
-	var wv: PackedVector3Array = warrays[Mesh.ARRAY_VERTEX]
-	check(wv.size() > 0, "水面盘顶点非空")
-	var w_ok := true
-	for i in wv.size():
-		if absf(wv[i].y - 6.7) > 0.05:
-			w_ok = false
-			break
-	check(w_ok, "水面盘全部顶点在 sea-0.3（6.7）")
-	var waabb_ok := true
-	for i in wv.size():
-		if absf(wv[i].x - 32.0) > 4096.5:
-			waabb_ok = false
-			break
-	check(waabb_ok, "水面盘不越 4096 界")
-	for si in range(1, mesh.get_surface_count()):
+	for si in range(0, mesh.get_surface_count()):
 		var arrays: Array = mesh.surface_get_arrays(si)
 		var v: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
 		var idx: PackedInt32Array = arrays[Mesh.ARRAY_INDEX]
@@ -55,7 +38,7 @@ func _test_shell_mesh_geometry() -> void:
 		#（中心 32 + S 的整数倍）。级间边界裙深 = 一级量化步（曾落
 		# 到 y=0 的深谷缝在低机位透视下呈放射状楔形暗带，实机两轮）
 		var Ss := [4, 8, 16, 32]
-		var S: int = Ss[si - 1]
+		var S: int = Ss[si]
 		var aligned := true
 		var min_y := 1e9
 		for i in v.size():
@@ -72,6 +55,14 @@ func _test_shell_mesh_geometry() -> void:
 				aligned = false
 				break
 		check(aligned, "级 %d 顶点对齐 %d 格网格" % [si, S])
+		# 方块风水面：水格顶面 y=sea-0.125（与 chunk 水面同高公式）
+		var wtop := 0
+		for i in v.size():
+			if absf(v[i].y - 6.875) < 0.05:
+				wtop += 1
+		if si >= 1:
+			check(wtop > 0, "级 %d 存在水格顶面（%d 顶点）"
+					% [si, wtop])
 		check(min_y > 1.0, "级 %d 裙壁不落地（min y=%.0f > 1）"
 				% [si, min_y])
 	# 总量预算：陆面 ~67 万顶点（水面盘独立）
@@ -80,8 +71,9 @@ func _test_shell_mesh_geometry() -> void:
 	var aabb: AABB = mesh.get_aabb()
 	check(aabb.size.x >= 8100.0 and aabb.size.z >= 8100.0,
 			"壳 AABB 覆盖 ~8192 格（%.0f）" % aabb.size.x)
-	check(absf(aabb.position.x - (32.0 - 4096.0)) < 1.0,
-			"壳 AABB 随中心（x=%.0f，水面框含 centerX）" % aabb.position.x)
+	# AABB 由陆格/水格顶面决定（级 0 内缘 240 起；无独立水面几何）
+	check(absf(aabb.position.x - (32.0 - 4064.0)) <= 128.0,
+			"壳 AABB 随中心（x=%.0f）" % aabb.position.x)
 
 
 ## GD 壳节点：setup 后首帧触发 worker 构建，mesh 就位；跨 64 格
@@ -109,8 +101,8 @@ func _test_shell_node_build() -> void:
 			break
 	check(mesh_inst.mesh != null, "worker 构建后 mesh 就位")
 	if mesh_inst.mesh != null:
-		check(mesh_inst.mesh.get_surface_count() == 5,
-				"节点 mesh 水面盘 + 四陆级")
+		check(mesh_inst.mesh.get_surface_count() == 4,
+				"节点 mesh 四级（水面并入格顶面）")
 	# 玩家跨 64 格：触发重建（等第二轮中心变化）
 	var first_center: Vector2i = shell._center
 	player.global_position = Vector3(32 + 96, 20, 32)

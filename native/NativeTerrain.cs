@@ -456,62 +456,19 @@ public partial class NativeTerrain : RefCounted
     public ArrayMesh GenerateShellMesh(int centerX, int centerZ)
     {
         var mesh = new ArrayMesh();
-        // 整片圆盘水面（sea-0.3，略低于 chunk 水面防共面闪；内缘伸
-        // 进 chunk 圈藏在水下，外缘 4096）——水无 LOD 层级差异，曾
-        // 按级出 4 矩形框：相邻级 [60×2S,128×S] 有 8S 宽共面重叠环
-        // 带 z-fighting，框缘在低机位多层交织成放射扇纹（实机三轮）
-        {
-            var verts = new List<Vector3>();
-            var norms = new List<Vector3>();
-            var cols = new List<Color>();
-            var idxs = new List<int>();
-            const int SEG = 96;
-            float rIn = 200f;
-            float rOut = ShellRingOuter * 32f;
-            float wy = _seaLevel - 0.3f;
-            var wcol = new Color(0.32f, 0.40f, 0.50f);
-            for (int k = 0; k < SEG; k++)
-            {
-                float a0 = MathF.Tau * k / SEG;
-                float a1 = MathF.Tau * (k + 1) / SEG;
-                int v0 = verts.Count;
-                verts.Add(new Vector3(
-                    centerX + MathF.Cos(a0) * rIn, wy,
-                    centerZ + MathF.Sin(a0) * rIn));
-                verts.Add(new Vector3(
-                    centerX + MathF.Cos(a0) * rOut, wy,
-                    centerZ + MathF.Sin(a0) * rOut));
-                verts.Add(new Vector3(
-                    centerX + MathF.Cos(a1) * rOut, wy,
-                    centerZ + MathF.Sin(a1) * rOut));
-                verts.Add(new Vector3(
-                    centerX + MathF.Cos(a1) * rIn, wy,
-                    centerZ + MathF.Sin(a1) * rIn));
-                for (int t = 0; t < 4; t++)
-                {
-                    norms.Add(Vector3.Up);
-                    cols.Add(wcol);
-                }
-                idxs.Add(v0); idxs.Add(v0 + 2); idxs.Add(v0 + 1);
-                idxs.Add(v0 + 1); idxs.Add(v0 + 2); idxs.Add(v0 + 3);
-            }
-            var arrays = new Godot.Collections.Array();
-            arrays.Resize((int)Mesh.ArrayType.Max);
-            arrays[(int)Mesh.ArrayType.Vertex] =
-                Variant.CreateFrom(verts.ToArray());
-            arrays[(int)Mesh.ArrayType.Normal] =
-                Variant.CreateFrom(norms.ToArray());
-            arrays[(int)Mesh.ArrayType.Color] =
-                Variant.CreateFrom(cols.ToArray());
-            arrays[(int)Mesh.ArrayType.Index] =
-                Variant.CreateFrom(idxs.ToArray());
-            mesh.AddSurfaceFromArrays(
-                Mesh.PrimitiveType.Triangles, arrays);
-        }
+        // 水面重做（第十轮定案）：不再有任何独立水面几何（矩形框
+        // 共面重叠/圆盘镜像近剪裁裁切，九轮伪影全源于此）。水格出
+        // 方块顶面（sea-0.125，与 chunk 水面同高公式），与陆格同一
+        // 生成路径——远处水面=大方块，与真实体素水同一视觉语言
         foreach (int S in ShellLevels)
         {
             int W = ShellRingOuter * 2;
-            int vs = Math.Max(1, S / 2);
+            // 垂直量化步：曾 S/2（S=32 时 16 格）——整片山体被切成
+            // 等高平台 + 16 格高的竖直台阶，从水面低机位看就是"一片
+            // 亮暗交替的竖板幕帘"（用户实机截图）。改成 S/8（4/8/16/32
+            // 级 → 1/1/2/4 格）后台阶接近区块体素的真高度，体素 LOD
+            // 语言保留，幕帘消失。
+            int vs = Math.Max(1, S / 8);
             int q = Math.Max(1, S / 4);
             var tops = new int[W * W];
             var biome = new byte[W * W];   // 0 水 1 草 2 岩 3 沙
@@ -568,11 +525,66 @@ public partial class NativeTerrain : RefCounted
                 {
                     biome[ci] = rock >= sand && rock >= grass ? (byte)2
                         : sand >= grass ? (byte)3 : (byte)1;
-                    int hq = hMax / vs * vs;
-                    // 全陆滩格至少露出一个量化步（曾 max(hq,sea)：
-                    // 量化恰=海平面的滩格贴水成方块层同病）
-                    tops[ci] = Math.Max(hq, _seaLevel + vs);
+                    // 同网格量化（vs=S/8），台阶 1-4 格：既保住体素方
+                    // 块语言，又不会立起一座座等高平顶的竖墙。曾一律
+                    // hMax/vs*vs（vs=S/2）+ 钳制 sea+vs：海岸带整条被
+                    // 拍平并抬高一个量化步，海湾对岸成片竖板幕帘。
+                    int step = vs;
+                    int hq = hMax / step * step;
+                    // 全陆格至少露出水面 1 格（曾 max(hq,sea)：量化恰
+                    // = 海平面的滩格贴水成方块层；曾 sea+vs：抬升过大
+                    // 成幕帘）。1 格既避开与水面圆盘(sea-0.3)共面闪，
+                    // 又不会把浅滩整片拔高。
+                    tops[ci] = Math.Max(hq, _seaLevel + 1);
                 }
+            }
+
+            // ---- 海岸带缓坡化（离水格逐级压低）----
+            // 陡岸上 2×2 采样取的是最大值，临水陆格的顶就是坡顶高度；
+            // 而相邻水格整格不出面（biome=0），于是每块临水陆格都朝水
+            // 生成一整片从坡顶直落海面的高墙，墙间露出壳水面圆盘——
+            // 远景看就是一排悬在水上的灰板幕帘（用户实机截图）。
+            // 做法：以"水下格"（全水格 sea-1 与半水格 sea-2）为源做
+            // BFS 距离场，把陆格顶钳到 sea+1+(d-1)*step，海岸线变成
+            // 一级一级下水的缓坡，单面墙高被压到 step 量级。
+            int coastStep = Math.Max(2, S / 8);
+            var dist = new int[W * W];
+            for (int i = 0; i < dist.Length; i++)
+                dist[i] = -1;
+            var frontier = new Queue<int>();
+            for (int i = 0; i < W * W; i++)
+            {
+                if (!inRing[i] || tops[i] > _seaLevel)
+                    continue;
+                dist[i] = 0;
+                frontier.Enqueue(i);
+            }
+            while (frontier.Count > 0)
+            {
+                int i = frontier.Dequeue();
+                int nd = dist[i] + 1;
+                int ix = i % W;
+                int iz = i / W;
+                for (int k = 0; k < 4; k++)
+                {
+                    int nx = ix + (k == 0 ? 1 : k == 1 ? -1 : 0);
+                    int nz = iz + (k == 2 ? 1 : k == 3 ? -1 : 0);
+                    if (nx < 0 || nx >= W || nz < 0 || nz >= W)
+                        continue;
+                    int ni = nz * W + nx;
+                    if (!inRing[ni] || dist[ni] >= 0)
+                        continue;
+                    dist[ni] = nd;
+                    frontier.Enqueue(ni);
+                }
+            }
+            for (int i = 0; i < W * W; i++)
+            {
+                if (!inRing[i] || tops[i] <= _seaLevel || dist[i] < 1)
+                    continue;
+                int cap = _seaLevel + 1 + (dist[i] - 1) * coastStep;
+                if (tops[i] > cap)
+                    tops[i] = cap;
             }
 
             var verts = new List<Vector3>();
@@ -596,6 +608,8 @@ public partial class NativeTerrain : RefCounted
                 float k = 1.0f + 0.08f * t;
                 switch (b)
                 {
+                    case 0: return new Color(  // 水格顶面（方块风）
+                        0.28f * k, 0.37f * k, 0.47f * k);
                     case 2: return new Color(
                         0.50f * k, 0.48f * k, 0.46f * k);
                     case 3: return new Color(
@@ -605,16 +619,20 @@ public partial class NativeTerrain : RefCounted
                 }
             }
 
-            // 陆格顶面
+            // 格顶面（陆格=量化高度；水格=sea-0.125 方块风水面，
+            // 与 chunk 水面同高公式——重叠区 240-256 由 chunk 水面
+            // 覆盖，非重叠区水格即"大方块水面"）
             for (int cz = 0; cz < W; cz++)
             for (int cx = 0; cx < W; cx++)
             {
                 int ci = cz * W + cx;
-                if (!inRing[ci] || biome[ci] == 0)
+                if (!inRing[ci])
                     continue;
                 float x0 = centerX + (cx - ShellRingOuter) * (float)S;
                 float z0 = centerZ + (cz - ShellRingOuter) * (float)S;
-                float y = tops[ci];
+                float y = biome[ci] == 0
+                    ? _seaLevel - 0.125f
+                    : tops[ci];
                 PushQuad(new Vector3(x0, y, z0),
                     new Vector3(x0 + S, y, z0),
                     new Vector3(x0, y, z0 + S),
@@ -727,8 +745,20 @@ public partial class NativeTerrain : RefCounted
                             }
                             var up = new Vector3(0,
                                 runTop - runBot, 0);
-                            PushQuad(p0, p0 + t, p0 + up,
-                                p0 + t + up, n, col);
+                            // 绕序必须与 n 一致：几何法线 = cross(up, t)，
+                            // 只有 +X / -Z 两个方向天然对齐，-X / +Z 反
+                            // 了。cull_disabled 下 Godot 会把背面片元的
+                            // NORMAL 取反，反向的墙会被当成"朝阳面"照亮
+                            //（背面墙和朝阳墙一样亮），海岸失去体素明暗。
+                            Vector3 va = p0, vb = p0 + t,
+                                vc = p0 + up, vd = p0 + t + up;
+                            if (dx < 0 || dz > 0)
+                            {
+                                var swap = vb;
+                                vb = vc;
+                                vc = swap;
+                            }
+                            PushQuad(va, vb, vc, vd, n, col);
                         }
                     }
                 }

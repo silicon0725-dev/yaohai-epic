@@ -640,29 +640,18 @@ public partial class NativeTerrain : RefCounted
                 idxs.Add(v0 + 1); idxs.Add(v0 + 2); idxs.Add(v0 + 3);
             }
 
-            Color Base(byte b, float t)
-            {
-                float k = 1.0f + 0.08f * t;
-                switch (b)
-                {
-                    // 水格不吃 tint：±8% 色差透过半透明真水=水下
-                    // "神秘纹路"（移动视差变化=闪，实机）；纯水色
-                    case 0: return new Color(0.28f, 0.37f, 0.47f);
-                    case 2: return new Color(
-                        0.50f * k, 0.48f * k, 0.46f * k);
-                    case 3: return new Color(
-                        0.72f * k, 0.66f * k, 0.49f * k);
-                    default: return new Color(
-                        0.24f * k, 0.36f * k, 0.18f * k);
-                }
-            }
-
-            // 陆格混合色：群系计数加权 + tint ±16%（曾 ±8%：同
-            // biome 等高格颜色几乎一致，等高平台/等高壁连片成
-            // 100+ 格横条——放大裁剪实锤；DH 靠格内主导方块色差
-            // 打破连片，混合色+tint 加幅同效）
+            // 格色：水格=纯水色不吃 tint（±色差透过半透明真水=水下
+            // "神秘纹路"移动视差闪，实机定案）；陆格=群系计数加权混
+            // 合色 + 每格 hash 抖动 ±16%（曾单 biome 色+连续噪声
+            // ±8%：同 biome 等高格颜色几乎一致，等高平台/等高壁连
+            // 片成 100+ 格横条——放大裁剪实锤；DH 靠格内主导方块
+            // 色差打破连片，混合色+独立抖动同效）。曾把水格漏出
+            // 本函数（计数全 0 落保护分支返回纯黑）——"水没了"
+            // 实机一轮
             Color MixCol(int ci, float t)
             {
+                if (biome[ci] == 0)
+                    return new Color(0.28f, 0.37f, 0.47f);
                 float k = 1.0f + 0.16f * t;
                 float tot = grassN[ci] + rockN[ci] + sandN[ci];
                 if (tot <= 0)

@@ -1,5 +1,5 @@
-## 远景山壳测试：C# 四环金字塔 mesh 几何（surface/顶点/海平面压平/
-## 环带边界无缝）、GD 壳节点构建流程（worker 产 mesh + 重建步进）。
+## 远景山壳测试：C# 三级不重叠环带 mesh 几何（surface/顶点/水格
+## 顶面/格网格对齐）、GD 壳节点构建流程（worker 产 mesh + 重建步进）。
 extends VoxelTestCase
 
 const Bridge := preload("res://meshing/native_terrain_bridge.gd")
@@ -22,7 +22,7 @@ func _test_shell_mesh_geometry() -> void:
 	check(mesh != null, "壳 mesh 生成非空")
 	if mesh == null:
 		return
-	check_eq(mesh.get_surface_count(), 4, "四级格距各一 surface（水面已并入格顶面）")
+	check_eq(mesh.get_surface_count(), 3, "三级不重叠环带各一 surface（水面已并入格顶面）")
 	var total_v := 0
 	for si in range(0, mesh.get_surface_count()):
 		var arrays: Array = mesh.surface_get_arrays(si)
@@ -35,9 +35,9 @@ func _test_shell_mesh_geometry() -> void:
 				and norms.size() == v.size(),
 				"级 %d 数组齐备（v=%d）" % [si, v.size()])
 		# 方块语言断言：陆格顶面/侧壁顶点 x,z 均对齐全局格距网格
-		#（中心 32 + S 的整数倍）。级间边界裙深 = 一级量化步（曾落
-		# 到 y=0 的深谷缝在低机位透视下呈放射状楔形暗带，实机两轮）
-		var Ss := [4, 8, 8, 16]
+		#（中心 32 + S 的整数倍）。跨界壁底贴真实地形 -2 过绘
+		#（DH onBorder 永画防洞同思想）
+		var Ss := [4, 8, 16]
 		var S: int = Ss[si]
 		var aligned := true
 		var min_y := 1e9
@@ -66,9 +66,9 @@ func _test_shell_mesh_geometry() -> void:
 					% [si, wtop])
 		check(min_y > 1.0, "级 %d 裙壁不落地（min y=%.0f > 1）"
 				% [si, min_y])
-	# 总量预算：外两级细化（8/16）后 ~219 万顶点
-	check(total_v >= 1800000 and total_v <= 2600000,
-			"方块风陆面顶点总量（%d，预算 ~219 万）" % total_v)
+	# 总量预算：v3 三级不重叠（4/8/16）~253 万顶点
+	check(total_v >= 2100000 and total_v <= 2900000,
+			"方块风陆面顶点总量（%d，预算 ~253 万）" % total_v)
 	var aabb: AABB = mesh.get_aabb()
 	check(aabb.size.x >= 8100.0 and aabb.size.z >= 8100.0,
 			"壳 AABB 覆盖 ~8192 格（%.0f）" % aabb.size.x)
@@ -102,8 +102,8 @@ func _test_shell_node_build() -> void:
 			break
 	check(mesh_inst.mesh != null, "worker 构建后 mesh 就位")
 	if mesh_inst.mesh != null:
-		check(mesh_inst.mesh.get_surface_count() == 4,
-				"节点 mesh 四级（水面并入格顶面）")
+		check(mesh_inst.mesh.get_surface_count() == 3,
+				"节点 mesh 三级（水面并入格顶面）")
 	# 玩家跨 64 格：触发重建（等第二轮中心变化）
 	var first_center: Vector2i = shell._center
 	player.global_position = Vector3(32 + 96, 20, 32)

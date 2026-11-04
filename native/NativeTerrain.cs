@@ -438,69 +438,95 @@ public partial class NativeTerrain : RefCounted
         return new Vector2I(minH, maxH);
     }
 
-    // ---- 远景山壳 v2（方块风 LOD，Distant Horizons 式）----
-    // 用户定调：LOD 必须保持体素语言——每级用更粗的"方块"渲染
-    //（格距 4/8/16/32，垂直量化 S/2），近处方块阶梯、远处大块方
-    // 柱，与 chunk 体素同一视觉语言（平滑高度场网格像"平面贴图"，
-    // 实机否决）。方形环带：各级都是切比雪夫格距 [60,128) 的环
-    //（×S = 240-512 / 480-1024 / 960-2048 / 1920-4096），全局对齐
-    // 网格（格坐标×S=世界坐标，重建不游移）。格高 = 2×2 采样最大
-    // 值向下量化；水=整片环形水面 4 矩形（sea-0.1，消逐格顶面）；
-    // 陆格出顶面 + 侧壁（邻居更低才出，等截面 run 合并），环带内外
-    // 缘裙壁到 y=0 防级间缝。光照沿用 ShaderMaterial：NORMAL 轴
-    // 对齐，太阳漫反射天然给出面向亮度差（参考图效果）。
-    // (格距 S, 内缘格距, 外缘格距)——外两级细化一档（16→8/32→16，
-    // 用户拍板"细化"；顶点预算富余实测 fps 不动）；外缘格距加大
-    // 保持各级覆盖与外缘 4096 不缩水
+    // ---- 远景山壳 v3（DH 源码机制移植，distant-horizons-core）----
+    // 用户定调：LOD 必须保持体素语言——每级用更粗的"方块"渲染，
+    // 与 chunk 体素同一视觉语言（平滑高度场网格像"平面贴图"，
+    // 实机否决）。v2 四轮实机伪影（拉伸条纹/级间断层）对照 DH
+    // ColumnBox.java 定根后全部推翻：
+    // ① 环带不重叠——v2 相邻级世界坐标重叠 128 格，粗级格顶
+    //   （2×2 采样 max）系统性偏高从细级地形里穿出=级间断层；
+    //   DH 每级只管自己的环带（detail 差恒 1），边界由侧壁衔接。
+    // ② 高度=格中心列真实值，不用 2×2 max——max 把山脊展宽成
+    //   等高平台连片（远处"拉长"主因）；DH datapoint 高度是格内
+    //   真实数据聚合，无 max 偏置。
+    // ③ 高程不量化（DH yMin/yMax 精确到块）——v2 的 vs=S/8 把
+    //   相近高度拍平成等高平台再叠加 run 合并=超长横条。格距粗
+    //   （水平精度降）但每格高度精确 → 远处丘陵细节保留、无平台。
+    // ④ 侧壁逐格生成，绝不横向合并——DH makeAdjVerticalQuad 每
+    //   列每段独立 quad；v2 等高 run 合并（哪怕限 3 格）×S=16
+    //   仍是 48 格长墙=拉伸条纹残余。
+    // ⑤ 级间衔接查真实地形：跨界邻格顶=CellTop 纯函数（任何级
+    //   任何格随时可算），朝细级侧按邻级格宽分段取 min（壁底贴
+    //   真实地形=无缝，略过绘同 DH onBorder overdraw 思想）；
+    //   最外缘/视距圈侧才用固定裙深（雾吞区）。
+    // (格距 S, 内缘世界格, 外缘世界格)——半径单位=世界格。级间
+    // 边界 768/2048 是各级格距公倍数，全局对齐网格无游移
     private static readonly (int s, int inner, int outer)[] ShellLevels =
     {
-        (4, 60, 128),
-        (8, 60, 128),
-        (8, 120, 256),
-        (16, 120, 256),
+        (4, 240, 768),
+        (8, 768, 2048),
+        (16, 2048, 4096),
     };
+
+    // 某世界半径处壳的格距（跨界邻格查询用；环外返回 0）
+    private static int ShellStepAt(int worldR)
+    {
+        foreach (var (s, inner, outer) in ShellLevels)
+            if (worldR >= inner && worldR < outer)
+                return s;
+        return 0;
+    }
 
     public ArrayMesh GenerateShellMesh(int centerX, int centerZ)
     {
         var mesh = new ArrayMesh();
-        // 水面重做（第十轮定案）：不再有任何独立水面几何（矩形框
-        // 共面重叠/圆盘镜像近剪裁裁切，九轮伪影全源于此）。水格出
-        // 方块顶面（sea-0.125，与 chunk 水面同高公式），与陆格同一
-        // 生成路径——远处水面=大方块，与真实体素水同一视觉语言
-        foreach (var (S, ringIn, ringOut) in ShellLevels)
+        // 水面（第十轮定案保留）：无独立水面几何，水格出方块顶面
+        //（sea+0.3，恒在真水波谷下），与陆格同一生成路径——远处
+        // 水面=大方块，与真实体素水同一视觉语言
+        foreach (var (S, ringInW, ringOutW) in ShellLevels)
         {
-            int ShellRingInner = ringIn;
-            int ShellRingOuter = ringOut;
-            int W = ShellRingOuter * 2;
-            // 垂直量化步：曾 S/2（S=32 时 16 格）——整片山体被切成
-            // 等高平台 + 16 格高的竖直台阶，从水面低机位看就是"一片
-            // 亮暗交替的竖板幕帘"（用户实机截图）。改成 S/8（4/8/16/32
-            // 级 → 1/1/2/4 格）后台阶接近区块体素的真高度，体素 LOD
-            // 语言保留，幕帘消失。
-            int vs = Math.Max(1, S / 8);
+            int RingInner = ringInW;
+            int RingOuter = ringOutW;
+            int W = (RingOuter / S) * 2;
+            // 高程不量化（DH yMin/yMax 精确到块）：格距粗=水平精度
+            // 降，但每格高度精确到 1 格——曾 vs=S/8 量化把相近高度
+            // 拍平成等高平台（远处丘陵失细节、拉长感来源之一）。
+            // q=群系/水陆统计的 2×2 采样内缩
             int q = Math.Max(1, S / 4);
             var tops = new int[W * W];
             var biome = new byte[W * W];   // 0 水 1 草 2 岩 3 沙
             var tint = new float[W * W];
+            // 群系计数（顶面/壁的混合色源）：逐格颜色差异是 DH 打
+            // 破等高连片的关键（其顶面色=格内主导方块色，草/石/土
+            // /沙 混合斑驳）——我们同 biome 等高壁共面同色，远看
+            // 连成 100+ 格横条（放大裁剪实锤）。混合色让每格在等
+            // 高平台上仍有色斑=方砖感
+            var grassN = new byte[W * W];
+            var rockN = new byte[W * W];
+            var sandN = new byte[W * W];
             var inRing = new bool[W * W];
             for (int cz = 0; cz < W; cz++)
             for (int cx = 0; cx < W; cx++)
             {
-                // 圆环判定（欧氏半径）：方环的角区比边区远 √2——雾
-                // 化梯度沿对角突变，透视下呈放射状亮楔穿水穿山（海边
-                // 低机位实机复现）；圆环雾梯度平滑（DH 同款）。格仍
-                // 方形对齐（判定圆、格方）
-                int ddx = cx - ShellRingOuter;
-                int ddz = cz - ShellRingOuter;
+                // 圆环判定（欧氏半径，世界格、格中心）：方环的角区比
+                // 边区远 √2——雾化梯度沿对角突变，透视下呈放射状亮
+                // 楔穿水穿山（海边低机位实机复现）；圆环雾梯度平滑
+                //（DH 同款）。格仍方形对齐（判定圆、格方）
+                int bx = centerX + (cx - W / 2) * S;
+                int bz = centerZ + (cz - W / 2) * S;
+                int ddx = bx + S / 2 - centerX;
+                int ddz = bz + S / 2 - centerZ;
                 int r2 = ddx * ddx + ddz * ddz;
-                if (r2 < ShellRingInner * ShellRingInner
-                    || r2 >= ShellRingOuter * ShellRingOuter)
+                if (r2 < RingInner * RingInner
+                    || r2 >= RingOuter * RingOuter)
                     continue;
                 int ci = cz * W + cx;
                 inRing[ci] = true;
-                int bx = centerX + (cx - ShellRingOuter) * S;
-                int bz = centerZ + (cz - ShellRingOuter) * S;
-                int hMax = int.MinValue;
+                // 高度=格中心列真实值（DH datapoint 同思想：格内真实
+                // 数据，无 max 偏置——max 会把山脊展宽成等高平台，
+                // 远处"拉长"主因）。2×2 采样只做群系/水陆统计
+                var (hCenter, _, _) = ColumnProfile(
+                    bx + S / 2, bz + S / 2);
                 int grass = 0, rock = 0, sand = 0, waterN = 0;
                 for (int sz = 0; sz < 2; sz++)
                 for (int sx = 0; sx < 2; sx++)
@@ -508,13 +534,23 @@ public partial class NativeTerrain : RefCounted
                     var (h, isRocky, isSandy) = ColumnProfile(
                         bx + (sx == 0 ? q : S - 1 - q),
                         bz + (sz == 0 ? q : S - 1 - q));
-                    if (h > hMax) hMax = h;
                     if (h <= _seaLevel) waterN++;
                     else if (isRocky) rock++;
                     else if (isSandy) sand++;
                     else grass++;
                 }
-                tint[ci] = (float)_e4.GetNoise2D(bx, bz);
+                // 每格独立明度抖动（格坐标 hash，非连续噪声）：连
+                // 续噪声相邻格值相近，等高带上颜色仍连续——20-80
+                // 格条带残余（放大实锤）。独立 hash 让相邻等高格明
+                // 度随机跳变，长条带碎成 1 格宽方砖（DH per-block
+                // dithering 同效；混合色+tint 加幅后放大裁剪 2/10
+                // → 目标 7+）
+                uint hsh = (uint)(bx * 374761393 + bz * 668265263);
+                hsh = (hsh ^ (hsh >> 13)) * 1274126177;
+                tint[ci] = ((hsh >> 16) & 0xFF) / 255.0f * 2.0f - 1.0f;
+                grassN[ci] = (byte)grass;
+                rockN[ci] = (byte)rock;
+                sandN[ci] = (byte)sand;
                 if (waterN == 4)
                 {
                     biome[ci] = 0;
@@ -522,10 +558,10 @@ public partial class NativeTerrain : RefCounted
                 }
                 else if (waterN > 0)
                 {
-                    // 半水格（2×2 采样部分水）：曾按陆格量化 max(hq,sea)
-                    // ——浅滩区大量格顶恰好=海平面，连成贴水方块层盖在
-                    // 水面圆盘之上（顶点色明暗拼块，"水的方块拼贴"实机
-                    // 八轮定位）。整格藏水下 2 格，滩面由周围全陆格表达
+                    // 半水格（2×2 采样部分水）：整格藏水下 2 格，滩面
+                    // 由周围全陆格表达（曾按陆格出顶：浅滩区大量格顶
+                    // 恰好=海平面，连成贴水方块层——"水的方块拼贴"
+                    // 实机八轮定位）
                     biome[ci] = rock >= sand && rock >= grass ? (byte)2
                         : sand >= grass ? (byte)3 : (byte)1;
                     tops[ci] = _seaLevel - 2;
@@ -534,17 +570,9 @@ public partial class NativeTerrain : RefCounted
                 {
                     biome[ci] = rock >= sand && rock >= grass ? (byte)2
                         : sand >= grass ? (byte)3 : (byte)1;
-                    // 同网格量化（vs=S/8），台阶 1-4 格：既保住体素方
-                    // 块语言，又不会立起一座座等高平顶的竖墙。曾一律
-                    // hMax/vs*vs（vs=S/2）+ 钳制 sea+vs：海岸带整条被
-                    // 拍平并抬高一个量化步，海湾对岸成片竖板幕帘。
-                    int step = vs;
-                    int hq = hMax / step * step;
-                    // 全陆格至少露出水面 1 格（曾 max(hq,sea)：量化恰
-                    // = 海平面的滩格贴水成方块层；曾 sea+vs：抬升过大
-                    // 成幕帘）。1 格既避开与水面圆盘(sea-0.3)共面闪，
-                    // 又不会把浅滩整片拔高。
-                    tops[ci] = Math.Max(hq, _seaLevel + 1);
+                    // 全陆格至少露出水面 1 格：既避开与壳水格顶
+                    //（sea+0.3）贴面，又不会把浅滩整片拔高
+                    tops[ci] = Math.Max(hCenter, _seaLevel + 1);
                 }
             }
 
@@ -629,6 +657,25 @@ public partial class NativeTerrain : RefCounted
                 }
             }
 
+            // 陆格混合色：群系计数加权 + tint ±16%（曾 ±8%：同
+            // biome 等高格颜色几乎一致，等高平台/等高壁连片成
+            // 100+ 格横条——放大裁剪实锤；DH 靠格内主导方块色差
+            // 打破连片，混合色+tint 加幅同效）
+            Color MixCol(int ci, float t)
+            {
+                float k = 1.0f + 0.16f * t;
+                float tot = grassN[ci] + rockN[ci] + sandN[ci];
+                if (tot <= 0)
+                    tot = 1;
+                return new Color(
+                    (0.24f * grassN[ci] + 0.50f * rockN[ci]
+                        + 0.72f * sandN[ci]) / tot * k,
+                    (0.36f * grassN[ci] + 0.48f * rockN[ci]
+                        + 0.66f * sandN[ci]) / tot * k,
+                    (0.18f * grassN[ci] + 0.46f * rockN[ci]
+                        + 0.49f * sandN[ci]) / tot * k);
+            }
+
             // 格顶面（陆格=量化高度；水格=sea-0.125 方块风水面，
             // 与 chunk 水面同高公式——重叠区 240-256 由 chunk 水面
             // 覆盖，非重叠区水格即"大方块水面"）
@@ -638,8 +685,8 @@ public partial class NativeTerrain : RefCounted
                 int ci = cz * W + cx;
                 if (!inRing[ci])
                     continue;
-                float x0 = centerX + (cx - ShellRingOuter) * (float)S;
-                float z0 = centerZ + (cz - ShellRingOuter) * (float)S;
+                float x0 = centerX + (cx - W / 2) * (float)S;
+                float z0 = centerZ + (cz - W / 2) * (float)S;
                 // 水格顶面沉到 sea+0.3：真水面（已回退带言波+涟漪位移
                 // clamp[-0.16,+0.56]）最低点 sea+0.715——壳格恒在波谷
                 // 之下 0.4 格，任何波态不穿插（贴太近+位移水面=穿插
@@ -652,133 +699,134 @@ public partial class NativeTerrain : RefCounted
                     new Vector3(x0 + S, y, z0),
                     new Vector3(x0, y, z0 + S),
                     new Vector3(x0 + S, y, z0 + S),
-                    Vector3.Up, Base(biome[ci], tint[ci]));
+                    Vector3.Up, MixCol(ci, tint[ci]));
             }
 
-            // 侧壁：4 方向；同行等(顶,底,群系) run 合并。环带外缘
-            // 邻居未知 → 裙壁到 y=0（级间缝防护，雾中不可见）
+            // 任意世界点处的跨界格顶估计（与主循环 tops 同语义、取
+            // 更保守的低值）：中心列真实高度；水面带（全水/半水/滩，
+            // 中心列 ≤sea+1）一律藏底值 sea-2——跨界壁底取低只会过
+            // 绘不会悬空露缝
+            int CellTopAt(int px, int pz)
+            {
+                var (h, _, _) = ColumnProfile(px, pz);
+                return h <= _seaLevel + 1 ? _seaLevel - 2 : h;
+            }
+
+            // 壁发射：p0=底边起点，t=切向全长（绕序 flip：几何法线
+            // cross(up,t) 须与 n 同向——cull_disabled 下 Godot 把背面
+            // 片元 NORMAL 取反，反向墙会被当朝阳面照亮，海岸失去
+            // 体素明暗）
+            void PushWall(Vector3 p0, Vector3 t, float yt, float yb,
+                Vector3 n, bool flip, Color col)
+            {
+                var up = new Vector3(0, yt - yb, 0);
+                Vector3 va = p0, vb = p0 + t,
+                    vc = p0 + up, vd = p0 + t + up;
+                if (flip)
+                {
+                    var swap = vb;
+                    vb = vc;
+                    vc = swap;
+                }
+                PushQuad(va, vb, vc, vd, n, col);
+            }
+
+            // 侧壁：逐格生成，绝不横向合并（DH makeAdjVerticalQuad
+            // 每列独立 quad；等高 run 合并哪怕限 3 格，×S=16 仍是
+            // 48 格长墙=拉伸条纹残余）。环内邻：低侧不出壁（同网格
+            // 数据一致，无缝）；跨界邻（级间边界/最外缘/视距圈）：
+            // 无条件画壁且壁底压到跨界格顶之下 2 格（DH onBorder
+            // 永画 + overdraw 防洞同思想）——两侧高度估计各有误差，
+            // 双侧背靠背过绘保证任何偏差下无缝。朝细级侧按邻级格
+            // 宽分段查真实地形，段底=段内邻格顶-2
             int[] dxs = { 1, -1, 0, 0 };
             int[] dzs = { 0, 0, 1, -1 };
             for (int dir = 0; dir < 4; dir++)
             {
                 int dx = dxs[dir], dz = dzs[dir];
                 var n = new Vector3(dx, 0, dz);
-                for (int a = 0; a < W; a++)
+                bool flip = dx < 0 || dz > 0;
+                for (int cz = 0; cz < W; cz++)
+                for (int cx = 0; cx < W; cx++)
                 {
-                    int runStart = -1;
-                    int runTop = 0, runBot = 0;
-                    byte runBiome = 0;
-                    float runX0 = 0, runZ0 = 0;
-                    int runB = 0;
-                    for (int b = 0; b <= W; b++)
+                    int ci = cz * W + cx;
+                    if (!inRing[ci] || biome[ci] == 0)
+                        continue;
+                    int yt = tops[ci];
+                    float x0 = centerX + (cx - W / 2) * (float)S;
+                    float z0 = centerZ + (cz - W / 2) * (float)S;
+                    int nx = cx + dx, nz = cz + dz;
+                    bool nbOk = nx >= 0 && nx < W && nz >= 0 && nz < W
+                        && inRing[nz * W + nx];
+                    var wallCol = MixCol(ci, tint[ci]) * 0.9f;
+                    if (nbOk)
                     {
-                        int cx = dx != 0 ? b : a;
-                        int cz = dz != 0 ? b : a;
-                        int ci = -1;
-                        if (b < W)
+                        int ni = nz * W + nx;
+                        int nbTop = biome[ni] == 0
+                            ? _seaLevel - 1 : tops[ni];
+                        if (yt <= nbTop)
+                            continue;
+                        Vector3 p0 = new Vector3(
+                            dx != 0 ? (dx > 0 ? x0 + S : x0) : x0,
+                            nbTop,
+                            dz != 0 ? (dz > 0 ? z0 + S : z0) : z0);
+                        Vector3 t = dx != 0
+                            ? new Vector3(0, 0, S)
+                            : new Vector3(S, 0, 0);
+                        PushWall(p0, t, yt, nbTop, n, flip, wallCol);
+                        continue;
+                    }
+                    // ---- 跨界壁（级间边界/最外缘/视距圈）----
+                    // 探针：界外半格处的世界点，判它属于哪级（无级
+                    // =最外缘/视距圈，固定裙深兜底，雾吞区）
+                    int edgeX = dx != 0
+                        ? (int)(dx > 0 ? x0 + S : x0) : (int)x0;
+                    int edgeZ = dz != 0
+                        ? (int)(dz > 0 ? z0 + S : z0) : (int)z0;
+                    int probeX = edgeX + dx * (S / 2);
+                    int probeZ = edgeZ + dz * (S / 2);
+                    int ddx = probeX - centerX;
+                    int ddz = probeZ - centerZ;
+                    int sOut = ShellStepAt((int)Math.Sqrt(
+                        (double)(ddx * ddx + ddz * ddz)));
+                    int nSeg = 1, segW = S;
+                    if (sOut > 0 && sOut < S)
+                    {
+                        nSeg = S / sOut;
+                        segW = sOut;
+                    }
+                    for (int k = 0; k < nSeg; k++)
+                    {
+                        int yb;
+                        if (sOut > 0)
                         {
-                            ci = cz * W + cx;
-                            if (!inRing[ci] || biome[ci] == 0)
-                                ci = -1;
+                            // 段中点外侧半格 = 邻格中心
+                            float mid = k * segW + segW * 0.5f;
+                            int px = dx != 0
+                                ? edgeX + dx * (sOut / 2)
+                                : (int)(x0 + mid);
+                            int pz = dz != 0
+                                ? edgeZ + dz * (sOut / 2)
+                                : (int)(z0 + mid);
+                            yb = CellTopAt(px, pz) - 2;
                         }
-                        bool wall = false;
-                        int yt = 0, yb = 0;
-                        if (ci >= 0)
+                        else
                         {
-                            int ni = (cz + dz) * W + (cx + dx);
-                            bool nbOk = cx + dx >= 0 && cx + dx < W
-                                && cz + dz >= 0 && cz + dz < W
-                                && inRing[ni];
-                            // 出环带邻居（级间边界）：裙深=一级量化步
-                            //（S）而非 y=0——曾落到 0：相邻两级的裙壁
-                            // 背对背从地底拔起，边界成深谷缝，方形环带
-                            // 边界在低机位透视下呈放射状楔形暗带穿山
-                            //（实机截图两轮实锤）。S 深的裙足够盖住级
-                            // 间量化高差，残余由雾吞；不低于海平面下 1
-                            //（浅滩格 tops≈sea 时 yb=sea-S 会穿到负值）
-                            int nbTop = nbOk
-                                ? (biome[ni] == 0 ? _seaLevel - 1
-                                    : tops[ni])
-                                : Math.Max(tops[ci] - S, _seaLevel - 1);
-                            yt = tops[ci];
-                            if (yt > nbTop)
-                            {
-                                wall = true;
-                                yb = nbTop;
-                            }
+                            yb = Math.Max(tops[ci] - S, _seaLevel - 1);
                         }
-                        float cx0 = centerX
-                            + (cx - ShellRingOuter) * (float)S;
-                        float cz0 = centerZ
-                            + (cz - ShellRingOuter) * (float)S;
-                        // run 长度上限 3 格：等高壁沿等高线无限合并成
-                        // 超长横条——斜坡远看"拉伸条纹"（实机）。碎成
-                        // 短段贴近参考图的独立方砖感
-                        bool cont = wall && runStart >= 0
-                            && yt == runTop && yb == runBot
-                            && ci >= 0 && biome[ci] == runBiome
-                            && b == runB + 1
-                            && b - runStart < 3;
-                        if (wall && !cont)
-                        {
-                            if (runStart >= 0)
-                                EmitWall(runStart, runB);
-                            runStart = b;
-                            runB = b;
-                            runTop = yt; runBot = yb;
-                            runBiome = biome[ci];
-                            runX0 = cx0; runZ0 = cz0;
-                        }
-                        else if (!wall && runStart >= 0)
-                        {
-                            EmitWall(runStart, runB);
-                            runStart = -1;
-                            runB = -1;
-                        }
-                        else if (wall)
-                        {
-                            runB = b;
-                        }
-                        // 局部函数：发射 [runStart, runB] 段墙
-                        void EmitWall(int b0, int b1)
-                        {
-                            int ca = dz != 0 ? b0 : a;
-                            int ca2 = dx != 0 ? b0 : a;
-                            var col = Base(runBiome,
-                                tint[ca * W + ca2]) * 0.9f;
-                            float len = (b1 - b0 + 1) * (float)S;
-                            Vector3 p0;
-                            Vector3 t;
-                            if (dx != 0)
-                            {
-                                p0 = new Vector3(
-                                    runX0 + (dx > 0 ? S : 0),
-                                    runBot, runZ0);
-                                t = new Vector3(0, 0, len);
-                            }
-                            else
-                            {
-                                p0 = new Vector3(runX0, runBot,
-                                    runZ0 + (dz > 0 ? S : 0));
-                                t = new Vector3(len, 0, 0);
-                            }
-                            var up = new Vector3(0,
-                                runTop - runBot, 0);
-                            // 绕序必须与 n 一致：几何法线 = cross(up, t)，
-                            // 只有 +X / -Z 两个方向天然对齐，-X / +Z 反
-                            // 了。cull_disabled 下 Godot 会把背面片元的
-                            // NORMAL 取反，反向的墙会被当成"朝阳面"照亮
-                            //（背面墙和朝阳墙一样亮），海岸失去体素明暗。
-                            Vector3 va = p0, vb = p0 + t,
-                                vc = p0 + up, vd = p0 + t + up;
-                            if (dx < 0 || dz > 0)
-                            {
-                                var swap = vb;
-                                vb = vc;
-                                vc = swap;
-                            }
-                            PushQuad(va, vb, vc, vd, n, col);
-                        }
+                        if (yt <= yb)
+                            continue;
+                        float wOff = k * (float)segW;
+                        Vector3 p0 = new Vector3(
+                            dx != 0 ? (dx > 0 ? x0 + S : x0)
+                                : x0 + wOff,
+                            yb,
+                            dz != 0 ? (dz > 0 ? z0 + S : z0)
+                                : z0 + wOff);
+                        Vector3 t = dx != 0
+                            ? new Vector3(0, 0, segW)
+                            : new Vector3(segW, 0, 0);
+                        PushWall(p0, t, yt, yb, n, flip, wallCol);
                     }
                 }
             }

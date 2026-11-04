@@ -702,10 +702,14 @@ public partial class NativeTerrain : RefCounted
                             + (cx - ShellRingOuter) * (float)S;
                         float cz0 = centerZ
                             + (cz - ShellRingOuter) * (float)S;
+                        // run 长度上限 3 格：等高壁沿等高线无限合并成
+                        // 超长横条——斜坡远看"拉伸条纹"（实机）。碎成
+                        // 短段贴近参考图的独立方砖感
                         bool cont = wall && runStart >= 0
                             && yt == runTop && yb == runBot
                             && ci >= 0 && biome[ci] == runBiome
-                            && b == runB + 1;
+                            && b == runB + 1
+                            && b - runStart < 3;
                         if (wall && !cont)
                         {
                             if (runStart >= 0)

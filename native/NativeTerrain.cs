@@ -449,9 +449,16 @@ public partial class NativeTerrain : RefCounted
     // 陆格出顶面 + 侧壁（邻居更低才出，等截面 run 合并），环带内外
     // 缘裙壁到 y=0 防级间缝。光照沿用 ShaderMaterial：NORMAL 轴
     // 对齐，太阳漫反射天然给出面向亮度差（参考图效果）。
-    private static readonly int[] ShellLevels = { 4, 8, 16, 32 };
-    private const int ShellRingInner = 60;
-    private const int ShellRingOuter = 128;
+    // (格距 S, 内缘格距, 外缘格距)——外两级细化一档（16→8/32→16，
+    // 用户拍板"细化"；顶点预算富余实测 fps 不动）；外缘格距加大
+    // 保持各级覆盖与外缘 4096 不缩水
+    private static readonly (int s, int inner, int outer)[] ShellLevels =
+    {
+        (4, 60, 128),
+        (8, 60, 128),
+        (8, 120, 256),
+        (16, 120, 256),
+    };
 
     public ArrayMesh GenerateShellMesh(int centerX, int centerZ)
     {
@@ -460,8 +467,10 @@ public partial class NativeTerrain : RefCounted
         // 共面重叠/圆盘镜像近剪裁裁切，九轮伪影全源于此）。水格出
         // 方块顶面（sea-0.125，与 chunk 水面同高公式），与陆格同一
         // 生成路径——远处水面=大方块，与真实体素水同一视觉语言
-        foreach (int S in ShellLevels)
+        foreach (var (S, ringIn, ringOut) in ShellLevels)
         {
+            int ShellRingInner = ringIn;
+            int ShellRingOuter = ringOut;
             int W = ShellRingOuter * 2;
             // 垂直量化步：曾 S/2（S=32 时 16 格）——整片山体被切成
             // 等高平台 + 16 格高的竖直台阶，从水面低机位看就是"一片

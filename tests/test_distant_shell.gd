@@ -37,7 +37,7 @@ func _test_shell_mesh_geometry() -> void:
 		# 方块语言断言：陆格顶面/侧壁顶点 x,z 均对齐全局格距网格
 		#（中心 32 + S 的整数倍）。级间边界裙深 = 一级量化步（曾落
 		# 到 y=0 的深谷缝在低机位透视下呈放射状楔形暗带，实机两轮）
-		var Ss := [4, 8, 16, 32]
+		var Ss := [4, 8, 8, 16]
 		var S: int = Ss[si]
 		var aligned := true
 		var min_y := 1e9
@@ -66,9 +66,9 @@ func _test_shell_mesh_geometry() -> void:
 					% [si, wtop])
 		check(min_y > 1.0, "级 %d 裙壁不落地（min y=%.0f > 1）"
 				% [si, min_y])
-	# 总量预算：陆面 ~67 万顶点（水面盘独立）
-	check(total_v >= 500000 and total_v <= 900000,
-			"方块风陆面顶点总量（%d，预算 ~67 万）" % total_v)
+	# 总量预算：外两级细化（8/16）后 ~219 万顶点
+	check(total_v >= 1800000 and total_v <= 2600000,
+			"方块风陆面顶点总量（%d，预算 ~219 万）" % total_v)
 	var aabb: AABB = mesh.get_aabb()
 	check(aabb.size.x >= 8100.0 and aabb.size.z >= 8100.0,
 			"壳 AABB 覆盖 ~8192 格（%.0f）" % aabb.size.x)

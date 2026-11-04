@@ -33,7 +33,11 @@ uniform float u_day = 1.0;
 uniform sampler2D ripple_map;
 uniform vec2 ripple_center = vec2(0.0);
 uniform float ripple_window = 16.0;
-const float RIPPLE_VERTEX_DISPLACEMENT = 1.1;  // 可见的涟漪环形波
+// 涟漪顶点位移=0（言波同款教训彻底版）：贪心水面大 quad 的对角
+// 三角分割 × 任何顶点位移 = 三角面法线系统性撕裂（涟漪窗内碎裂
+// 纹，移动/视角变化时闪——实机二轮）。涟漪视觉全走 fragment 法线
+// 扰动（RIPPLE_NORMAL_STRENGTH），物理冲浪/浮力不受影响
+const float RIPPLE_VERTEX_DISPLACEMENT = 0.0;
 const float RIPPLE_NORMAL_STRENGTH = 4.0;
 // 波纹明暗流动的亮度扰动强度
 uniform float ripple_strength = 0.09;

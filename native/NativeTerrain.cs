@@ -608,8 +608,9 @@ public partial class NativeTerrain : RefCounted
                 float k = 1.0f + 0.08f * t;
                 switch (b)
                 {
-                    case 0: return new Color(  // 水格顶面（方块风）
-                        0.28f * k, 0.37f * k, 0.47f * k);
+                    // 水格不吃 tint：±8% 色差透过半透明真水=水下
+                    // "神秘纹路"（移动视差变化=闪，实机）；纯水色
+                    case 0: return new Color(0.28f, 0.37f, 0.47f);
                     case 2: return new Color(
                         0.50f * k, 0.48f * k, 0.46f * k);
                     case 3: return new Color(

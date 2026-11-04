@@ -631,11 +631,13 @@ public partial class NativeTerrain : RefCounted
                     continue;
                 float x0 = centerX + (cx - ShellRingOuter) * (float)S;
                 float z0 = centerZ + (cz - ShellRingOuter) * (float)S;
-                // 水格顶面=真水面(sea+0.875)下 2cm：真水半透明
-                // (alpha≤0.95)，曾放 sea-0.125 透过水可见且浅滩区
-                // 与海床贴面——移动视差+深度竞争=真水闪烁（实机）
+                // 水格顶面沉到 sea+0.3：真水面（已回退带言波+涟漪位移
+                // clamp[-0.16,+0.56]）最低点 sea+0.715——壳格恒在波谷
+                // 之下 0.4 格，任何波态不穿插（贴太近+位移水面=穿插
+                // 闪烁，水面 LOD 修复期的根因总结）；透过半透明水看到
+                // 的是深 0.5 格的均匀纯色底
                 float y = biome[ci] == 0
-                    ? _seaLevel + 0.853f
+                    ? _seaLevel + 0.3f
                     : tops[ci];
                 PushQuad(new Vector3(x0, y, z0),
                     new Vector3(x0 + S, y, z0),

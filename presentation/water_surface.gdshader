@@ -33,11 +33,7 @@ uniform float u_day = 1.0;
 uniform sampler2D ripple_map;
 uniform vec2 ripple_center = vec2(0.0);
 uniform float ripple_window = 16.0;
-// 涟漪顶点位移=0（言波同款教训彻底版）：贪心水面大 quad 的对角
-// 三角分割 × 任何顶点位移 = 三角面法线系统性撕裂（涟漪窗内碎裂
-// 纹，移动/视角变化时闪——实机二轮）。涟漪视觉全走 fragment 法线
-// 扰动（RIPPLE_NORMAL_STRENGTH），物理冲浪/浮力不受影响
-const float RIPPLE_VERTEX_DISPLACEMENT = 0.0;
+const float RIPPLE_VERTEX_DISPLACEMENT = 1.1;  // 可见的涟漪环形波
 const float RIPPLE_NORMAL_STRENGTH = 4.0;
 // 波纹明暗流动的亮度扰动强度
 uniform float ripple_strength = 0.09;
@@ -115,48 +111,30 @@ float ripple_height(vec2 p) {
 	return (texture(ripple_map, uv).r - 0.5) * 2.0 * m;
 }
 
-// 波纹细节随相机距离衰减：固定空间频率的言波法线在远处被视角
-// 压缩成亚像素——欠采样拍频=放射状莫尔扇纹（低角度看海实机四
-// 轮定位：PIL 行方差 22(近)→0.9(远) 随近距单调升实锤）。96 格
-// 内全效，320 格外归零=远处平静海面（远波本就低于可辨角分辨率）。
-// vertex 阶段无 camera_position 内建：CAMERA_MATRIX（视图→世界）
-// 乘原点=相机世界位（vertex/fragment 均可用 INV_VIEW_MATRIX）
-float wave_detail_fade(vec3 wp, vec3 cam_pos) {
-	return 1.0 - smoothstep(96.0, 320.0, length(wp - cam_pos));
-}
-
 void vertex() {
 	world_pos = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
 	shore_fade = COLOR.r;
-	float detail = wave_detail_fade(world_pos,
-			(INV_VIEW_MATRIX * vec4(0.0, 0.0, 0.0, 1.0)).xyz);
 	// 位移钳制 [-0.16, +0.56]：上涌为主的涌浪——波谷不深陷（防浅滩
 	// 露底），波峰受钳与岸衰减共同约束（空间/时间均值实测 ≈-0.03，
 	// 反射平面无需为此补偿）
-	// 言波不做几何位移（曾 *detail 保留近场）：水面 quad 是 greedy
-	// 大方块，对角三角分割让位移后的两三角面法线撕裂——近处被高
-	// 频波纹掩盖，波纹衰减带处只剩系统性三角明暗=俯瞰辐射状大三角
-	// 拼图（空中看海实机复现）。波纹立体感由 fragment 逐像素法线
-	// 承担（无三角形问题）；顶点位移只留近场涟漪（32 格窗口低频环波）
-	float displacement = ripple_height(world_pos.xz)
-			* RIPPLE_VERTEX_DISPLACEMENT * shore_fade;
+	float displacement = (wave_field(world_pos.xz, u_time * wave_speed)
+			* wave_amplitude * storm_scale
+			+ ripple_height(world_pos.xz) * RIPPLE_VERTEX_DISPLACEMENT)
+			* shore_fade;
 	VERTEX.y += clamp(displacement, -0.16, 0.56);
 }
 
 void fragment() {
 	float t = u_time * wave_speed;
-	// 法线：对波高场数值差分（连续坐标，保持平滑）；detail→0 处
-	// 法线归平（莫尔源消除），近处全细节
-	float detail = wave_detail_fade(world_pos,
-			(INV_VIEW_MATRIX * vec4(0.0, 0.0, 0.0, 1.0)).xyz);
+	// 法线：对波高场数值差分（连续坐标，保持平滑）
 	float e = 0.09;
 	float h0 = wave_field(world_pos.xz, t);
 	float hx = wave_field(world_pos.xz + vec2(e, 0.0), t);
 	float hz = wave_field(world_pos.xz + vec2(0.0, e), t);
 	vec3 normal = normalize(vec3(
-			-(hx - h0) * wave_amplitude / e * 6.0 * shore_fade * detail,
+			-(hx - h0) * wave_amplitude / e * 6.0 * shore_fade,
 			1.0,
-			-(hz - h0) * wave_amplitude / e * 6.0 * shore_fade * detail));
+			-(hz - h0) * wave_amplitude / e * 6.0 * shore_fade));
 	// 涟漪法线扰动（叠加到言波法线上，mod 语义：涟漪以法线表现为主）；
 	// 岸边按岸距衰减（位移衰减了，法线扰动同步衰减避免明暗与几何不符）
 	float r0 = ripple_height(world_pos.xz) * shore_fade;

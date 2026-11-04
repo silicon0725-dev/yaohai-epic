@@ -55,11 +55,11 @@ func _test_shell_mesh_geometry() -> void:
 				aligned = false
 				break
 		check(aligned, "级 %d 顶点对齐 %d 格网格" % [si, S])
-		# 方块风水面：水格顶面=真水面(sea+0.875)下 2cm（透过半透明
-		# 真水同色叠加；曾 sea-0.125 与海床贴面=移动闪烁）
+		# 方块风水面：水格顶面 sea+0.3（恒在带位移真水的波谷
+		# sea+0.715 之下——任何波态不穿插）
 		var wtop := 0
 		for i in v.size():
-			if absf(v[i].y - 7.853) < 0.05:
+			if absf(v[i].y - 7.3) < 0.05:
 				wtop += 1
 		if si >= 1:
 			check(wtop > 0, "级 %d 存在水格顶面（%d 顶点）"

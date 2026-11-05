@@ -59,7 +59,7 @@ static func can_mine(block_id: int, registry: VoxelRegistry) -> bool:
 	return break_info(block_id, registry, {}).get("breakable", false)
 
 
-## 破坏方块。返回掉落列表（[{item_id, count}]，可直接喂给 Inventory.add）。
+## 破坏方块。返回掉落列表（[{item_id, count}]，可直接喂给 GridInventory.add）。
 ## allow_drops 由调用方按 break_info().drops 传入（工具等级不足 = 白挖）；
 ## 未破坏（空气/基岩）返回空数组。
 ## 内部经 VoxelWorld.set_block，自动标记网格/碰撞/存档过期并传播到邻区块。

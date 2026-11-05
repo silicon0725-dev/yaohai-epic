@@ -56,8 +56,9 @@ static func by_id(recipe_id: String) -> Dictionary:
 
 
 ## 背包是否集齐该配方全部材料（跨堆计数）。
-static func can_craft(recipe: Dictionary, inventory: Inventory) -> bool:
-	var items := inventory.item_registry()
+## inventory：GridInventory（不标窄类型——preload 类作注解 headless 下不稳）。
+static func can_craft(recipe: Dictionary, inventory) -> bool:
+	var items: ItemRegistry = inventory.item_registry()
 	for entry: Array in recipe.get("inputs", []):
 		var item_id := items.id_for_name(String(entry[0]))
 		if item_id < 0 or inventory.count_of(item_id) < int(entry[1]):
@@ -68,15 +69,15 @@ static func can_craft(recipe: Dictionary, inventory: Inventory) -> bool:
 ## 原子合成：校验 -> 消耗 -> 产出。任何一步不满足返回 false 且
 ## 背包不变；产出放不下时消耗照常、多余产出告警丢弃（与挖掘掉落
 ## 背包满同语义）。
-static func craft(recipe: Dictionary, inventory: Inventory) -> bool:
+static func craft(recipe: Dictionary, inventory) -> bool:
 	if recipe.is_empty() or not can_craft(recipe, inventory):
 		return false
-	var items := inventory.item_registry()
+	var items: ItemRegistry = inventory.item_registry()
 	for entry: Array in recipe["inputs"]:
 		inventory.remove_item(items.id_for_name(String(entry[0])), int(entry[1]))
 	var output: Array = recipe["output"]
 	var output_id := items.id_for_name(String(output[0]))
-	var leftover := inventory.add(output_id, int(output[1]))
+	var leftover: int = inventory.add(output_id, int(output[1]))
 	if leftover > 0:
 		push_warning("背包已满，%d 个合成产物丢失" % leftover)
 	return true

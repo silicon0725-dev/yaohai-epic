@@ -4,6 +4,8 @@
 ##   id            稳定语义名称，例如 "core:stone"、"core:wooden_pickaxe"
 ##   display_name  HUD 显示名（默认字体无 CJK 字形，用英文）
 ##   max_stack     单格最大堆叠（方块/材料 64，工具 1）
+##   grid_w/grid_h 可选：网格背包占格尺寸（默认 1×1；镐 1×2 可旋转，
+##                 多格物品 GridInventory 强制不可堆叠）
 ##   place_block   可选：放置类物品对应的方块稳定名称（如 "core:dirt"）
 ##   tool          可选：{"class": "pickaxe", "tier": 2, "speed": 4.0}
 ##                 class 匹配方块 requires_tool.class 时按 speed 加速，
@@ -64,6 +66,12 @@ func display_name(id: int) -> String:
 
 func max_stack(id: int) -> int:
 	return int(definition_for_id(id).get("max_stack", 64))
+
+
+## 物品在网格背包中的占格尺寸（宽×高，格）。默认 1×1。
+func grid_size(id: int) -> Vector2i:
+	var def := definition_for_id(id)
+	return Vector2i(int(def.get("grid_w", 1)), int(def.get("grid_h", 1)))
 
 
 ## 该物品放置时的方块数值 ID；非放置类或未注册方块返回 -1。

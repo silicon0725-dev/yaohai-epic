@@ -467,7 +467,7 @@ func _update_hud() -> void:
 		"seed: %d    view: %d chunks (r)    world: infinite horizontal" % [
 			config.world_seed, chunk_manager.view_distance],
 		"Hold LMB mine (drops to ground) | walk over to auto-pickup | RMB place",
-		"Q drop held | Ctrl+Q drop stack | 1-9,0/wheel select | E inventory",
+		"Q drop held | Ctrl+Q drop stack | 1-8/wheel select | E inventory | R rotate while dragging",
 		"WASD move | Space jump | Shift sprint",
 	])
 
@@ -527,6 +527,14 @@ func _update_ripples(_delta: float) -> void:
 func show_hint(text: String) -> void:
 	_hint_text = text
 	_hint_expire = 2.5
+
+
+## 背包界面开关时隐藏/恢复调试文字层（玩家控制器调用）：
+## 调试画布层 1 低于玩家 HUD 层 10，但半透明面板盖不干净左侧
+## 屏幕边缘带的亮字与透板残影，干脆整层隐藏
+func set_debug_hud_visible(is_visible: bool) -> void:
+	if _hud_label != null:
+		_hud_label.visible = is_visible
 
 
 func _update_hint(delta: float) -> void:

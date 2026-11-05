@@ -5,6 +5,9 @@ extends VoxelTestCase
 
 const TMP_SAVE_ROOT := "user://tmp_drops_test"
 
+## 新类全局缓存不刷新（约束卡）：一律 preload 引用。
+const GridInv := preload("res://items/grid_inventory.gd")
+
 
 func run() -> void:
 	var ctx := _make_world()
@@ -590,7 +593,7 @@ func _test_manager_pickup(ctx: Dictionary) -> void:
 
 	var manager := DropManager.new()
 	manager.setup(world, items)
-	var inv := Inventory.new(items, 24, 12)
+	var inv := GridInv.new(items)
 	manager.pickup_inventory = inv
 	var player := Node3D.new()
 	player.position = Vector3(8.5, 4.18, 8.5)
@@ -613,7 +616,7 @@ func _test_manager_pickup(ctx: Dictionary) -> void:
 	# 满包：不拾取，掉落原地保留（独立管理器，避免上面的掉落串场）
 	var manager2 := DropManager.new()
 	manager2.setup(world, items)
-	var full := Inventory.new(items, 2, 2)
+	var full := GridInv.new(items, Vector2i(1, 1), Vector2i(1, 1))
 	full.add(dirt, 64)
 	full.add(dirt, 64)
 	manager2.pickup_inventory = full
@@ -625,10 +628,12 @@ func _test_manager_pickup(ctx: Dictionary) -> void:
 	check_eq(full.count_of(stone), 0, "满包不吞物品")
 
 	# 总空间不足的部分入包：同类堆装到满，剩余留在掉落里
-	#（Inventory.add 会开新堆，所以只有整包无空格时才会留余量）
-	var partial := Inventory.new(items, 2, 2)
+	#（GridInventory.add 先并入已有堆，只有整包无空格时才会留余量）
+	var partial := GridInv.new(items, Vector2i(2, 1), Vector2i(1, 1))
+	var filler := items.id_for_name("core:gravel")
 	partial.add(dirt, 60)
-	partial.add(stone, 64)  # 占住第二格，只剩同类 4 格空间
+	partial.add(stone, 64)  # 占住第二格，只剩同类 4 格堆空隙
+	partial.add(filler, 64) # 快捷栏也占满（can_fit 他类断言需要）
 	var manager3 := DropManager.new()
 	manager3.setup(world, items)
 	manager3.pickup_inventory = partial
@@ -640,10 +645,11 @@ func _test_manager_pickup(ctx: Dictionary) -> void:
 	check_eq(manager3.drop_count(), 1, "剩余仍在地面")
 	check_eq(manager3.drop_at(0).count, 6, "掉落余量 6")
 
-	# Inventory.can_fit 配套语义
+	# GridInventory.can_fit 配套语义
 	check(not partial.can_fit(dirt, 1), "同类无空间 can_fit false")
 	check(not partial.can_fit(stone, 1), "满包他类也 false")
-	var fresh := Inventory.new(items, 1, 1)
+	var fresh := GridInv.new(items, Vector2i(1, 1), Vector2i(1, 1))
+	fresh.add(stone, 64)  # 快捷栏占位，主网格只留一个空格
 	check(fresh.can_fit(dirt, 64), "单空格可放整堆")
 	check(not fresh.can_fit(dirt, 65), "单格装不下 65")
 	check(not partial.can_fit(dirt, 0), "零数量恒 false")

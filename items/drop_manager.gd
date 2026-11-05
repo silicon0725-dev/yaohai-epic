@@ -41,8 +41,9 @@ var world: VoxelWorld
 var item_registry: ItemRegistry
 ## 拾取目标（玩家节点，取胶囊中心）
 var pickup_target: Node3D
-## 拾取背包（放不下时掉落留在原地，腾出空间后自动拾取）
-var pickup_inventory: Inventory
+## 拾取背包（GridInventory；不标窄类型——preload 类作注解在 headless
+## 下不稳。放不下时掉落留在原地，腾出空间后自动拾取）
+var pickup_inventory
 ## 树干实心探针（TreeManager.is_solid_for_items；main 接线）——
 ## 掉落物体素点碰撞感知不到树的 StaticBody，主干实心由此补齐，
 ## 否则对着树丢东西会穿树
@@ -167,7 +168,7 @@ func process_drops(delta: float) -> void:
 		if player_center != null and pickup_inventory != null \
 				and drop.ready_for_pickup(player_center) \
 				and pickup_inventory.can_fit(drop.item_id):
-			var leftover := pickup_inventory.add(drop.item_id, drop.count)
+			var leftover: int = pickup_inventory.add(drop.item_id, drop.count)
 			if leftover <= 0:
 				_remove_at(i)
 				continue
@@ -182,10 +183,13 @@ func process_drops(delta: float) -> void:
 
 ## 所在格区块是否就绪（世界顶以上的掉落看顶块，底以下不可能存在）。
 func _chunk_ready(drop: ItemDrop) -> bool:
-	var cell := ItemDrop._cell(drop.position)
-	cell.y = clampi(cell.y, 0, world.config.chunks_y - 1)
-	var chunk := world.get_chunk(
-			VoxelCoords.world_to_chunk(cell, world.config.chunk_size))
+	# 先转区块坐标再按区块数钳制 Y——曾在方块空间直接 clamp 到
+	# chunks_y-1（量纲错位），v9 垂直扩展世界（512 高）里玩家头顶的
+	# 掉落被钳到低区块带，查错区块判"未就绪"而整体冻结（不落/不拾取）
+	var coord := VoxelCoords.world_to_chunk(
+			ItemDrop._cell(drop.position), world.config.chunk_size)
+	coord.y = clampi(coord.y, 0, world.config.chunks_y - 1)
+	var chunk := world.get_chunk(coord)
 	return chunk != null and chunk.state == ChunkState.State.ACTIVE
 
 

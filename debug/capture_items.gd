@@ -2,7 +2,7 @@
 ##   godot-4 --path . res://debug/capture_items.tscn
 ## 输出两张截图（游戏 HUD / 打开的背包界面）并程序化校验：
 ##   - 起始装备已入包（木镐/泥土/木板）
-##   - 快捷栏 12 格 UI 已构建
+##   - 快捷栏 8 列 UI 已构建
 ##   - 背包界面开关切换正常
 extends Node
 
@@ -16,10 +16,14 @@ func _ready() -> void:
 	if manager0 != null:
 		manager0.view_distance = 2
 	var waited := 0
-	# HUD 验证不依赖世界流式安定：等若干帧（区块开始渲染）即截图
-	while waited < 60:
+	# 等加载状态机结束（地形预生成 + overlay 收场动画），上限 30s；
+	# 曾固定等 60 帧，加载界面没收完就截图（两图 md5 相同=画面未变）
+	while bool(main.get("_loading")) and waited < 1800:
 		await get_tree().process_frame
 		waited += 1
+	# overlay 淡出 + 首帧世界渲染
+	for i in 90:
+		await get_tree().process_frame
 
 	var players := main.find_children("Player", "CharacterBody3D", true, false)
 	if players.is_empty():
@@ -29,13 +33,14 @@ func _ready() -> void:
 	var player: CharacterBody3D = players[0]
 
 	# 接线冒烟：起始装备与 UI 构建
-	var inv: Inventory = player.get("inventory")
+	var inv = player.get("inventory")
 	var items: ItemRegistry = player.get("item_registry")
 	var pickaxe := items.id_for_name("core:wooden_pickaxe")
 	var ok: bool = inv.count_of(pickaxe) == 1 \
 			and inv.count_of(items.id_for_name("core:dirt")) == 16 \
 			and inv.count_of(items.id_for_name("core:planks")) == 16 \
-			and player.get("_slot_panels").size() == 12
+			and player.get("_hb_col_panels").size() == 8 \
+			and int(inv.hotbar_pick(0).get("item_id", -1)) == pickaxe
 	print("接线冒烟（起始装备/快捷栏 UI）: %s" % ("PASS" if ok else "FAIL"))
 
 	await RenderingServer.frame_post_draw

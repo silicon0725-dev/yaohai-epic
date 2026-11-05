@@ -16,6 +16,7 @@ shape = SubResource("CapsuleShape3D_1")
 [node name="Camera" type="Camera3D" parent="."]
 
 [node name="HUD" type="CanvasLayer" parent="."]
+layer = 10
 
 [node name="Crosshair" type="Control" parent="HUD"]
 script = ExtResource("2_ch")

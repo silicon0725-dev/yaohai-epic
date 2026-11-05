@@ -26,6 +26,12 @@ func _run() -> void:
 	var main: Node = load("res://scenes/main.tscn").instantiate()
 	main.save_root = ISOLATED_SAVE_ROOT
 	add_child(main)
+	# 等加载状态机结束再开测（曾只等 10 帧：加载没收完，玩家冻结、
+	# 拾取磁吸不生效，7 项拾取判定全超时——capture_items 同病已修）
+	var waited := 0
+	while bool(main.get("_loading")) and waited < 1800:
+		await get_tree().physics_frame
+		waited += 1
 	for i in 10:
 		await get_tree().physics_frame
 
@@ -50,20 +56,27 @@ func _run() -> void:
 			player.world.registry, items)
 	var item_id: int = drop_entries[0]["item_id"]
 	_expect(drop_manager.drop_count() == 1, "挖掘产物生成地面掉落（%s）" % mined_name)
-	var have_before := player.inventory.count_of(item_id)
+	var have_before: int = player.inventory.count_of(item_id)
 	var picked := false
 	for i in PICKUP_TIMEOUT_FRAMES:
 		await get_tree().physics_frame
 		if drop_manager.drop_count() == 0:
 			picked = true
 			break
+		if i == 60:
+			# 散射落点（±1.2/可能滚进挖掘坑）超出站立拾取半径：把玩家
+			# 中心直接移到掉落物上再等——本检查验证"走近拾取"机制，
+			# 不是站桩运气
+			var stray = drop_manager.drop_at(0)
+			if stray != null:
+				player.global_position = stray.position
 	_expect(picked, "挖掘掉落自动拾取")
 	_expect(player.inventory.count_of(item_id) == have_before + 1,
 			"拾取入包（%d -> %d）" % [
 				have_before, player.inventory.count_of(item_id)])
 
 	# -- 头顶精确掉落同样闭环 --
-	var dirt_before := player.inventory.count_of(dirt)
+	var dirt_before: int = player.inventory.count_of(dirt)
 	drop_manager.spawn_drop(dirt, 5,
 			player.global_position + Vector3(0.0, 2.5, 0.0), Vector3.ZERO, 0.0)
 	picked = false
@@ -84,7 +97,11 @@ func _run() -> void:
 	_expect(drop_manager.get_child_count() == 1, "掉落与视觉根节点一一对应")
 
 	# -- Q 丢弃：手持物品朝视线抛出，短保护期防吸回 --
-	# 起始装备 slot0 = 木镐（堆叠 1）、slot1 = 泥土 x16
+	# 起始装备（AUTO 先快捷栏）：列 0 = 木镐 1×2 竖放、列 1 = 泥土 x16
+	# 先离开挖掘坑站上开阔地面（否则抛出物撞坑壁回落脚边被吸回）
+	player.global_position += Vector3(1.5, 3.0, 1.5)
+	for i in 30:
+		await get_tree().physics_frame
 	var pickaxe_id := items.id_for_name("core:wooden_pickaxe")
 	_expect(player.inventory.count_of(pickaxe_id) == 1, "丢弃前手持木镐在包")
 	player.call("_drop_held", false)
@@ -101,10 +118,10 @@ func _run() -> void:
 		var eyes := player.global_position + Vector3(0.0, 0.7, 0.0)
 		_expect(thrown_drop.position.distance_to(eyes) < 8.0,
 				"从视线方向抛出（距眼睛 %.1f 格）" % thrown_drop.position.distance_to(eyes))
-	# Ctrl+Q 整堆：切到泥土槽扔整堆（挖掘/拾取的泥土已并入该堆）
+	# Ctrl+Q 整堆：切到泥土列扔整堆（挖掘/拾取的泥土已并入该堆）
 	player.call("_select", 1)
-	var held_dirt := player.inventory.count_at(1)
-	var dirt_before_q := player.inventory.count_of(dirt)
+	var held_dirt: int = int(player.inventory.hotbar_pick(1).get("count", 0))
+	var dirt_before_q: int = player.inventory.count_of(dirt)
 	player.call("_drop_held", true)
 	_expect(player.inventory.count_of(dirt) == dirt_before_q - held_dirt,
 			"Ctrl+Q 扔整堆（泥土 -%d）" % held_dirt)
@@ -121,7 +138,7 @@ func _run() -> void:
 			"抛出的木镐不被站在原地的玩家吸回")
 
 	# -- 存档往返：重启实例后掉落与背包恢复 --
-	var dirt_at_save := player.inventory.count_of(dirt)
+	var dirt_at_save: int = player.inventory.count_of(dirt)
 	main.chunk_manager.save_all(player.get_save_state())
 	main.queue_free()
 	for i in 2:

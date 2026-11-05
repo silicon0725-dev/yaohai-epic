@@ -47,6 +47,8 @@ static func build_default_item_registry(
 		"id": "core:wooden_pickaxe",
 		"display_name": "Wooden Pickaxe",
 		"max_stack": 1,
+		"grid_w": 1,
+		"grid_h": 2,
 		"tool": {"class": "pickaxe", "tier": 2, "speed": 4.0},
 		"icon": {"pixel_art": "pickaxe_wood"},
 	})
@@ -54,6 +56,8 @@ static func build_default_item_registry(
 		"id": "core:stone_pickaxe",
 		"display_name": "Stone Pickaxe",
 		"max_stack": 1,
+		"grid_w": 1,
+		"grid_h": 2,
 		"tool": {"class": "pickaxe", "tier": 3, "speed": 8.0},
 		"icon": {"pixel_art": "pickaxe_stone"},
 	})

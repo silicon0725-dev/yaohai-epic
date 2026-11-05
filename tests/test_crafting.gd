@@ -1,6 +1,9 @@
 ## 合成系统单元测试：配方定义、原子合成、跨堆消耗、升级闭环（§11.1 扩展）。
 extends VoxelTestCase
 
+## 新类全局缓存不刷新（约束卡）：一律 preload 引用。
+const GridInv := preload("res://items/grid_inventory.gd")
+
 
 func run() -> void:
 	var blocks := VoxelTypes.build_default_registry()
@@ -34,16 +37,20 @@ func _test_recipe_definitions(items: ItemRegistry) -> void:
 
 
 func _test_inventory_remove_item(items: ItemRegistry) -> void:
-	var inv := Inventory.new(items, 4, 4)
+	var inv := GridInv.new(items, Vector2i(2, 1), Vector2i(1, 1))
+	var main := GridInv.Zone.MAIN
+	var hotbar := GridInv.Zone.HOTBAR
 	var dirt := items.id_for_name("core:dirt")
-	inv.add(dirt, 64)   # slot0 满
-	inv.add(dirt, 10)   # slot1 10
-	inv.add(dirt, 5)    # slot2 5
-	# 跨堆移除 70：应从末尾堆先扣（5 + 10 + 55 of 64）
+	inv.add(dirt, 64)   # 快捷栏 (0,0) 满
+	inv.add(dirt, 10)   # 主网格 (0,0) 10
+	inv.add(dirt, 5)    # 主网格 (1,0) 5
+	# 跨堆移除 70：条目序从后往前扣（5 + 10 + 55 of 64）
 	check_eq(inv.remove_item(dirt, 70), 70, "跨堆移除 70")
 	check_eq(inv.count_of(dirt), 9, "剩 9（在满堆中）")
-	check(inv.is_empty(1) and inv.is_empty(2), "末尾两堆被清空")
-	check_eq(inv.count_at(0), 9, "剩余都在第一堆")
+	check(inv.is_empty_cell(main, 0, 0) and inv.is_empty_cell(main, 1, 0),
+			"末尾两堆被清空")
+	check_eq(int(inv.entry_at_cell(hotbar, 0, 0).get("count", 0)), 9,
+			"剩余都在第一堆")
 	check_eq(inv.remove_item(dirt, 999), 9, "超量移除取全部")
 	check_eq(inv.count_of(dirt), 0, "清零")
 
@@ -52,7 +59,7 @@ func _test_can_craft_and_craft(items: ItemRegistry) -> void:
 	var planks := items.id_for_name("core:planks")
 	var stick := items.id_for_name("core:stick")
 	var pick := items.id_for_name("core:wooden_pickaxe")
-	var inv := Inventory.new(items, 9, 9)
+	var inv := GridInv.new(items)
 	var pick_recipe := CraftingRecipes.by_id("core:wooden_pickaxe")
 
 	check(not CraftingRecipes.can_craft(pick_recipe, inv), "空包不可合成")
@@ -77,7 +84,7 @@ func _test_progression_chain(items: ItemRegistry) -> void:
 	var wood_pick := items.id_for_name("core:wooden_pickaxe")
 	var cobble := items.id_for_name("core:cobblestone")
 	var stone_pick := items.id_for_name("core:stone_pickaxe")
-	var inv := Inventory.new(items, 9, 9)
+	var inv := GridInv.new(items)
 
 	inv.add(log, 2)
 	check(CraftingRecipes.craft(
@@ -106,7 +113,7 @@ func _test_atomicity(items: ItemRegistry) -> void:
 	# 材料不足时 craft 必须零副作用
 	var planks := items.id_for_name("core:planks")
 	var pick := items.id_for_name("core:wooden_pickaxe")
-	var inv := Inventory.new(items, 9, 9)
+	var inv := GridInv.new(items)
 	inv.add(planks, 3)   # 有木板没木棍
 	check(not CraftingRecipes.craft(
 			CraftingRecipes.by_id("core:wooden_pickaxe"), inv), "缺料合成失败")
@@ -114,10 +121,12 @@ func _test_atomicity(items: ItemRegistry) -> void:
 	check_eq(inv.count_of(pick), 0, "失败零副作用：无产出")
 
 	# 背包满：消耗照常、产出丢弃（与挖掘掉落同语义，告警）。
-	# 单格 64 木板：消耗 2 后堆仍占格，产出的 4 木棍无处安放。
-	var inv2 := Inventory.new(items, 1, 1)
+	# 两格小包：木板填主网格、泥土填快捷栏，产出的 4 木棍无处安放。
+	var inv2 := GridInv.new(items, Vector2i(1, 1), Vector2i(1, 1))
 	var stick := items.id_for_name("core:stick")
+	var filler := items.id_for_name("core:dirt")
 	inv2.add(planks, 64)
+	inv2.add(filler, 64)
 	check(CraftingRecipes.craft(
 			CraftingRecipes.by_id("core:stick_from_planks"), inv2),
 			"背包满时合成仍执行（消耗生效）")

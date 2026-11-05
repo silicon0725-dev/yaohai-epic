@@ -1,10 +1,11 @@
-## 第一人称玩家控制器（开发文档 §12 阶段 B + 物品层）。
+## 第一人称玩家控制器（开发文档 §12 阶段 B + 物品层 + 网格背包）。
 ## 碰撞体：两格高一格宽的胶囊（半径 0.4、总高 2.0），无可见模型。
 ## 移动/跳跃基于 CharacterBody3D + 区块 concave 碰撞；
 ## 交互基于体素 DDA 射线（physics/voxel_raycast.gd）。
-## 物品层：背包（快捷栏 = 前 HOTBAR_SLOTS 格）驱动挖掘工具与放置消耗；
-## 按住左键累积挖掘进度（BlockMining.break_info 决定时长与掉落资格），
-## E 键开关背包界面（点击拿起/放下/交换堆）。
+## 网格背包（GridInventory）：物品占多格（镐 1×2 可旋转），快捷栏 =
+## 网格内 8×2 分区（键 1-8 选列）；E 键开关背包界面，点击拿起/放下，
+## 拖拽中 R/滚轮旋转，落点脚印预览（可放白/不可放红），悬停脚印白高亮，
+## 放下有倾斜→摆正落定动画（参考：塔科夫式网格库存）。
 class_name PlayerController
 extends CharacterBody3D
 
@@ -20,9 +21,14 @@ const REACH := 5.0
 ## 一律回出生点（基岩不可挖，正常游玩不可能低于此高度）。
 const MIN_VALID_CENTER_Y := 1.5
 
-const TOTAL_SLOTS := 24
-const HOTBAR_SLOTS := 12
-const SLOT_PIXELS := 44
+## 新类全局缓存不刷新（约束卡）：一律 preload 引用。
+const GridInv := preload("res://items/grid_inventory.gd")
+
+## 网格背包 UI 常量（格 = 分区格；HUD 快捷栏格独立稍大）
+const HOTBAR_COLS := 8         # 快捷栏列数（键 1-8）
+const CELL := 46               # 背包格边长（px）
+const CELL_GAP := 3            # 格缝（px）
+const HUD_SLOT := 52           # 底部 HUD 快捷栏格边长（px）
 
 # 游泳（v4 水世界）：水中重力/终端速度减小、Space 上浮、移速打折
 const WATER_GRAVITY := 5.0
@@ -35,15 +41,21 @@ const DROP_THROW_SPEED := 5.0
 const DROP_ARC_UP := 1.2
 const DROP_PICKUP_DELAY := 1.0
 
+# 落定动画（放置成功：倾斜→摆正 + 缩放回落）
+const SETTLE_SECONDS := 0.16
+
 var world: VoxelWorld
 var spawn_point := Vector3.ZERO
 
 var item_registry: ItemRegistry
-var inventory: Inventory
+## GridInventory（不标窄类型：preload 类作类型注解在 headless 下不稳）。
+var inventory
 ## 掉落实体管理器（主场景注入；为空时掉落兜底直接入包，独立场景可用）
 var drop_manager: DropManager
 
-var selected_index := 0
+## 选中的快捷栏列（0..HOTBAR_COLS-1；列内容 = 覆盖该列的条目中起始
+## 行最小者优先，见 GridInventory.hotbar_pick）。
+var selected_col := 0
 var _pitch := 0.0
 ## 背包界面打开时暂停交互（移动仍可用）。
 var inventory_open := false
@@ -58,20 +70,22 @@ var _mine_drops := false
 # UI 引用
 @onready var camera: Camera3D = $Camera
 var _hotbar_panel: PanelContainer
-var _slot_panels: Array[Panel] = []
-var _slot_icons: Array[TextureRect] = []
-var _slot_counts: Array[Label] = []
+var _hb_col_panels: Array[Panel] = []
+var _hb_col_icons: Array[TextureRect] = []
+var _hb_col_counts: Array[Label] = []
 var _item_label: Label
 var _progress_bar: ColorRect
 var _progress_fill: ColorRect
 var _inventory_screen: Control
-var _inv_slot_panels: Array[Panel] = []
-var _inv_slot_icons: Array[TextureRect] = []
-var _inv_slot_counts: Array[Label] = []
-## 背包界面里被拿起的堆（跟随鼠标），-1 = 未拿起。
-var _cursor_stack := {"item_id": -1, "count": 0}
-var _cursor_icon: TextureRect
-var _cursor_count: Label
+## zone -> {root, cells(y×x), hover, preview, layer}（网格分区 UI）
+var _zones := {}
+## uid -> Control（条目节点；落定动画定位用）
+var _entry_nodes := {}
+## 拖拽状态：{entry, rotated, from_zone, from_x, from_y}；空字典 = 未拖拽。
+var _drag := {}
+var _drag_icon: Control
+## 最近悬停格（旋转拖拽物后重算预览用）：{zone,x,y} 或空。
+var _hover_cell := {}
 ## 水下全屏色调（v4 水世界）
 var _underwater_tint: ColorRect
 
@@ -79,7 +93,7 @@ var _underwater_tint: ColorRect
 func _ready() -> void:
 	camera.position = Vector3(0.0, EYE_HEIGHT, 0.0)
 	camera.make_current()
-	inventory = Inventory.new(item_registry, TOTAL_SLOTS, HOTBAR_SLOTS)
+	inventory = GridInv.new(item_registry)
 	inventory.changed.connect(_refresh_hud)
 	_build_hud()
 	_refresh_hud()
@@ -93,11 +107,9 @@ func _unhandled_input(event: InputEvent) -> void:
 					_pitch - event.relative.y * MOUSE_SENSITIVITY,
 					-PITCH_LIMIT, PITCH_LIMIT)
 			camera.rotation = Vector3(_pitch, 0.0, 0.0)
-		elif inventory_open and _cursor_icon != null:
-			_cursor_icon.global_position = \
-					_cursor_icon.get_global_mouse_position() - Vector2(16, 16)
-			_cursor_count.global_position = \
-					_cursor_count.get_global_mouse_position() - Vector2(4, 4)
+		elif not _drag.is_empty():
+			_drag_icon.global_position = \
+					_drag_icon.get_global_mouse_position() - _drag_icon.size / 2
 	elif event is InputEventMouseButton and event.pressed:
 		match event.button_index:
 			MOUSE_BUTTON_LEFT:
@@ -112,9 +124,13 @@ func _unhandled_input(event: InputEvent) -> void:
 			MOUSE_BUTTON_WHEEL_UP:
 				if not inventory_open:
 					_cycle_selection(-1)
+				elif not _drag.is_empty():
+					_rotate_drag()
 			MOUSE_BUTTON_WHEEL_DOWN:
 				if not inventory_open:
 					_cycle_selection(1)
+				elif not _drag.is_empty():
+					_rotate_drag()
 	elif event is InputEventKey and event.pressed:
 		match event.keycode:
 			KEY_E:
@@ -123,15 +139,19 @@ func _unhandled_input(event: InputEvent) -> void:
 				# Q 扔 1 个，Ctrl+Q 扔整堆（背包界面打开时不响应）
 				if not inventory_open:
 					_drop_held(event.ctrl_pressed)
+			KEY_R:
+				# 拖拽中旋转（多格物品）
+				if not _drag.is_empty():
+					_rotate_drag()
 			KEY_ESCAPE:
 				if inventory_open:
 					_toggle_inventory()
 				else:
 					Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
-			KEY_1, KEY_2, KEY_3, KEY_4, KEY_5, \
-			KEY_6, KEY_7, KEY_8, KEY_9, KEY_0:
+			KEY_1, KEY_2, KEY_3, KEY_4, \
+			KEY_5, KEY_6, KEY_7, KEY_8:
 				if not inventory_open:
-					_select(_key_to_slot(event.keycode))
+					_select(_key_to_col(event.keycode))
 
 
 func _physics_process(delta: float) -> void:
@@ -251,12 +271,12 @@ func _dispatch_drop(item_id: int, count: int, block_pos: Vector3i) -> void:
 			item_id, count,
 			Vector3(block_pos) + Vector3(0.5, 0.5, 0.5)):
 		return
-	var leftover := inventory.add(item_id, count)
+	var leftover: int = inventory.add(item_id, count)
 	if leftover > 0:
 		push_warning("背包已满，%d 个物品丢失" % leftover)
 
 
-## 玩家身边丢弃一堆物品（关背包时手中还有堆）。返回是否成功落地。
+## 玩家身边丢弃一堆物品（关背包时手中还有条目）。返回是否成功落地。
 func _scatter_at_player(item_id: int, count: int) -> bool:
 	if drop_manager == null:
 		return false
@@ -270,11 +290,12 @@ func _scatter_at_player(item_id: int, count: int) -> bool:
 func _drop_held(whole_stack: bool) -> void:
 	if drop_manager == null or inventory == null:
 		return  # 无实体层（独立场景）：丢弃不可用，物品留在包里
-	if inventory.is_empty(selected_index):
+	var entry := _selected_entry()
+	if entry.is_empty():
 		return
-	var count := inventory.count_at(selected_index) if whole_stack else 1
-	var item_id := inventory.item_id_at(selected_index)
-	inventory.remove_at(selected_index, count)
+	var count := int(entry["count"]) if whole_stack else 1
+	var item_id := int(entry["item_id"])
+	inventory.remove_at_entry(entry, count)
 	# 从眼睛沿视线抛出（含俯仰）；保护期覆盖飞行时间，防止瞬吸回
 	var look := -camera.global_transform.basis.z
 	drop_manager.spawn_drop(
@@ -289,19 +310,27 @@ func _reset_mining() -> void:
 	_mine_elapsed = 0.0
 
 
+## 当前选中快捷栏列的条目（空列返回空字典）。
+func _selected_entry() -> Dictionary:
+	if inventory == null:
+		return {}
+	return inventory.hotbar_pick(selected_col)
+
+
 func _held_tool() -> Dictionary:
 	if item_registry == null or inventory == null:
 		return {}
-	return item_registry.tool_for(inventory.item_id_at(selected_index))
+	var entry := _selected_entry()
+	return item_registry.tool_for(int(entry.get("item_id", -1)))
 
 
 # ---- 放置（消耗手持物品）----
 
 func _try_place() -> void:
-	if inventory.is_empty(selected_index):
+	var entry := _selected_entry()
+	if entry.is_empty():
 		return
-	var block_id := item_registry.place_block_id(
-			inventory.item_id_at(selected_index))
+	var block_id := item_registry.place_block_id(int(entry["item_id"]))
 	if block_id < 0:
 		return  # 手持的不是放置类物品（工具/材料）
 	var hit := _raycast_from_camera()
@@ -309,7 +338,7 @@ func _try_place() -> void:
 		return
 	if BlockPlacement.place(world, hit.block_pos + hit.normal,
 			block_id, _player_aabb(), hit.normal):
-		inventory.remove_at(selected_index, 1)
+		inventory.remove_at_entry(entry, 1)
 	else:
 		# 放置被拒要有反馈（无支撑/与身体重叠）——静默拒绝曾被
 		# 用户误读为"模型丢失"
@@ -333,21 +362,19 @@ func _player_aabb() -> AABB:
 			Vector3(0.8, 2.0, 0.8))
 
 
-# ---- 选择 ----
+# ---- 选择（快捷栏列：键 1-8 / 滚轮循环）----
 
-func _key_to_slot(keycode: int) -> int:
-	if keycode == KEY_0:
-		return 9
+func _key_to_col(keycode: int) -> int:
 	return keycode - KEY_1
 
 
-func _select(index: int) -> void:
-	selected_index = clampi(index, 0, HOTBAR_SLOTS - 1)
+func _select(col: int) -> void:
+	selected_col = clampi(col, 0, HOTBAR_COLS - 1)
 	_refresh_hud()
 
 
 func _cycle_selection(direction: int) -> void:
-	selected_index = posmod(selected_index + direction, HOTBAR_SLOTS)
+	selected_col = posmod(selected_col + direction, HOTBAR_COLS)
 	_refresh_hud()
 
 
@@ -356,16 +383,16 @@ func _cycle_selection(direction: int) -> void:
 func _build_hud() -> void:
 	var hud: CanvasLayer = $HUD
 
-	# 快捷栏：底部中心一排。显式锚点矩形——MINSIZE 预设在 _ready 时
-	# 容器尚未布局出最小尺寸，会得到 0 尺寸把槽位全部压扁。
+	# 快捷栏：底部中心一排（列语义）。显式锚点矩形——MINSIZE 预设在
+	# _ready 时容器尚未布局出最小尺寸，会得到 0 尺寸把槽位全部压扁。
 	_hotbar_panel = PanelContainer.new()
 	var hb_style := StyleBoxFlat.new()
 	hb_style.bg_color = Color(0.06, 0.06, 0.08, 0.55)
 	hb_style.set_corner_radius_all(6)
 	hb_style.set_content_margin_all(4)
 	_hotbar_panel.add_theme_stylebox_override("panel", hb_style)
-	var hb_width := HOTBAR_SLOTS * SLOT_PIXELS + (HOTBAR_SLOTS - 1) * 4 + 8
-	var hb_height := SLOT_PIXELS + 8
+	var hb_width := HOTBAR_COLS * HUD_SLOT + (HOTBAR_COLS - 1) * 4 + 8
+	var hb_height := HUD_SLOT + 8
 	_hotbar_panel.anchor_left = 0.5
 	_hotbar_panel.anchor_right = 0.5
 	_hotbar_panel.anchor_top = 1.0
@@ -380,22 +407,22 @@ func _build_hud() -> void:
 	row.add_theme_constant_override("separation", 4)
 	_hotbar_panel.add_child(row)
 	hud.add_child(_hotbar_panel)
-	for i in HOTBAR_SLOTS:
-		var slot := _make_slot_panel(i == selected_index)
-		slot.add_child(_make_slot_icon())
+	for i in HOTBAR_COLS:
+		var slot := _make_hud_slot(i == selected_col)
+		slot.add_child(_make_hud_slot_icon())
 		var count := _make_count_label()
 		slot.add_child(count)
 		row.add_child(slot)
-		_slot_panels.append(slot)
-		_slot_icons.append(slot.get_child(0))
-		_slot_counts.append(count)
+		_hb_col_panels.append(slot)
+		_hb_col_icons.append(slot.get_child(0))
+		_hb_col_counts.append(count)
 
 	# 手持物品名：快捷栏上方
 	_item_label = Label.new()
 	_item_label.set_anchors_and_offsets_preset(
 			Control.PRESET_CENTER_BOTTOM, Control.PRESET_MODE_MINSIZE)
-	_item_label.offset_top -= SLOT_PIXELS + 40
-	_item_label.offset_bottom -= SLOT_PIXELS + 40
+	_item_label.offset_top -= HUD_SLOT + 40
+	_item_label.offset_bottom -= HUD_SLOT + 40
 	_item_label.add_theme_font_size_override("font_size", 15)
 	_item_label.add_theme_color_override("font_color", Color.WHITE)
 	_item_label.add_theme_color_override("font_outline_color", Color.BLACK)
@@ -429,9 +456,9 @@ func _build_hud() -> void:
 	hud.add_child(_underwater_tint)
 
 
-func _make_slot_panel(selected: bool) -> Panel:
+func _make_hud_slot(selected: bool) -> Panel:
 	var panel := Panel.new()
-	panel.custom_minimum_size = Vector2(SLOT_PIXELS, SLOT_PIXELS)
+	panel.custom_minimum_size = Vector2(HUD_SLOT, HUD_SLOT)
 	panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	var style := StyleBoxFlat.new()
 	style.bg_color = Color(0.08, 0.08, 0.1, 0.65)
@@ -443,7 +470,7 @@ func _make_slot_panel(selected: bool) -> Panel:
 
 
 ## 槽位图标：四边内缩 4px，不遮挡槽位边框（选中高亮）与圆角。
-func _make_slot_icon() -> TextureRect:
+func _make_hud_slot_icon() -> TextureRect:
 	var icon := TextureRect.new()
 	icon.anchor_left = 0.0
 	icon.anchor_right = 1.0
@@ -463,7 +490,7 @@ func _make_count_label() -> Label:
 	var label := Label.new()
 	label.set_anchors_and_offsets_preset(
 			Control.PRESET_BOTTOM_RIGHT, Control.PRESET_MODE_MINSIZE)
-	label.offset_left = -24
+	label.offset_left = -26
 	label.offset_top = -20
 	label.offset_right = -3
 	label.offset_bottom = -3
@@ -477,34 +504,36 @@ func _make_count_label() -> Label:
 
 
 func _refresh_hud() -> void:
-	for i in HOTBAR_SLOTS:
-		_apply_slot_display(
-				_slot_panels[i], _slot_icons[i], _slot_counts[i],
-				inventory.slot(i))
-		var style: StyleBoxFlat = _slot_panels[i].get_theme_stylebox("panel")
-		style.border_color = Color(1, 0.9, 0.4) if i == selected_index \
+	for i in HOTBAR_COLS:
+		_apply_entry_display(
+				_hb_col_panels[i], _hb_col_icons[i], _hb_col_counts[i],
+				inventory.hotbar_pick(i))
+		var style: StyleBoxFlat = _hb_col_panels[i].get_theme_stylebox("panel")
+		style.border_color = Color(1, 0.9, 0.4) if i == selected_col \
 				else Color(0.5, 0.5, 0.55)
-	if inventory.is_empty(selected_index):
+	var entry := _selected_entry()
+	if entry.is_empty():
 		_item_label.text = ""
 	else:
-		_item_label.text = item_registry.display_name(
-				inventory.item_id_at(selected_index))
+		_item_label.text = item_registry.display_name(int(entry["item_id"]))
 	if _inventory_screen != null and is_instance_valid(_inventory_screen):
 		_refresh_inventory_screen()
 
 
-func _apply_slot_display(
-		panel: Panel, icon: TextureRect, count: Label, stack: Dictionary) -> void:
-	if stack.is_empty():
+## 槽位显示（HUD 快捷栏 / 拖拽图标共用）：空条目清空，有货显图标+数量。
+func _apply_entry_display(
+		panel: Panel, icon: TextureRect, count: Label,
+		entry: Dictionary) -> void:
+	if entry.is_empty():
 		icon.texture = null
 		count.text = ""
 		return
 	icon.texture = ItemIcons.icon_for(
-			int(stack["item_id"]), item_registry)
-	count.text = str(stack["count"]) if int(stack["count"]) > 1 else ""
+			int(entry["item_id"]), item_registry)
+	count.text = str(entry["count"]) if int(entry["count"]) > 1 else ""
 
 
-# ---- 背包界面（E 开关；点击拿起/放下/交换/合并堆）----
+# ---- 背包界面（E 开关；网格拖拽：拿起/放下/旋转/合并）----
 
 func _build_inventory_screen(hud: CanvasLayer) -> void:
 	_inventory_screen = Control.new()
@@ -513,11 +542,12 @@ func _build_inventory_screen(hud: CanvasLayer) -> void:
 	_inventory_screen.mouse_filter = Control.MOUSE_FILTER_STOP
 	hud.add_child(_inventory_screen)
 
-	# 半透明遮罩：点击空白不做事，仅视觉聚焦
+	# 半透明遮罩：拖拽中点击 = 把手中条目丢到身边地面
 	var dim := ColorRect.new()
 	dim.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	dim.color = Color(0, 0, 0, 0.35)
-	dim.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	dim.mouse_filter = Control.MOUSE_FILTER_STOP
+	dim.gui_input.connect(_on_dim_input)
 	_inventory_screen.add_child(dim)
 
 	var center := CenterContainer.new()
@@ -525,55 +555,377 @@ func _build_inventory_screen(hud: CanvasLayer) -> void:
 	_inventory_screen.add_child(center)
 	var frame := PanelContainer.new()
 	var frame_style := StyleBoxFlat.new()
-	frame_style.bg_color = Color(0.1, 0.1, 0.13, 0.92)
-	frame_style.set_corner_radius_all(6)
-	frame_style.set_content_margin_all(12)
+	frame_style.bg_color = Color(0.169, 0.169, 0.188, 0.96)
+	frame_style.set_corner_radius_all(8)
+	frame_style.set_content_margin_all(16)
 	frame.add_theme_stylebox_override("panel", frame_style)
 	center.add_child(frame)
 	var layout := HBoxContainer.new()
-	layout.add_theme_constant_override("separation", 16)
+	layout.add_theme_constant_override("separation", 20)
 	frame.add_child(layout)
 
 	# -- 左：合成面板（配方列表，点击合成一次）--
 	layout.add_child(_build_crafting_panel())
-	# -- 右：物品格 --
-	var grid := GridContainer.new()
-	grid.columns = 8
-	grid.add_theme_constant_override("h_separation", 4)
-	grid.add_theme_constant_override("v_separation", 4)
-	layout.add_child(grid)
-	for i in TOTAL_SLOTS:
-		var slot := Panel.new()
-		slot.custom_minimum_size = Vector2(SLOT_PIXELS, SLOT_PIXELS)
-		var style := StyleBoxFlat.new()
-		style.bg_color = Color(0.14, 0.14, 0.17, 0.9)
-		style.set_corner_radius_all(4)
-		slot.add_theme_stylebox_override("panel", style)
-		var icon := _make_slot_icon()
-		slot.add_child(icon)
-		var count := _make_count_label()
-		slot.add_child(count)
-		var index := i
-		slot.gui_input.connect(_on_inventory_slot_input.bind(index))
-		grid.add_child(slot)
-		_inv_slot_panels.append(slot)
-		_inv_slot_icons.append(icon)
-		_inv_slot_counts.append(count)
 
-	# 跟随鼠标的"手中堆"
-	_cursor_icon = TextureRect.new()
-	_cursor_icon.custom_minimum_size = Vector2(SLOT_PIXELS, SLOT_PIXELS)
-	_cursor_icon.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-	_cursor_icon.stretch_mode = TextureRect.STRETCH_SCALE
-	_cursor_icon.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	_cursor_icon.z_index = 10
-	_cursor_icon.visible = false
-	_inventory_screen.add_child(_cursor_icon)
-	_cursor_count = _make_count_label()
-	_cursor_count.z_index = 11
-	_cursor_count.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	_cursor_count.visible = false
-	_inventory_screen.add_child(_cursor_count)
+	# -- 中：主网格 8×9 + 快捷栏 8×2（隔缝）--
+	var middle := VBoxContainer.new()
+	middle.add_theme_constant_override("separation", 12)
+	layout.add_child(middle)
+	middle.add_child(_build_zone(GridInv.Zone.MAIN, 8, 9))
+	middle.add_child(_build_zone(GridInv.Zone.HOTBAR, 8, 2))
+
+	# -- 右：GEAR 穿戴预留容器 4×4 --
+	var right := VBoxContainer.new()
+	right.add_theme_constant_override("separation", 8)
+	layout.add_child(right)
+	var gear_title := Label.new()
+	gear_title.text = "Gear"
+	gear_title.add_theme_font_size_override("font_size", 15)
+	gear_title.add_theme_color_override("font_color", Color(0.75, 0.72, 0.62))
+	right.add_child(gear_title)
+	right.add_child(_build_zone(GridInv.Zone.GEAR, 4, 4))
+
+	# 跟随鼠标的拖拽条目图标
+	_drag_icon = Control.new()
+	_drag_icon.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_drag_icon.z_index = 10
+	_drag_icon.visible = false
+	_inventory_screen.add_child(_drag_icon)
+
+
+## 构建一个网格分区：深色内嵌格阵 + 悬停高亮层 + 落点预览层 + 条目层。
+func _build_zone(zone: int, cols: int, rows: int) -> Control:
+	var root := Control.new()
+	root.custom_minimum_size = Vector2(
+			cols * CELL + (cols - 1) * CELL_GAP,
+			rows * CELL + (rows - 1) * CELL_GAP)
+	var cell_style := StyleBoxFlat.new()
+	cell_style.bg_color = Color(0.086, 0.086, 0.102, 0.95)
+	cell_style.set_corner_radius_all(2)
+	var cells: Array = []
+	for y in rows:
+		var row_cells: Array = []
+		for x in cols:
+			var cell := Panel.new()
+			cell.position = Vector2(
+					x * (CELL + CELL_GAP), y * (CELL + CELL_GAP))
+			cell.size = Vector2(CELL, CELL)
+			cell.add_theme_stylebox_override("panel", cell_style)
+			cell.gui_input.connect(_on_cell_input.bind(zone, x, y))
+			cell.mouse_entered.connect(_on_cell_hover.bind(zone, x, y))
+			cell.mouse_exited.connect(_on_cell_exit.bind(zone))
+			root.add_child(cell)
+			row_cells.append(cell)
+		cells.append(row_cells)
+	# 落点预览（z 4）与悬停脚印高亮（z 5）在条目层（z 6）之下
+	var preview := ColorRect.new()
+	preview.color = Color(1, 1, 1, 0.25)
+	preview.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	preview.z_index = 4
+	preview.visible = false
+	root.add_child(preview)
+	var hover := ColorRect.new()
+	hover.color = Color(1, 1, 1, 0.22)
+	hover.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	hover.z_index = 5
+	hover.visible = false
+	root.add_child(hover)
+	var layer := Control.new()
+	layer.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	layer.z_index = 6
+	root.add_child(layer)
+	_zones[zone] = {
+		"root": root, "cells": cells,
+		"hover": hover, "preview": preview, "layer": layer,
+	}
+	return root
+
+
+## 分区内条目节点的像素原点（含格缝）。
+func _cell_origin(zone: int, x: int, y: int) -> Vector2:
+	return Vector2(x * (CELL + CELL_GAP), y * (CELL + CELL_GAP))
+
+
+## 条目脚印的像素尺寸（含格缝）。
+func _footprint_px(item_id: int, rotated: bool) -> Vector2:
+	var fp: Vector2i = inventory.footprint(item_id, rotated)
+	return Vector2(
+			fp.x * CELL + (fp.x - 1) * CELL_GAP,
+			fp.y * CELL + (fp.y - 1) * CELL_GAP)
+
+
+## 全量重建各分区条目节点（changed 信号驱动；条目量级 <百，全量足够）。
+func _rebuild_entries() -> void:
+	_entry_nodes.clear()
+	for zone in _zones:
+		var layer: Control = _zones[zone]["layer"]
+		for child in layer.get_children():
+			child.queue_free()
+		for e in inventory.entries_in(int(zone)):
+			layer.add_child(_make_entry_node(e))
+
+
+## 条目节点：正方形图标（旋转安全）+ 右下角数量。
+func _make_entry_node(e: Dictionary) -> Control:
+	var item_id := int(e["item_id"])
+	var node := Control.new()
+	node.position = _cell_origin(int(e["zone"]), int(e["x"]), int(e["y"]))
+	node.size = _footprint_px(item_id, bool(e["rotated"]))
+	node.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var side := maxf(node.size.x, node.size.y) - 6.0
+	var icon := TextureRect.new()
+	icon.size = Vector2(side, side)
+	icon.position = (node.size - Vector2(side, side)) / 2.0
+	icon.pivot_offset = Vector2(side, side) / 2.0
+	icon.rotation = PI / 2 if bool(e["rotated"]) else 0.0
+	icon.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	icon.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	icon.texture = ItemIcons.icon_for(item_id, item_registry)
+	icon.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	node.add_child(icon)
+	var count := _make_count_label()
+	node.add_child(count)
+	count.text = str(e["count"]) if int(e["count"]) > 1 else ""
+	_entry_nodes[int(e["uid"])] = node
+	return node
+
+
+func _refresh_inventory_screen() -> void:
+	if not inventory_open:
+		return
+	_rebuild_entries()
+	_refresh_crafting()
+
+
+# ---- 格子事件（点击/悬停）----
+
+func _on_cell_input(event: InputEvent, zone: int, x: int, y: int) -> void:
+	if not (event is InputEventMouseButton) or not event.pressed:
+		return
+	if event.button_index != MOUSE_BUTTON_LEFT:
+		return
+	if _drag.is_empty():
+		_begin_drag(zone, x, y)
+	else:
+		_attempt_drop(zone, x, y)
+
+
+func _on_cell_hover(zone: int, x: int, y: int) -> void:
+	_hover_cell = {"zone": zone, "x": x, "y": y}
+	_update_zone_overlays(zone, x, y)
+
+
+func _on_cell_exit(zone: int) -> void:
+	_hover_cell = {}
+	(_zones[zone]["hover"] as ColorRect).visible = false
+	(_zones[zone]["preview"] as ColorRect).visible = false
+
+
+## 悬停高亮 / 拖拽落点预览。未拖拽：物品脚印白高亮、空格无反馈
+##（参考图语义）；拖拽中：预览脚印（可放白/不可放红）。
+func _update_zone_overlays(zone: int, x: int, y: int) -> void:
+	var ui: Dictionary = _zones[zone]
+	var hover: ColorRect = ui["hover"]
+	var preview: ColorRect = ui["preview"]
+	hover.visible = false
+	preview.visible = false
+	if _drag.is_empty():
+		var e: Dictionary = inventory.entry_at_cell(zone, x, y)
+		if e.is_empty():
+			return
+		hover.position = _cell_origin(zone, int(e["x"]), int(e["y"]))
+		hover.size = _footprint_px(int(e["item_id"]), bool(e["rotated"]))
+		hover.color = Color(1, 1, 1, 0.22)
+		hover.visible = true
+	else:
+		var item_id := int(_drag["entry"]["item_id"])
+		preview.position = _cell_origin(zone, x, y)
+		preview.size = _footprint_px(item_id, bool(_drag["rotated"]))
+		var what: String = inventory.drop_check(
+				_drag["entry"], zone, x, y, bool(_drag["rotated"]))
+		preview.color = Color(1, 1, 1, 0.25) if what != "blocked" \
+				else Color(1, 0.25, 0.2, 0.28)
+		preview.visible = true
+
+
+# ---- 拖拽（拿起 → 旋转 → 放下/弹回/丢地上）----
+
+func _begin_drag(zone: int, x: int, y: int) -> void:
+	var e: Dictionary = inventory.pickup(zone, x, y)
+	if e.is_empty():
+		return
+	_drag = {
+		"entry": e,
+		"rotated": bool(e.get("rotated", false)),
+		"from_zone": zone, "from_x": int(e["x"]), "from_y": int(e["y"]),
+	}
+	_refresh_drag_icon()
+
+
+## 拖拽图标重建（拿起/旋转/部分并入后调用）。
+func _refresh_drag_icon() -> void:
+	for child in _drag_icon.get_children():
+		child.queue_free()
+	var e: Dictionary = _drag["entry"]
+	var rotated: bool = _drag["rotated"]
+	_drag_icon.size = _footprint_px(int(e["item_id"]), rotated)
+	var side := maxf(_drag_icon.size.x, _drag_icon.size.y) - 6.0
+	var icon := TextureRect.new()
+	icon.size = Vector2(side, side)
+	icon.position = (_drag_icon.size - Vector2(side, side)) / 2.0
+	icon.pivot_offset = Vector2(side, side) / 2.0
+	icon.rotation = PI / 2 if rotated else 0.0
+	icon.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	icon.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	icon.texture = ItemIcons.icon_for(int(e["item_id"]), item_registry)
+	icon.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_drag_icon.add_child(icon)
+	var count := _make_count_label()
+	_drag_icon.add_child(count)
+	count.text = str(e["count"]) if int(e["count"]) > 1 else ""
+	_drag_icon.visible = true
+	_drag_icon.global_position = \
+			_drag_icon.get_global_mouse_position() - _drag_icon.size / 2
+
+
+## 旋转拖拽物（1×1 物品无旋转意义，忽略）。
+func _rotate_drag() -> void:
+	var e: Dictionary = _drag["entry"]
+	if item_registry.grid_size(int(e["item_id"])) == Vector2i.ONE:
+		return
+	_drag["rotated"] = not bool(_drag["rotated"])
+	_refresh_drag_icon()
+	if not _hover_cell.is_empty():
+		_update_zone_overlays(
+				int(_hover_cell["zone"]),
+				int(_hover_cell["x"]), int(_hover_cell["y"]))
+
+
+func _attempt_drop(zone: int, x: int, y: int) -> void:
+	var e: Dictionary = _drag["entry"]
+	# 并入已有堆时对目标堆做落定动画，先记下目标
+	var merge_target: Dictionary = inventory.entry_at_cell(zone, x, y)
+	var result: int = inventory.try_drop(
+			e, zone, x, y, bool(_drag["rotated"]))
+	match result:
+		GridInv.DropResult.PLACED:
+			var uid := int(e["uid"])
+			_clear_drag()
+			_play_settle(uid)
+		GridInv.DropResult.MERGED:
+			var uid := int(merge_target.get("uid", -1))
+			_clear_drag()
+			_play_settle(uid)
+		GridInv.DropResult.PARTIAL:
+			_refresh_drag_icon()  # 余量继续手持
+		_:
+			_bounce_back()
+
+
+## 放不下：弹回原位（拿起时的格子必已空出）+ 落定动画反馈。
+func _bounce_back() -> void:
+	var e: Dictionary = _drag["entry"]
+	var ok: bool = inventory.try_drop(e, int(_drag["from_zone"]),
+			int(_drag["from_x"]), int(_drag["from_y"]),
+			bool(_drag["rotated"])) == GridInv.DropResult.PLACED
+	if not ok:
+		# 理论不可达（原位无人争抢）；兜底自动寻位防丢物品
+		inventory.add(int(e["item_id"]), int(e["count"]))
+	var uid := int(e["uid"])
+	_clear_drag()
+	_play_settle(uid)
+
+
+## 拖拽中点击遮罩 / 关包时手中还有条目：丢到身边地面；
+## 实体层不可用则弹回背包（放不下则丢失并告警）。
+func _drop_drag_to_world() -> void:
+	var e: Dictionary = _drag["entry"]
+	var item_id := int(e["item_id"])
+	var count := int(e["count"])
+	if not _scatter_at_player(item_id, count):
+		var leftover: int = inventory.add(item_id, count)
+		if leftover > 0:
+			push_warning("背包已满，%d 个物品丢失" % leftover)
+	_clear_drag()
+
+
+func _clear_drag() -> void:
+	_drag = {}
+	_drag_icon.visible = false
+	for child in _drag_icon.get_children():
+		child.queue_free()
+	for zone in _zones:
+		(_zones[zone]["preview"] as ColorRect).visible = false
+
+
+func _on_dim_input(event: InputEvent) -> void:
+	if event is InputEventMouseButton and event.pressed \
+			and event.button_index == MOUSE_BUTTON_LEFT \
+			and not _drag.is_empty():
+		_drop_drag_to_world()
+
+
+## 落定动画：倾斜→摆正 + 缩放回落（参考图放置瞬间的姿态收拢）。
+func _play_settle(uid: int) -> void:
+	var node: Control = _entry_nodes.get(uid)
+	if node == null or not is_instance_valid(node):
+		return
+	node.pivot_offset = node.size / 2.0
+	var tween := node.create_tween()
+	tween.set_parallel(true)
+	tween.tween_property(node, "scale", Vector2.ONE,
+			SETTLE_SECONDS).from(Vector2(1.12, 1.12)) \
+			.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+	tween.tween_property(node, "rotation", 0.0,
+			SETTLE_SECONDS).from(0.14) \
+			.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+
+
+func _toggle_inventory() -> void:
+	inventory_open = not inventory_open
+	_inventory_screen.visible = inventory_open
+	# 开背包时隐藏 HUD 快捷栏（背包面板自带快捷区且面板底边与之重叠）、
+	# 物品名与准星；层级 10 高于 main 调试文字层（1），不再被其遮盖
+	_hotbar_panel.visible = not inventory_open
+	_item_label.visible = not inventory_open
+	var crosshair := get_node_or_null("HUD/Crosshair")
+	if crosshair != null:
+		crosshair.visible = not inventory_open
+	var parent_node := get_parent()
+	if parent_node != null and parent_node.has_method("set_debug_hud_visible"):
+		parent_node.set_debug_hud_visible(not inventory_open)
+	if inventory_open:
+		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+		_refresh_inventory_screen()
+	else:
+		if not _drag.is_empty():
+			_drop_drag_to_world()
+		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+	_reset_mining()
+
+
+func _process(_delta: float) -> void:
+	# 挖掘进度条实时刷新
+	if _progress_fill == null:
+		return
+	if _mine_active and _mine_seconds > 0.0:
+		var ratio := clampf(_mine_elapsed / _mine_seconds, 0.0, 1.0)
+		_progress_bar.visible = true
+		_progress_fill.size = Vector2(ratio * 60.0, 6.0)
+	else:
+		_progress_bar.visible = false
+
+
+## 相机在水下时叠一层蓝色色调（v1：纯叠加，不做折射/雾）。
+func _update_underwater_tint() -> void:
+	if _underwater_tint == null:
+		return
+	var eye_cell := Vector3i(
+			floori(camera.global_position.x),
+			floori(camera.global_position.y),
+			floori(camera.global_position.z))
+	_underwater_tint.visible = world != null \
+			and world.get_block(eye_cell) == VoxelTypes.WATER_ID
 
 
 # ---- 合成面板（配方列表，点击合成一次；材料不足置灰）----
@@ -661,116 +1013,6 @@ func _on_craft_row_input(event: InputEvent, recipe: Dictionary) -> void:
 		# inventory.changed 已触发整体刷新（含本面板可合成态）
 
 
-func _refresh_inventory_screen() -> void:
-	for i in TOTAL_SLOTS:
-		_apply_slot_display(
-				_inv_slot_panels[i], _inv_slot_icons[i], _inv_slot_counts[i],
-				inventory.slot(i))
-	_refresh_crafting()
-	_refresh_cursor_stack()
-
-
-func _refresh_cursor_stack() -> void:
-	var carrying: bool = int(_cursor_stack["item_id"]) >= 0
-	_cursor_icon.visible = carrying
-	_cursor_count.visible = carrying
-	if carrying:
-		_cursor_icon.texture = ItemIcons.icon_for(
-				int(_cursor_stack["item_id"]), item_registry)
-		_cursor_count.text = str(_cursor_stack["count"]) \
-				if int(_cursor_stack["count"]) > 1 else ""
-		_cursor_icon.global_position = \
-				_cursor_icon.get_global_mouse_position() - Vector2(16, 16)
-		_cursor_count.global_position = \
-				_cursor_count.get_global_mouse_position() - Vector2(4, 4)
-
-
-func _on_inventory_slot_input(event: InputEvent, index: int) -> void:
-	if not (event is InputEventMouseButton) or not event.pressed:
-		return
-	if event.button_index != MOUSE_BUTTON_LEFT:
-		return
-	if _cursor_stack["item_id"] < 0:
-		# 拿起整堆
-		if not inventory.is_empty(index):
-			_cursor_stack = {
-				"item_id": inventory.item_id_at(index),
-				"count": inventory.count_at(index),
-			}
-			inventory.remove_at(index, inventory.count_at(index))
-	else:
-		var cursor_id := int(_cursor_stack["item_id"])
-		if inventory.is_empty(index):
-			# 放下整堆
-			inventory.add(cursor_id, int(_cursor_stack["count"]))
-			_cursor_stack = {"item_id": -1, "count": 0}
-		elif inventory.item_id_at(index) == cursor_id:
-			# 同类并入（放不下的留在手中）
-			var space := item_registry.max_stack(cursor_id) \
-					- inventory.count_at(index)
-			var moved := mini(space, int(_cursor_stack["count"]))
-			if moved > 0:
-				inventory.add(cursor_id, moved)
-				_cursor_stack["count"] = int(_cursor_stack["count"]) - moved
-				if int(_cursor_stack["count"]) <= 0:
-					_cursor_stack = {"item_id": -1, "count": 0}
-		else:
-			# 交换：手中堆与槽内堆互换
-			var old: Dictionary = {
-				"item_id": inventory.item_id_at(index),
-				"count": inventory.count_at(index),
-			}
-			inventory.remove_at(index, old["count"])
-			inventory.add(cursor_id, int(_cursor_stack["count"]))
-			_cursor_stack = old
-	_refresh_hud()
-
-
-func _toggle_inventory() -> void:
-	inventory_open = not inventory_open
-	_inventory_screen.visible = inventory_open
-	if inventory_open:
-		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
-		_refresh_inventory_screen()
-	else:
-		# 关闭时若手中还有堆：丢到身边地面（实体层可用），
-		# 否则放回背包（放不下则丢失并告警）
-		if _cursor_stack["item_id"] >= 0:
-			var held_id := int(_cursor_stack["item_id"])
-			var held_count := int(_cursor_stack["count"])
-			if not _scatter_at_player(held_id, held_count):
-				var leftover := inventory.add(held_id, held_count)
-				if leftover > 0:
-					push_warning("背包已满，%d 个物品丢失" % leftover)
-			_cursor_stack = {"item_id": -1, "count": 0}
-		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
-	_reset_mining()
-
-
-func _process(_delta: float) -> void:
-	# 挖掘进度条实时刷新
-	if _progress_fill == null:
-		return
-	if _mine_active and _mine_seconds > 0.0:
-		var ratio := clampf(_mine_elapsed / _mine_seconds, 0.0, 1.0)
-		_progress_bar.visible = true
-		_progress_fill.size = Vector2(ratio * 60.0, 6.0)
-	else:
-		_progress_bar.visible = false
-
-
-## 相机在水下时叠一层蓝色色调（v1：纯叠加，不做折射/雾）。
-func _update_underwater_tint() -> void:
-	if _underwater_tint == null:
-		return
-	var eye_cell := Vector3i(
-			floori(camera.global_position.x),
-			floori(camera.global_position.y),
-			floori(camera.global_position.z))
-	_underwater_tint.visible = world != null \
-			and world.get_block(eye_cell) == VoxelTypes.WATER_ID
-
-
 # ---- 存档状态（§9.1 player_state）----
 
 ## 导出为可 JSON 化的字典（Vector3 转数组）。
@@ -784,13 +1026,14 @@ func get_save_state() -> Dictionary:
 		"spawn_point": [spawn.x, spawn.y, spawn.z],
 		"yaw": rotation.y,
 		"pitch": camera.rotation.x,
-		"selected_index": selected_index,
+		"selected_index": selected_col,
 		"inventory": inventory.serialize(),
 	}
 
 
 ## 从存档恢复（在已入树、脚下区块已预热后调用）。
-## 旧档无 inventory 键：给起始装备（物品层上线时刻的迁移语义）。
+## 旧档无 inventory 键：给起始装备（物品层上线时刻的迁移语义）；
+## 旧档 inventory 为槽位数组：GridInventory.deserialize 自动迁移。
 func apply_save_state(state: Dictionary) -> void:
 	var position_data: Array = state.get("position", [])
 	if position_data.size() == 3:
@@ -807,4 +1050,4 @@ func apply_save_state(state: Dictionary) -> void:
 		inventory.deserialize(state["inventory"])
 	else:
 		inventory.apply_starting_kit(ItemTypes.STARTING_KIT)
-	_select(int(state.get("selected_index", selected_index)))
+	_select(int(state.get("selected_index", selected_col)))

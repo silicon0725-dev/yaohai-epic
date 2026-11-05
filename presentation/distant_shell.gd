@@ -49,6 +49,11 @@ func setup(p_world, p_player: Node3D, p_environment) -> void:
 	_material = material
 
 	_mesh_instance = MeshInstance3D.new()
+	# 整体下沉 2 格（v2 遗产找回）：内缘伸进 chunk 视距圈（160 <
+	# 256）形成重叠带，壳格顶与 chunk 地形同源数据近似共面——
+	# z-fighting 闪；沉 2 格恒在真实地形之下，交界由 chunk 从上方
+	# 覆盖（重叠带外缘的真实↔壳衔接由跨界壁兜底）
+	_mesh_instance.position.y = -2.0
 	_mesh_instance.material_override = material
 	_mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	# layer1（主相机可见）+ layer3 标记：镜像反射相机剔除 layer3——

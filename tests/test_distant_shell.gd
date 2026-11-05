@@ -56,22 +56,23 @@ func _test_shell_mesh_geometry() -> void:
 				break
 		check(aligned, "级 %d 顶点对齐 %d 格网格" % [si, S])
 		# 方块风水面：水格顶面 sea+0.3（恒在带位移真水的波谷
-		# sea+0.715 之下——任何波态不穿插）+ 纯水色断言（曾
-		# MixCol 漏水格分支返回纯黑——"水没了"实机一轮）
+		# sea+0.715 之下——任何波态不穿插）+ 水色范围断言
+		#（近端 0.19/0.27/0.42 衔接真水观感→640 外雾灰蓝的
+		# 距离渐变；曾纯黑回归——"水没了"实机一轮）
 		var wtop := 0
 		var wcol_bad := 0
 		for i in v.size():
 			if absf(v[i].y - 7.3) < 0.05:
 				wtop += 1
 				var c: Color = cols[i]
-				if absf(c.r - 0.28) > 0.02 or absf(c.g - 0.37) > 0.02 \
-						or absf(c.b - 0.47) > 0.02:
+				if c.r < 0.18 or c.r > 0.29 or c.g < 0.26 \
+						or c.g > 0.38 or c.b < 0.41 or c.b > 0.48:
 					wcol_bad += 1
 		if si >= 1:
 			check(wtop > 0, "级 %d 存在水格顶面（%d 顶点）"
 					% [si, wtop])
 			check(wcol_bad == 0,
-					"级 %d 水格顶面纯水色（%d 偏差顶点）"
+					"级 %d 水格顶面距离渐变水色（%d 偏差顶点）"
 					% [si, wcol_bad])
 		check(min_y > 1.0, "级 %d 裙壁不落地（min y=%.0f > 1）"
 				% [si, min_y])

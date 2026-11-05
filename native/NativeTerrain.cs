@@ -460,10 +460,15 @@ public partial class NativeTerrain : RefCounted
     //   真实地形=无缝，略过绘同 DH onBorder overdraw 思想）；
     //   最外缘/视距圈侧才用固定裙深（雾吞区）。
     // (格距 S, 内缘世界格, 外缘世界格)——半径单位=世界格。级间
-    // 边界 768/2048 是各级格距公倍数，全局对齐网格无游移
+    // 边界 768/2048 是各级格距公倍数，全局对齐网格无游移。
+    // 内缘 160：壳中心 64 格步进游移下最坏内缘=160+64=224 <
+    // chunk 视距 256——恒重叠 32 格以上。曾内缘 240（+64 游移
+    // 最坏 304>256）：视距边缘 8-16 格真空带（"真实地形边缘悬空
+    // 土柱、柱间透天空"实机——v2 起结构性缺陷，壳从未与 chunk
+    // 圈保证衔接）；重叠区共面由壳节点整体下沉 2 格防 z-fighting
     private static readonly (int s, int inner, int outer)[] ShellLevels =
     {
-        (4, 240, 768),
+        (4, 160, 768),
         (8, 768, 2048),
         (16, 2048, 4096),
     };
@@ -504,6 +509,8 @@ public partial class NativeTerrain : RefCounted
             var grassN = new byte[W * W];
             var rockN = new byte[W * W];
             var sandN = new byte[W * W];
+            // 格中心距壳心距离（水色过渡用——真水→壳水观感衔接）
+            var rdist = new int[W * W];
             var inRing = new bool[W * W];
             for (int cz = 0; cz < W; cz++)
             for (int cx = 0; cx < W; cx++)
@@ -522,6 +529,7 @@ public partial class NativeTerrain : RefCounted
                     continue;
                 int ci = cz * W + cx;
                 inRing[ci] = true;
+                rdist[ci] = (int)Math.Sqrt((double)r2);
                 // 高度=格中心列真实值（DH datapoint 同思想：格内真实
                 // 数据，无 max 偏置——max 会把山脊展宽成等高平台，
                 // 远处"拉长"主因）。2×2 采样只做群系/水陆统计
@@ -624,6 +632,63 @@ public partial class NativeTerrain : RefCounted
                     tops[i] = cap;
             }
 
+            // ---- 边界圈高度钳制（DH 数据金字塔的单调性：父级 ≥
+            // 子级每格）---- 独立中心列采样让级间高度不单调：粗级
+            // 首圈可凭空高于细级末圈（768 边界"灰白条带矮墙"实机）
+            // 或壳内缘格低于真实地形列（240 边界真实地形边缘悬空露
+            // 断面——"悬空土柱"实机）。钳制：本格在某方向出环且该
+            // 方向朝内（邻中心更近壳心）时，格顶抬到内侧细一级网格
+            // 邻格顶的 max——边界处高度由内侧承接（壁由内侧格出到
+            // 本格顶），无洞无错位；"本格高于内侧"由本格跨界壁兜
+            // 底（画到内侧真实高度-2 过绘）。内缘朝真实区逐列钳
+            //（step=1）；768/2048 朝内分别按 4/8 网格分段
+            int[] kdx = { 1, -1, 0, 0 };
+            int[] kdz = { 0, 0, 1, -1 };
+            for (int cz2 = 0; cz2 < W; cz2++)
+            for (int cx2 = 0; cx2 < W; cx2++)
+            {
+                int ci2 = cz2 * W + cx2;
+                if (!inRing[ci2] || biome[ci2] == 0)
+                    continue;
+                int bx2 = centerX + (cx2 - W / 2) * S;
+                int bz2 = centerZ + (cz2 - W / 2) * S;
+                float ccx = bx2 + S * 0.5f - centerX;
+                float ccz = bz2 + S * 0.5f - centerZ;
+                float cc2 = ccx * ccx + ccz * ccz;
+                for (int k = 0; k < 4; k++)
+                {
+                    int nx2 = cx2 + kdx[k], nz2 = cz2 + kdz[k];
+                    if (nx2 >= 0 && nx2 < W && nz2 >= 0 && nz2 < W
+                        && inRing[nz2 * W + nx2])
+                        continue;  // 环内邻居无需钳
+                    float ndx = ccx + kdx[k] * S;
+                    float ndz = ccz + kdz[k] * S;
+                    if (ndx * ndx + ndz * ndz >= cc2)
+                        continue;  // 只钳朝内方向（外缘由跨界壁兜底）
+                    int nR = (int)Math.Sqrt(ndx * ndx + ndz * ndz);
+                    int sN = ShellStepAt(nR);
+                    if (sN >= S)
+                        continue;  // 邻侧不更细（异常）不钳
+                    int step = sN > 0 ? sN : 1;
+                    int nSeg2 = S / step;
+                    for (int seg = 0; seg < nSeg2; seg++)
+                    {
+                        float mid = seg * step + step * 0.5f;
+                        int px = kdx[k] != 0
+                            ? bx2 + (kdx[k] > 0 ? S : 0)
+                                + kdx[k] * (step / 2)
+                            : bx2 + (int)mid;
+                        int pz = kdz[k] != 0
+                            ? bz2 + (kdz[k] > 0 ? S : 0)
+                                + kdz[k] * (step / 2)
+                            : bz2 + (int)mid;
+                        int nbTop = CellTopAt(px, pz);
+                        if (nbTop > tops[ci2])
+                            tops[ci2] = nbTop;
+                    }
+                }
+            }
+
             var verts = new List<Vector3>();
             var norms = new List<Vector3>();
             var cols = new List<Color>();
@@ -645,24 +710,40 @@ public partial class NativeTerrain : RefCounted
             // 合色 + 每格 hash 抖动 ±16%（曾单 biome 色+连续噪声
             // ±8%：同 biome 等高格颜色几乎一致，等高平台/等高壁连
             // 片成 100+ 格横条——放大裁剪实锤；DH 靠格内主导方块
-            // 色差打破连片，混合色+独立抖动同效）。曾把水格漏出
-            // 本函数（计数全 0 落保护分支返回纯黑）——"水没了"
-            // 实机一轮
+            // 色差打破连片，混合色+独立抖动同效）。三基色=真实纹理
+            // 平均色 PIL 抽样（grass_top/stone/sand.png）——240 边
+            // 界"深绿突变浅黄绿"（旧沙色 0.72/0.66/0.49 偏亮黄是
+            // 主犯）。曾把水格漏出本函数（计数全 0 落保护分支返回
+            // 纯黑）——"水没了"实机一轮
             Color MixCol(int ci, float t)
             {
                 if (biome[ci] == 0)
-                    return new Color(0.28f, 0.37f, 0.47f);
+                {
+                    // 水色距离过渡（实机水侧 256 交界"亮蓝有浪→灰
+                    // 蓝无浪平直横线"）：近端延续真水观感（深蓝
+                    // 0.19/0.27/0.42，截图像素抽样），640 外渐到雾
+                    // 化灰蓝——浪纹细节差靠颜色+雾压住（静态 mesh
+                    // 无从生浪）；重叠带 [160,256] 透过真水看到的
+                    // 也是这色=水色深度自然
+                    float f = Math.Min(1.0f, Math.Max(0.0f,
+                        (rdist[ci] - 256.0f) / 384.0f));
+                    f = f * f * (3.0f - 2.0f * f);
+                    return new Color(
+                        0.19f + 0.09f * f,
+                        0.27f + 0.10f * f,
+                        0.42f + 0.05f * f);
+                }
                 float k = 1.0f + 0.16f * t;
                 float tot = grassN[ci] + rockN[ci] + sandN[ci];
                 if (tot <= 0)
                     tot = 1;
                 return new Color(
-                    (0.24f * grassN[ci] + 0.50f * rockN[ci]
-                        + 0.72f * sandN[ci]) / tot * k,
-                    (0.36f * grassN[ci] + 0.48f * rockN[ci]
-                        + 0.66f * sandN[ci]) / tot * k,
-                    (0.18f * grassN[ci] + 0.46f * rockN[ci]
-                        + 0.49f * sandN[ci]) / tot * k);
+                    (0.26f * grassN[ci] + 0.53f * rockN[ci]
+                        + 0.50f * sandN[ci]) / tot * k,
+                    (0.35f * grassN[ci] + 0.52f * rockN[ci]
+                        + 0.47f * sandN[ci]) / tot * k,
+                    (0.16f * grassN[ci] + 0.49f * rockN[ci]
+                        + 0.37f * sandN[ci]) / tot * k);
             }
 
             // 格顶面（陆格=量化高度；水格=sea-0.125 方块风水面，
@@ -766,18 +847,20 @@ public partial class NativeTerrain : RefCounted
                         continue;
                     }
                     // ---- 跨界壁（级间边界/最外缘/视距圈）----
-                    // 探针：界外半格处的世界点，判它属于哪级（无级
-                    // =最外缘/视距圈，固定裙深兜底，雾吞区）
+                    // 探针：本格中心沿方向推进一格（邻格中心近似，
+                    // 判它属于哪级；曾用格角点 z0——斜向边界处判级
+                    // 偏差）
                     int edgeX = dx != 0
                         ? (int)(dx > 0 ? x0 + S : x0) : (int)x0;
                     int edgeZ = dz != 0
                         ? (int)(dz > 0 ? z0 + S : z0) : (int)z0;
-                    int probeX = edgeX + dx * (S / 2);
-                    int probeZ = edgeZ + dz * (S / 2);
+                    int probeX = (int)x0 + S / 2 + dx * S;
+                    int probeZ = (int)z0 + S / 2 + dz * S;
                     int ddx = probeX - centerX;
                     int ddz = probeZ - centerZ;
-                    int sOut = ShellStepAt((int)Math.Sqrt(
-                        (double)(ddx * ddx + ddz * ddz)));
+                    int probeR = (int)Math.Sqrt(
+                        (double)(ddx * ddx + ddz * ddz));
+                    int sOut = ShellStepAt(probeR);
                     int nSeg = 1, segW = S;
                     if (sOut > 0 && sOut < S)
                     {
@@ -801,7 +884,13 @@ public partial class NativeTerrain : RefCounted
                         }
                         else
                         {
-                            yb = Math.Max(tops[ci] - S, _seaLevel - 1);
+                            // 无邻级：朝内到真实区（240 内缘）贴真实
+                            // 地形-2（与级间同规则，真实地形边缘不出
+                            // 悬空断面）；仅最外缘（4096 外）用固定
+                            // 裙深（雾吞区兜底）
+                            yb = probeR < RingInner
+                                ? CellTopAt(probeX, probeZ) - 2
+                                : Math.Max(tops[ci] - S, _seaLevel - 1);
                         }
                         if (yt <= yb)
                             continue;

@@ -15,6 +15,10 @@ uniform vec3 u_sun_dir = vec3(0.5, 0.89, 0.25);
 
 void fragment() {
 	float diff = max(dot(normalize(NORMAL), normalize(u_sun_dir)), 0.0);
-	float lum = 0.18 + 0.45 * diff;
+	// 亮度对齐真实地形（五态一致性实测：UNSHADED 壳比场景光照下
+	// 的真实地形亮 ~2 倍——30.5 vs 16.2，交界带明暗差读作"接缝"）。
+	// 底光 0.18→0.08、漫反射 0.45→0.22（整体 ~0.45×，立体感结构
+	// 保留：受光面/背光面相对差不变）；u_day 日夜联动不变
+	float lum = 0.08 + 0.22 * diff;
 	ALBEDO = COLOR.rgb * vec3(lum * u_day);
 }

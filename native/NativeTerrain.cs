@@ -590,8 +590,14 @@ public partial class NativeTerrain : RefCounted
             // 生成一整片从坡顶直落海面的高墙，墙间露出壳水面圆盘——
             // 远景看就是一排悬在水上的灰板幕帘（用户实机截图）。
             // 做法：以"水下格"（全水格 sea-1 与半水格 sea-2）为源做
-            // BFS 距离场，把陆格顶钳到 sea+1+(d-1)*step，海岸线变成
-            // 一级一级下水的缓坡，单面墙高被压到 step 量级。
+            // BFS 距离场（扩散上限 4 格），把陆格顶钳到
+            // sea+1+(d-1)*step，海岸线变成一级一级下水的缓坡，单面
+            // 墙高被压到 step 量级。半径上限：曾无限制扩散整个环带
+            // ——sea+5~sea+45 的大片丘陵全落入压制范围（cap=sea+1+
+            // 2(d-1)），被拍成每 2 格一级的规则缓坡="断层处一整个
+            // 斜面没有任何地形结构"（实机截图实锤，用户定位"LOD
+            // 地形生成部分地方有问题"）；压临水 1-4 格已足够防幕帘
+            const int CoastRadius = 4;
             int coastStep = Math.Max(2, S / 8);
             var dist = new int[W * W];
             for (int i = 0; i < dist.Length; i++)
@@ -607,6 +613,8 @@ public partial class NativeTerrain : RefCounted
             while (frontier.Count > 0)
             {
                 int i = frontier.Dequeue();
+                if (dist[i] >= CoastRadius)
+                    continue;
                 int nd = dist[i] + 1;
                 int ix = i % W;
                 int iz = i / W;

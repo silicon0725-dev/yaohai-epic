@@ -536,12 +536,14 @@ public partial class NativeTerrain : RefCounted
                 var (hCenter, _, _) = ColumnProfile(
                     bx + S / 2, bz + S / 2);
                 int grass = 0, rock = 0, sand = 0, waterN = 0;
+                int hMin = int.MaxValue;
                 for (int sz = 0; sz < 2; sz++)
                 for (int sx = 0; sx < 2; sx++)
                 {
                     var (h, isRocky, isSandy) = ColumnProfile(
                         bx + (sx == 0 ? q : S - 1 - q),
                         bz + (sz == 0 ? q : S - 1 - q));
+                    if (h < hMin) hMin = h;
                     if (h <= _seaLevel) waterN++;
                     else if (isRocky) rock++;
                     else if (isSandy) sand++;
@@ -579,8 +581,18 @@ public partial class NativeTerrain : RefCounted
                     biome[ci] = rock >= sand && rock >= grass ? (byte)2
                         : sand >= grass ? (byte)3 : (byte)1;
                     // 全陆格至少露出水面 1 格：既避开与壳水格顶
-                    //（sea+0.3）贴面，又不会把浅滩整片拔高
-                    tops[ci] = Math.Max(hCenter, _seaLevel + 1);
+                    //（sea+0.3）贴面，又不会把浅滩整片拔高。
+                    // 重叠带（r≤288：chunk 恒覆盖 256+壳中心游移
+                    // 32）：顶取 5 点采样 min（中心+2×2 角）——恒
+                    // 不高于格内真实列，绝不从真实地形里穿出（实机
+                    // "真实边缘与 LOD 重合"=中心列恰在局部高点时壳
+                    // 叠在真实地形上）；压低不露洞：chunk 切墙是
+                    // 全高面，墙脚永远落地。288 外恢复中心列（正常
+                    // LOD 采样），过渡由逐格壁表达
+                    int top = rdist[ci] <= 288
+                        ? Math.Min(hCenter, hMin)
+                        : hCenter;
+                    tops[ci] = Math.Max(top, _seaLevel + 1);
                 }
             }
 
@@ -656,7 +668,12 @@ public partial class NativeTerrain : RefCounted
             for (int cx2 = 0; cx2 < W; cx2++)
             {
                 int ci2 = cz2 * W + cx2;
-                if (!inRing[ci2] || biome[ci2] == 0)
+                // 重叠带（r≤288）格由 chunk 完整覆盖+min 采样保证
+                // 不穿出——max 钳制只服务裸露区级间衔接（内缘 160
+                // 深处曾=交界，现交界在 chunk 边 256，深处的 max
+                // 抬升反而把壳顶抬回真实地形之上=穿出复发）
+                if (!inRing[ci2] || biome[ci2] == 0
+                    || rdist[ci2] <= 288)
                     continue;
                 int bx2 = centerX + (cx2 - W / 2) * S;
                 int bz2 = centerZ + (cz2 - W / 2) * S;

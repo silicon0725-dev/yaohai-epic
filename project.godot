@@ -20,7 +20,7 @@ project/assembly_name="VoxelTerrain"
 
 [editor_plugins]
 
-enabled=PackedStringArray("res://addons/voxel_registry_dock/plugin.cfg", "res://addons/voxel_light_inspector/plugin.cfg", "res://addons/atlas_preview_dock/plugin.cfg")
+enabled=PackedStringArray("res://addons/voxel_registry_dock/plugin.cfg", "res://addons/voxel_light_inspector/plugin.cfg", "res://addons/atlas_preview_dock/plugin.cfg", "res://addons/anim_editor/plugin.cfg")
 
 [rendering]
 

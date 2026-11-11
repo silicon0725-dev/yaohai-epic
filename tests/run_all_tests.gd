@@ -37,6 +37,8 @@ const TEST_CASES := [
 	"res://tests/test_sound.gd",
 	"res://tests/test_native_equivalence.gd",
 	"res://tests/test_native_terrain.gd",
+	"res://tests/test_character.gd",
+	"res://tests/test_anim_editor.gd",
 ]
 
 

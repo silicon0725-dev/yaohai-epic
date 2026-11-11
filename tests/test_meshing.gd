@@ -23,6 +23,24 @@ func _mesh(voxel_world: VoxelWorld, coord: Vector3i) -> Dictionary:
 			voxel_world.registry, chunk, voxel_world.collect_neighbors(coord))
 
 
+## 已加载邻域快照：缺失邻居用"空区块"顶替。水侧壁只在邻居已加载且
+## 为空气时出面——视距圈外未加载的邻居不出侧壁（否则加载边界立起
+## 一圈竖墙=用户截图的幕帘）。水方面剔除用例测的是水-水/水-固体的
+## 剔除，不是加载边界，故把四邻当作已加载的空气区块。
+func _mesh_filled(voxel_world: VoxelWorld, coord: Vector3i) -> Dictionary:
+	var chunk: ChunkData = voxel_world.get_chunk(coord)
+	var neigh := voxel_world.collect_neighbors(coord)
+	var dummy := ChunkData.new(
+			Vector3i(coord.x + 1, coord.y, coord.z + 1), chunk.dimensions, 1)
+	for i in neigh.size():
+		# 只填水平 8 邻（idx%9 ∈ 3..5 即 dy=0）：竖直方向维持"缺失"，
+		# 保住 y<0 视为基岩的边界策略（石底面不出面的既有断言）
+		var dy_slot := i % 9
+		if dy_slot >= 3 and dy_slot <= 5 and neigh[i] == null:
+			neigh[i] = dummy
+	return ChunkMesher.build_mesh_arrays(voxel_world.registry, chunk, neigh)
+
+
 func run() -> void:
 	_test_branch_meshing()
 	_test_water_meshing()
@@ -176,7 +194,7 @@ func _test_water_meshing() -> void:
 	var chunk := world.get_chunk(Vector3i(0, 0, 0))
 	chunk.set_block_raw(Vector3i(1, 1, 1), VoxelTypes.WATER_ID)
 	chunk.set_block_raw(Vector3i(1, 2, 1), VoxelTypes.WATER_ID)
-	var arrays := _mesh(world, Vector3i(0, 0, 0))
+	var arrays := _mesh_filled(world, Vector3i(0, 0, 0))
 	check_eq(arrays["indices"].size(), 0, "水不进不透明网格")
 	var water_indices: PackedInt32Array = arrays.get(
 			"water_indices", PackedInt32Array())
@@ -205,7 +223,7 @@ func _test_water_meshing() -> void:
 	var chunk2 := world2.get_chunk(Vector3i(0, 0, 0))
 	chunk2.set_block_raw(Vector3i(1, 0, 1), VoxelTypes.STONE_ID)
 	chunk2.set_block_raw(Vector3i(1, 1, 1), VoxelTypes.WATER_ID)
-	var arrays2 := _mesh(world2, Vector3i(0, 0, 0))
+	var arrays2 := _mesh_filled(world2, Vector3i(0, 0, 0))
 	# 石头顶面（y=1）在水下仍渲染；水只有上方空气面 + 四侧
 	check_eq(arrays2["indices"].size(), 30,
 			"水下固体面仍渲染（石 5 面 + 与水接触面）")

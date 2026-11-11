@@ -17,6 +17,10 @@
 class_name ChunkMesher
 extends RefCounted
 
+## 27 元素邻域快照中 6 向直接邻居的下标（FACES 序：+X,-X,+Y,-Y,+Z,-Z），
+## 索引公式见 build_padded_cache：(dz+1)*9 + (dy+1)*3 + (dx+1)。
+const LOADED_DIR_INDEX := [14, 12, 16, 10, 22, 4]
+
 ## 每个面 4 个角点沿外轮廓排列（几何参考：cross(v1-v0, v2-v1) = 外法线），
 ## corner_uvs 中 v=0 对应贴图上方（草侧贴图的草皮条带在方块顶部）。
 ## 注意：Godot 光栅化的"正面"是从面外侧看呈顺时针（实测验证，
@@ -507,8 +511,22 @@ static func _build_gd(
 	append_water_faces(padded, ps, result,
 			water_levels if water_levels != null
 					else collect_water_levels_world(chunk, neighbors),
-			Vector3i(c.x * d.x, c.y * d.y, c.z * d.z))
+			Vector3i(c.x * d.x, c.y * d.y, c.z * d.z),
+			loaded_dirs(neighbors))
 	return result
+
+
+## 6 向直接邻区块是否已加载（FACES 序：+X,-X,+Y,-Y,+Z,-Z）。
+## 27 元素邻域快照索引 = (dz+1)*9 + (dy+1)*3 + (dx+1)；快照不是
+## 27 元素时一律视为已加载（保持旧行为）。
+static func loaded_dirs(neighbors: Array) -> PackedByteArray:
+	var dirs := PackedByteArray()
+	if neighbors.size() != 27:
+		return dirs
+	dirs.resize(6)
+	for f in 6:
+		dirs[f] = 1 if neighbors[LOADED_DIR_INDEX[f]] != null else 0
+	return dirs
 
 
 ## ---- 细柱小盒（dispatch 表 cross 桶：火把等无碰撞薄方块）----
@@ -659,7 +677,8 @@ static func water_surface_height(level: int) -> float:
 ## 含邻区块；缺省 = 源）。origin 为本区块世界原点。未加 UV（纯色材质）。
 static func append_water_faces(
 		padded: PackedInt32Array, ps: int, out: Dictionary,
-		levels_world: Dictionary = {}, origin: Vector3i = Vector3i.ZERO
+		levels_world: Dictionary = {}, origin: Vector3i = Vector3i.ZERO,
+		dir_loaded: PackedByteArray = PackedByteArray()
 ) -> void:
 	var stride_y := ps
 	var stride_z := ps * ps
@@ -701,6 +720,12 @@ static func append_water_faces(
 						continue
 					var normal: Vector3 = normals_flat[f]
 					var is_side: bool = normal.y == 0.0
+					# 朝未加载邻区块的侧壁不出面：那里没有数据，"空气"
+					# 只代表未知。曾一律按空气出面 -> 水柱在加载边界
+					# （视距圈边缘 / 流式加载前沿）立起一圈从水面直落
+					# 海底的竖墙，等距每 16 格一片=用户实机截图的幕帘。
+					if is_side and dir_loaded.size() == 6 and dir_loaded[f] == 0:
+						continue
 					var corners: Array = corners_flat[f]
 					var base: int = (side_vertices.size()
 							if is_side else vertices.size())

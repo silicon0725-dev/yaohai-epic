@@ -25,6 +25,23 @@ func _make_flow(world: VoxelWorld) -> WaterFlow:
 	return flow
 
 
+## 已加载邻域快照：缺失邻居用"空区块"顶替。水侧壁只在邻居已加载且为
+## 空气时出面——视距圈外未加载的邻居不再出水侧壁（否则加载边界立起
+## 一圈竖墙=用户截图的幕帘）。下面几条用例测的是水面侧沿的连续斜坡，
+## 不是加载边界，故把四邻当作已加载的空气区块。
+func _neighbors_filled(world: VoxelWorld) -> Array:
+	var neigh := world.collect_neighbors(Vector3i.ZERO)
+	var host: ChunkData = world.get_chunk(Vector3i.ZERO)
+	var dummy := ChunkData.new(Vector3i(1, 0, 1), host.dimensions, 1)
+	for i in neigh.size():
+		# 只填水平 8 邻（idx%9 ∈ 3..5 即 dy=0），竖直方向维持缺失 ——
+		# 保住 y<0 视为基岩的边界策略
+		var dy_slot := i % 9
+		if dy_slot >= 3 and dy_slot <= 5 and neigh[i] == null:
+			neigh[i] = dummy
+	return neigh
+
+
 func _run_ticks(flow: WaterFlow, count: int) -> void:
 	for i in count:
 		flow.tick()
@@ -234,7 +251,7 @@ func _test_surface_heights() -> void:
 	world.set_block_state(Vector3i(2, 2, 2), "level", 3, true)
 	var arrays := ChunkMesher.build_mesh_arrays(
 			world.registry, world.get_chunk(Vector3i.ZERO),
-			world.collect_neighbors(Vector3i.ZERO))
+			_neighbors_filled(world))
 	var water_vertices: PackedVector3Array = arrays.get(
 			"water_vertices", PackedVector3Array())
 	var side_vertices: PackedVector3Array = arrays.get(
@@ -261,7 +278,7 @@ func _test_surface_continuity() -> void:
 	world.set_block_state(Vector3i(5, 2, 4), "level", 1, true)
 	var arrays := ChunkMesher.build_mesh_arrays(
 			world.registry, world.get_chunk(Vector3i.ZERO),
-			world.collect_neighbors(Vector3i.ZERO))
+			_neighbors_filled(world))
 	var at_source_h := 0
 	var shared_edge := 0
 	for key in ["water_vertices", "water_side_vertices"]:

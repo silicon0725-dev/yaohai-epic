@@ -194,7 +194,8 @@ static func _build_gd(
 	ChunkMesher.append_water_faces(padded, ps, result,
 			water_levels if water_levels != null
 					else ChunkMesher.collect_water_levels_world(chunk, neighbors),
-			Vector3i(wc.x * wd.x, wc.y * wd.y, wc.z * wd.z))
+			Vector3i(wc.x * wd.x, wc.y * wd.y, wc.z * wd.z),
+			ChunkMesher.loaded_dirs(neighbors))
 	return result
 
 

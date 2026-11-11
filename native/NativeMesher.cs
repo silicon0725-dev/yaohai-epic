@@ -660,6 +660,16 @@ public partial class NativeMesher : RefCounted
         int strideZ = ps * ps;
         // 面偏移与 FACES 序一致：0=+X 1=-X 2=+Y 3=-Y 4=+Z 5=-Z
         int[] neighborOffsets = { 1, -1, strideY, -strideY, strideZ, -strideZ };
+        // 6 向直接邻区块是否存在（同序）。缺失=尚未加载：那里格子的
+        // "空气"只是未知，不能据此给水柱出侧壁，否则加载边界（视距圈
+        // 边缘 / 流式加载前沿）会立起一圈从水面直落海底的竖墙——用户
+        // 实机截图里"等距竖板幕帘"的来源。与 GDScript
+        // ChunkMesher.loaded_dirs 逐位等价（同一 27 元素快照）。
+        int[] dirNeighborIndex = { 14, 12, 16, 10, 22, 4 };
+        bool[] dirLoaded = new bool[6];
+        if (neighborExists != null && neighborExists.Length >= 27)
+            for (int f = 0; f < 6; f++)
+                dirLoaded[f] = neighborExists[dirNeighborIndex[f]] != 0;
 
         List<Vector3> verts = new();
         List<Vector3> norms = new();
@@ -682,6 +692,9 @@ public partial class NativeMesher : RefCounted
                 if (padded[pidx + neighborOffsets[f]] != AirId)
                     continue;
                 bool isSide = FaceNormalAxis[f] != 1;
+                // 朝未加载邻区块的侧壁不出面（见 dirLoaded 注释）。
+                if (isSide && !dirLoaded[f])
+                    continue;
                 Vector3 normal = NormalFor(FaceNormalAxis[f], FaceNormalSign[f]);
                 Vector3[] corners = FaceCorners[f];
                 int baze = isSide ? sideVerts.Count : verts.Count;

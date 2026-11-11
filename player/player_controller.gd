@@ -23,6 +23,7 @@ const MIN_VALID_CENTER_Y := 1.5
 
 ## 新类全局缓存不刷新（约束卡）：一律 preload 引用。
 const GridInv := preload("res://items/grid_inventory.gd")
+const PlayerAvatar := preload("res://characters/player_avatar.gd")
 
 ## 网格背包 UI 常量（格 = 分区格；HUD 快捷栏格独立稍大）
 const HOTBAR_COLS := 8         # 快捷栏列数（键 1-8）
@@ -44,6 +45,19 @@ const DROP_PICKUP_DELAY := 1.0
 # 落定动画（放置成功：倾斜→摆正 + 缩放回落）
 const SETTLE_SECONDS := 0.16
 
+# 相机模式（F5 循环）：0 第一人称 / 1 第三人称背后 / 2 第二人称面前 /
+# 3 越肩（TPS）。外置机位共用：体素 DDA 遮挡收缩（快收慢回弹防抖）
+const CAM_DIST := [0.0, 3.2, 3.6, 2.1]   # 各模式目标距离（米）
+const CAM_MIN_DIST := 0.5                # 收缩下限（别怼进头里）
+const CAM_COLLIDE_PAD := 0.3             # 命中面回退余量
+const CAM_PULL_IN := 9.0                 # 遮挡收拢限速（>跑速 8 防穿墙；防阈值角瞬跳）
+const OCCLUDE_RECOVER := 3.0             # 遮挡解除回弹速率（慢于收拢——快收慢放）
+const CAM_LERP := 14.0
+const SHOULDER_X := 0.55                 # 越肩：机位向角色右侧偏（角色居画面左）
+const SHOULDER_Y := 0.15
+const DODGE_DECAY := 22.0                # 闪避冲量衰减（快冲快收）
+const DODGE_DOUBLE_TAP := 0.28           # 双击方向键判定窗口（秒）
+
 var world: VoxelWorld
 var spawn_point := Vector3.ZERO
 
@@ -59,6 +73,12 @@ var selected_col := 0
 var _pitch := 0.0
 ## 背包界面打开时暂停交互（移动仍可用）。
 var inventory_open := false
+
+## 角色化身（YSM 模型 + 动画；F6 切模型包）
+var avatar
+## 相机模式：0 第一人称 / 1 第三人称背后 / 2 第三人称面前（F5 循环）
+var camera_mode := 0
+var _cam_dist := 3.2
 
 # 挖掘进度状态（目标方块切换/松开左键即重置）
 var _mine_active := false
@@ -86,6 +106,8 @@ var _drag := {}
 var _drag_icon: Control
 ## 最近悬停格（旋转拖拽物后重算预览用）：{zone,x,y} 或空。
 var _hover_cell := {}
+var _dodge_vel := Vector3.ZERO   # 闪避冲量（世界系，衰减叠加到速度）
+var _last_tap := {}              # 方向键 → 上次按下时刻（双击闪避判定）
 ## 水下全屏色调（v4 水世界）
 var _underwater_tint: ColorRect
 
@@ -95,6 +117,12 @@ func _ready() -> void:
 	camera.make_current()
 	inventory = GridInv.new(item_registry)
 	inventory.changed.connect(_refresh_hud)
+	avatar = PlayerAvatar.new()
+	add_child(avatar)
+	# 玩家原点=胶囊中心（脚在 -1.0）；模型原点在脚底——下移一格贴地
+	#（曾整体浮空一格，用户实机抓到）
+	avatar.position = Vector3(0.0, -1.0, 0.0)
+	avatar.setup(self, world)
 	_build_hud()
 	_refresh_hud()
 
@@ -117,6 +145,12 @@ func _unhandled_input(event: InputEvent) -> void:
 				if Input.mouse_mode != Input.MOUSE_MODE_CAPTURED \
 						and not inventory_open:
 					Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+				elif avatar != null and avatar.is_armed():
+					# 拔刀：左键=三段连击（挖掘收刀后恢复）
+					avatar.attack()
+				elif avatar != null and not _raycast_from_camera()["hit"]:
+					# 对空挥拳 = 拳击连击反馈（有目标时走挖掘动作）
+					avatar.play_punch()
 			MOUSE_BUTTON_RIGHT:
 				if Input.mouse_mode == Input.MOUSE_MODE_CAPTURED \
 						and not inventory_open:
@@ -132,6 +166,17 @@ func _unhandled_input(event: InputEvent) -> void:
 				elif not _drag.is_empty():
 					_rotate_drag()
 	elif event is InputEventKey and event.pressed:
+		# 双击方向键 = 闪避（拔刀态；0.28s 窗口内同键二击）
+		var tap_dir := _dodge_dir_name(event.keycode)
+		if tap_dir != "" and not event.echo:
+			var now := Time.get_ticks_msec() / 1000.0
+			if _last_tap.has(tap_dir) \
+					and now - float(_last_tap[tap_dir]) <= DODGE_DOUBLE_TAP:
+				if avatar != null:
+					avatar.dodge(tap_dir)
+				_last_tap.erase(tap_dir)
+			else:
+				_last_tap[tap_dir] = now
 		match event.keycode:
 			KEY_E:
 				_toggle_inventory()
@@ -148,10 +193,35 @@ func _unhandled_input(event: InputEvent) -> void:
 					_toggle_inventory()
 				else:
 					Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+			KEY_F5:
+				_cycle_camera()
+			KEY_F6:
+				if avatar != null:
+					avatar.cycle_model()
+			KEY_F7:
+				# 拔刀/收刀（EF yamato 动作集：连击/闪避/持刀移动）
+				# 战斗系统下线中（avatar.COMBAT_ENABLED）——入口关闭
+				if avatar != null and avatar.COMBAT_ENABLED:
+					avatar.set_armed(not avatar.is_armed())
 			KEY_1, KEY_2, KEY_3, KEY_4, \
 			KEY_5, KEY_6, KEY_7, KEY_8:
 				if not inventory_open:
 					_select(_key_to_col(event.keycode))
+
+
+## 双击闪避方向名（WASD → 前后左右）。
+func _dodge_dir_name(key: Key) -> String:
+	match key:
+		KEY_W:
+			return "forward"
+		KEY_S:
+			return "back"
+		KEY_A:
+			return "left"
+		KEY_D:
+			return "right"
+		_:
+			return ""
 
 
 func _physics_process(delta: float) -> void:
@@ -205,6 +275,15 @@ func _physics_process(delta: float) -> void:
 	motion.y = 0.0
 	if motion.length_squared() > 0.0:
 		motion = motion.normalized() * speed
+	# 闪避冲量叠加（拔刀双击方向；局部→世界，指数衰减 ~0.35s）
+	if avatar != null:
+		var imp: Vector3 = avatar.take_dodge_impulse()
+		if imp != Vector3.ZERO:
+			_dodge_vel = global_transform.basis * imp
+		if _dodge_vel != Vector3.ZERO:
+			motion += _dodge_vel
+			_dodge_vel = _dodge_vel.move_toward(Vector3.ZERO,
+					DODGE_DECAY * delta)
 	velocity.x = motion.x
 	velocity.z = motion.z
 	if deep_water:
@@ -219,6 +298,10 @@ func _physics_process(delta: float) -> void:
 		velocity.y = JUMP_VELOCITY
 	move_and_slide()
 	_update_underwater_tint()
+	if avatar != null:
+		avatar.visible = camera_mode != 0
+		avatar.update_locomotion(velocity, is_on_floor(), deep_water, delta)
+		avatar.set_mining(_mine_active and _mine_seconds != INF)
 
 
 # ---- 挖掘（按住累积进度，§8.2 + 物品层规则）----
@@ -904,7 +987,76 @@ func _toggle_inventory() -> void:
 	_reset_mining()
 
 
-func _process(_delta: float) -> void:
+# ---- 相机模式（F5 循环：第一/第三背后/第二面前/越肩）----
+
+func _cycle_camera() -> void:
+	camera_mode = (camera_mode + 1) % CAM_DIST.size()
+	# 切模式从当前实际距离起步（防从远处瞬间拉近的跳变感）
+	_cam_dist = minf(_cam_dist, float(CAM_DIST[camera_mode]))
+
+
+## 按模式摆相机：
+## - 第一人称：贴合眼位（化身隐藏）；
+## - 外置三态：绕眼位轨道（背后=视线反向 / 面前=视线正向 / 越肩=背后+
+##   右侧偏），遮挡体素 DDA 收缩（命中即收到命中面-0.3，解除按 3m/s
+##   慢回弹——快收慢放是 TPS 防抖惯例）；位置指数平滑跟靶。
+func _position_camera(delta: float) -> void:
+	if camera_mode == 0:
+		camera.position = Vector3(0.0, EYE_HEIGHT, 0.0)
+		camera.rotation = Vector3(_pitch, 0.0, 0.0)
+		return
+	if world == null:
+		return
+	# 视线方向（玩家局部）：pitch 抬头为正；第二人称轨道俯仰钳 ±60°
+	#（look_at 的 up 向量在极点退化，且正面视角不需要过顶）
+	var orbit_pitch := _pitch
+	if camera_mode == 2:
+		orbit_pitch = clampf(_pitch, -1.05, 1.05)
+	var look := Vector3(0.0, 0.0, -1.0).rotated(
+			Vector3(1, 0, 0), orbit_pitch)
+	var to_cam: Vector3 = -look if camera_mode != 2 else look
+	var want := float(CAM_DIST[camera_mode])
+	# 越肩侧偏：玩家右向（pitch 不改变右向）+ 微抬
+	var offset := Vector3.ZERO
+	if camera_mode == 3:
+		offset = global_transform.basis.x * SHOULDER_X \
+				+ Vector3.UP * SHOULDER_Y
+	# 眼位（世界）→ 期望机位方向/距离（含侧偏）
+	var eye := global_position + Vector3(0.0, EYE_HEIGHT, 0.0)
+	var to_cam_world: Vector3 = global_transform.basis * to_cam
+	var want_vec := to_cam_world * want + offset
+	var want_len := want_vec.length()
+	var dir := want_vec / maxf(want_len, 1e-4)
+	# 遮挡收缩/回弹——两侧都限速（快收慢放）。
+	# 收拢曾为瞬间直设：俯仰到阈值角时眼→机射线首次捅进树冠/坡地，
+	# 目标距离一帧跳变 + 相机 14/s 跟入 = 视觉"头抽一下"（用户实机）。
+	# 限速 9 m/s：0.3s 内完成 2.7m 收拢仍快于跑速 8 m/s（防穿墙不回退）。
+	var hit := VoxelRaycast.raycast(world, eye, dir, want_len + 0.2)
+	if hit.hit:
+		var want_d := clampf(float(hit["distance"]) - CAM_COLLIDE_PAD,
+				CAM_MIN_DIST, want_len)
+		_cam_dist = move_toward(_cam_dist, want_d, CAM_PULL_IN * delta)
+	else:
+		_cam_dist = move_toward(_cam_dist, want_len,
+				OCCLUDE_RECOVER * delta)
+	var target_global := eye + dir * _cam_dist
+	# 平滑逼近（指数）；模式切换大跳直接贴位
+	var smooth := 1.0 - exp(-CAM_LERP * delta)
+	camera.global_position = camera.global_position.lerp(
+			target_global, smooth)
+	if camera.global_position.distance_to(target_global) > 8.0:
+		camera.global_position = target_global
+	if camera_mode == 2:
+		# 第二人称：相机角度始终面向人物（俯仰只移动机位高低，
+		# 不带走视角——曾随 _pitch 转动导致看天/看地偏离角色）；
+		# 瞄胸口（眼位下 0.45）：瞄准眼位时人物可视质心偏下
+		camera.look_at(eye - Vector3.UP * 0.45, Vector3.UP)
+	else:
+		camera.rotation = Vector3(_pitch, 0.0, 0.0)
+
+
+func _process(delta: float) -> void:
+	_position_camera(delta)
 	# 挖掘进度条实时刷新
 	if _progress_fill == null:
 		return

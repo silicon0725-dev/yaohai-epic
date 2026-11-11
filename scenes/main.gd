@@ -399,6 +399,9 @@ func _update_day_night(delta: float) -> void:
 		if mat is ShaderMaterial:
 			mat.set_shader_parameter("u_day", u_day)
 	tree_manager.set_day_factor(u_day)
+	# 角色化身同通道（天光顶点色 × u_day）
+	if player != null and player.avatar != null:
+		player.avatar.set_day_factor(u_day)
 	# 深度雾色=当前地平线天色（大气透视的物理本义：远景混向天色）。
 	# 曾用独立 DAY/NIGHT_FOG 常量 lerp day01——日落时天空已暗红而
 	# 雾还亮蓝白，雾把远山推得比天空亮 = "远处发光"（PIL 真值实测
@@ -458,7 +461,7 @@ func _update_hud() -> void:
 	var hint_line := ("[ " + _hint_text + " ]") if not _hint_text.is_empty() else ""
 	_hud_label.text = "\n".join([
 		hint_line,
-		"BUILD 2026-11-01.水三角修复 — 若无此行=旧程序未重启",
+		"BUILD 2026-11-06.角色系统 — 若无此行=旧程序未重启",
 		"Voxel Terrain MVP - Items Layer (inventory + tools + ground drops)",
 		"chunks: %d    faces: %d    in-flight: %d    saved: %d    drops: %d" % [
 			world.chunk_count(), chunk_renderer.total_faces,
@@ -468,7 +471,8 @@ func _update_hud() -> void:
 			config.world_seed, chunk_manager.view_distance],
 		"Hold LMB mine (drops to ground) | walk over to auto-pickup | RMB place",
 		"Q drop held | Ctrl+Q drop stack | 1-8/wheel select | E inventory | R rotate while dragging",
-		"WASD move | Space jump | Shift sprint",
+		"F5 camera (1st person / 3rd behind / 2nd front / shoulder) | F6 character model | F7 draw/sheathe katana",
+		"WASD move | Space jump | Shift sprint | katana: LMB combo x3 | double-tap WASD dodge",
 	])
 
 

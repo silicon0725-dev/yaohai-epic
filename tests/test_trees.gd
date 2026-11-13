@@ -20,6 +20,7 @@ func run() -> void:
 	_test_split_last_cell()
 	_test_split_middle()
 	_test_split_root_base()
+	_test_split_preserves_axis_hint()
 	_test_top_cut_detaches_crown()
 	_test_connectivity()
 	_test_leaf_crown()
@@ -33,7 +34,7 @@ func run() -> void:
 class _CountingManager extends "res://systems/trees/tree_manager.gd":
 	var builds := 0
 
-	func _build_visual(_tree_id: int) -> void:
+	func _build_visual(_tree_id: int, _light_only := false) -> void:
 		builds += 1
 
 
@@ -51,6 +52,9 @@ func _test_light_dirty_rebuild() -> void:
 		"instance": null, "mesh_node": null, "body": null, "refs": 1,
 		"aabb": AABB(Vector3(0, 3, 0), Vector3(3, 8, 3)),
 	}
+	# 列空间索引注册（_mark_light_dirty 只扫邻近列——伪树直插
+	# _trees 不注册则永远不标脏）
+	mgr._trees_by_col[Vector2i(1, 1)] = [123]
 	# 火把放置干旁 5 格：16 格光源影响半径内 → 标脏
 	mgr._on_block_changed(Vector3i(5, 5, 0), VoxelTypes.AIR_ID,
 			VoxelTypes.TORCH_ID)
@@ -69,6 +73,7 @@ func _test_light_dirty_rebuild() -> void:
 			VoxelTypes.DIRT_ID)
 	check(mgr._light_dirty.is_empty(), "同透明度替换不标脏")
 	# 遮挡变化：贴体标脏、4 格外不标脏
+	mgr._bake_last.clear()
 	mgr._on_block_changed(Vector3i(3, 5, 0), VoxelTypes.AIR_ID,
 			VoxelTypes.DIRT_ID)
 	check(mgr._light_dirty.has(123), "3 格内封挡标脏")
@@ -86,6 +91,7 @@ func _test_light_dirty_rebuild() -> void:
 	# 快速通道不依赖管线空闲：光照数据在 block_changed 信号内同步
 	# 落定——重烘曾被 is_idle 门控拖到 remesh 队列排空（秒级滞后，
 	# 实机报告）
+	mgr._bake_last.clear()
 	mgr.idle_check = func() -> bool: return false
 	mgr._process(0.2)
 	check(mgr.builds == 3, "idle=false 仍即时重烘（%d）" % mgr.builds)
@@ -111,7 +117,8 @@ func _test_falling_settle_drop_position() -> void:
 	var body := RigidBody3D.new()
 	body.position = Vector3(37.5, 8.0, -12.5)
 	mgr.add_child(body)
-	mgr._falling[body] = {"cells": 9, "timer": 0.0, "settled": 99.0}
+	mgr._falling[body] = {"cells": 9, "timer": 0.0, "settled": 99.0,
+		"dissolve": -1.0}
 	var dt := 0.05
 	for i in 200:  # settled 已超阈值，首帧即结算
 		mgr._process(dt)
@@ -225,6 +232,36 @@ func _test_split_middle() -> void:
 	var sup := tree.find_supported()
 	check(sup.has(tree.root_branch_id), "A 段（根）仍受支撑")
 	check(not sup.has(tail_id), "B 段失支撑")
+
+
+## split：分裂/前移必须保留 axis_hint——单格转向段全靠 hint 定轴，
+## 新建尾段丢失则 axis_step() 回退竖直：物理化/倒伏的枝干方向与
+## 粗细观感全变（实机"倒地或物理化后枝干粗细变"；砍水平枝倒数
+## 第二格 → B=单格末段 → 曾竖直化）
+func _test_split_preserves_axis_hint() -> void:
+	var tree := TreeGenScript.generate(_species(), 1, Vector3i(0, 3, 0))
+	var root = tree.branches[tree.root_branch_id]
+	var seg := TreeInstScript.BranchNode.new()
+	seg.id = tree.next_branch_id
+	tree.next_branch_id += 1
+	seg.start_cell = root.start_cell + Vector3i(0, 2, 0)
+	seg.end_cell = seg.start_cell + Vector3i(2, 0, 0)
+	seg.axis_hint = Vector3i(1, 0, 0)
+	seg.radius_start = 5
+	seg.radius_end = 3
+	seg.parent_id = tree.root_branch_id
+	root.child_ids.append(seg.id)
+	tree.register_branch(seg)
+	# 切中间格（idx=1）→ B=单格末格
+	var mid: Vector3i = seg.start_cell + Vector3i(1, 0, 0)
+	var r := tree.split_branch_at_cell(mid)
+	check(r["changed"], "水平段切中间格触发变更")
+	var tail = tree.branches.get(int(r["new_tail_id"]))
+	check(tail != null, "产生尾段 B")
+	check(tail.axis_hint == Vector3i(1, 0, 0), "B 段保留 axis_hint")
+	check(tail.axis_step() == Vector3i(1, 0, 0),
+			"B 单格尾段轴保持水平（不回退竖直）")
+	check(tail.cells().size() == 1, "B 为单格尾段")
 
 
 ## split：切根段首格 = 断地，整树失支撑（曾只置 parent=-1 对根

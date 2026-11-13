@@ -16,22 +16,30 @@ extends RefCounted
 ## 构建整棵树（或指定分支子集——倒树刚体用）的 ArrayMesh。
 ## branch_subset 非空时只构建指定分支（含子递归）。
 static func build_mesh(tree: TreeInstance,
-		branch_subset: Dictionary = {}, world: VoxelWorld = null) -> ArrayMesh:
-	if tree.cell_to_branch.is_empty():
+		branch_subset: Dictionary = {}, world: VoxelWorld = null,
+		root_drop: bool = true, light_snap: Dictionary = {}) -> ArrayMesh:
+	var arrays: Array = build_arrays(tree, branch_subset,
+			_make_light_of(world, light_snap), root_drop)
+	if arrays.is_empty():
 		return null
-	var origin := Vector3(tree.origin)
-	var vertices := PackedVector3Array()
-	var normals := PackedVector3Array()
-	var uvs := PackedVector2Array()
-	var colors := PackedColorArray()
-	var indices := PackedInt32Array()
+	var mesh := ArrayMesh.new()
+	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+	return mesh
 
-	var tile := TextureAtlasLoader.tile_grid("log_side")
-	var tile_top := TextureAtlasLoader.tile_grid("log_top")
-	var inv_cols := 1.0 / TextureAtlasLoader.COLS
-	var inv_rows := 1.0 / TextureAtlasLoader.ROWS
-	var uv_o := Vector2(float(tile.x) * inv_cols, float(tile.y) * inv_rows)
-	var uv_ot := Vector2(float(tile_top.x) * inv_cols, float(tile_top.y) * inv_rows)
+
+## worker 线程安全入口：光照快照（coord -> light 字节副本）建数组。
+## 快照由主线程 duplicate 收集，后台只读——无 world 访问无竞争
+static func build_mesh_snap_arrays(tree: TreeInstance,
+		light_snap: Dictionary, chunk_size: int,
+		root_drop: bool = true) -> Array:
+	return build_arrays(tree, {},
+			_make_light_of(null, light_snap, chunk_size), root_drop)
+
+
+## light_of 闭包构造：优先光照快照（worker 路径），退 world 主线程
+## 路径，再退露天。双通道顶点色语义同下
+static func _make_light_of(world: VoxelWorld, light_snap: Dictionary,
+		chunk_size := 16) -> Callable:
 
 	# 面光照采样：f 序法线（0=+X 1=-X 2=+Y 3=-Y 4=+Z 5=-Z）→ 面外邻
 	# 格的光照色。树表面走 tree_surface.gdshader 双通道（与地形
@@ -40,14 +48,23 @@ static func build_mesh(tree: TreeInstance,
 	# max(s,b) 语义的暖色调制永不触发——树干"不受放置光源影响"）；
 	# 天光→ALBEDO×u_day 受场景光。树干曾无顶点色（COLOR=(1,1,1)）。
 	# 跨块/未加载回退露天。
-	var face_normals := [
-		Vector3i(1, 0, 0), Vector3i(-1, 0, 0), Vector3i(0, 1, 0),
-		Vector3i(0, -1, 0), Vector3i(0, 0, 1), Vector3i(0, 0, -1)]
-	var light_of := func(cell: Vector3i, f: int) -> Color:
+	return func(cell: Vector3i, _f: int) -> Color:
 		# 未加载回退必须"露天等价" (0,0,0,1)：方块光 0（无自发光）、
-		# 天光满。曾回 (1,1,1,1)——旧合并语义下只是 albedo 满（无害），
-		# 双通道 EMISSION 语义下 rgb=(1,1,1) = 恒定全亮自发光（重进
-		# 存档后树梢跨块面全亮，实机报告）
+		# 天光满。曾回 (1,1,1,1)——双通道 EMISSION 语义下=恒定全亮
+		# 自发光（重进存档后树梢跨块面全亮，实机报告）
+		if not light_snap.is_empty():
+			var arr: PackedByteArray = light_snap.get(
+					VoxelCoords.world_to_chunk(cell, chunk_size),
+					PackedByteArray())
+			if arr.size() == 0:
+				return Color(0, 0, 0, 1)
+			var lc := VoxelCoords.world_to_local(cell, chunk_size)
+			var i := lc.x + chunk_size * (lc.y + chunk_size * lc.z)
+			var sky := float(arr[i] >> 4) / 15.0
+			var blk := float(arr[i] & 0x0F) / 15.0
+			var blk_c := blk * blk * blk
+			var sky_c := sky * sky * sky
+			return Color(blk_c * 1.44, blk_c, blk_c * 0.56, sky_c)
 		if world == null:
 			return Color(0, 0, 0, 1)
 		var s: int = world.config.chunk_size
@@ -61,6 +78,30 @@ static func build_mesh(tree: TreeInstance,
 		var blk_c := blk * blk * blk
 		var sky_c := sky * sky * sky
 		return Color(blk_c * 1.44, blk_c, blk_c * 0.56, sky_c)
+
+
+## 数组构建核心（worker 安全：tree 只读 + light_of 闭包）
+static func build_arrays(tree: TreeInstance,
+		branch_subset: Dictionary, light_of: Callable,
+		root_drop: bool) -> Array:
+	if tree.cell_to_branch.is_empty():
+		return []
+	var origin := Vector3(tree.origin)
+	var vertices := PackedVector3Array()
+	var normals := PackedVector3Array()
+	var uvs := PackedVector2Array()
+	var colors := PackedColorArray()
+	var indices := PackedInt32Array()
+
+	var tile := TextureAtlasLoader.tile_grid("log_side")
+	var tile_top := TextureAtlasLoader.tile_grid("log_top")
+	var inv_cols := 1.0 / TextureAtlasLoader.COLS
+	var inv_rows := 1.0 / TextureAtlasLoader.ROWS
+	var uv_o := Vector2(float(tile.x) * inv_cols, float(tile.y) * inv_rows)
+	var uv_ot := Vector2(float(tile_top.x) * inv_cols, float(tile_top.y) * inv_rows)
+	var face_normals := [
+		Vector3i(1, 0, 0), Vector3i(-1, 0, 0), Vector3i(0, 1, 0),
+		Vector3i(0, -1, 0), Vector3i(0, 0, 1), Vector3i(0, 0, -1)]
 
 	var subset_mode := not branch_subset.is_empty()
 	# 全局分叉格（子枝 start 回退一步；倒树子集只计子集内分支——
@@ -81,10 +122,10 @@ static func build_mesh(tree: TreeInstance,
 		_emit_branch_segment(vertices, normals, uvs, colors, indices,
 				tree, node, origin, fork_cells,
 				uv_o, uv_ot, inv_cols, inv_rows,
-				light_of, face_normals)
+				light_of, face_normals, root_drop)
 
 	if indices.is_empty():
-		return null
+		return []
 	var arrays := []
 	arrays.resize(Mesh.ARRAY_MAX)
 	arrays[Mesh.ARRAY_VERTEX] = vertices
@@ -92,9 +133,7 @@ static func build_mesh(tree: TreeInstance,
 	arrays[Mesh.ARRAY_TEX_UV] = uvs
 	arrays[Mesh.ARRAY_COLOR] = colors
 	arrays[Mesh.ARRAY_INDEX] = indices
-	var mesh := ArrayMesh.new()
-	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
-	return mesh
+	return arrays
 
 
 ## 阴影专用实心代理：每枝干格一个**轴向满格**盒（半径插值同
@@ -109,8 +148,18 @@ static func build_mesh(tree: TreeInstance,
 ## 树干渐细结构。锥台两端截面 = 段起止半径（与漂亮网格同插值），
 ## 侧面连续无凹环，阴影同时密封且带锥度。
 static func build_shadow_mesh(tree: TreeInstance) -> ArrayMesh:
-	if tree.cell_to_branch.is_empty():
+	var arrays: Array = build_shadow_arrays(tree)
+	if arrays.is_empty():
 		return null
+	var mesh := ArrayMesh.new()
+	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+	return mesh
+
+
+## 阴影代理数组构建（worker 安全：纯 tree 数据）
+static func build_shadow_arrays(tree: TreeInstance) -> Array:
+	if tree.cell_to_branch.is_empty():
+		return []
 	var origin := Vector3(tree.origin)
 	var vertices := PackedVector3Array()
 	var normals := PackedVector3Array()
@@ -217,16 +266,25 @@ static func build_shadow_mesh(tree: TreeInstance) -> ArrayMesh:
 				Vector3(cx3 + w_b, cy3 + w_b, zb), Vector3(cx3 + w_b, cy3 - w_b, zb),
 			]
 		_prism(vertices, normals, dummy_uvs, indices, ca, cb)
+	return _wrap_arrays(vertices, normals, dummy_uvs,
+			PackedColorArray(), indices)
+
+
+static func _wrap_arrays(vertices: PackedVector3Array,
+		normals: PackedVector3Array, uvs: PackedVector2Array,
+		colors: PackedColorArray, indices: PackedInt32Array) -> Array:
 	if indices.is_empty():
-		return null
+		return []
 	var arrays := []
 	arrays.resize(Mesh.ARRAY_MAX)
 	arrays[Mesh.ARRAY_VERTEX] = vertices
 	arrays[Mesh.ARRAY_NORMAL] = normals
+	if uvs.size() > 0:
+		arrays[Mesh.ARRAY_TEX_UV] = uvs
+	if colors.size() > 0:
+		arrays[Mesh.ARRAY_COLOR] = colors
 	arrays[Mesh.ARRAY_INDEX] = indices
-	var mesh := ArrayMesh.new()
-	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
-	return mesh
+	return arrays
 
 
 ## 锥台发射：cap_a/cap_b 各 4 角，统一角序 (u-,v-)(u-,v+)(u+,v+)(u+,v-)
@@ -293,7 +351,8 @@ static func _emit_branch_segment(
 		tree: TreeInstance, node: TreeInstance.BranchNode,
 		origin: Vector3, fork_cells: Dictionary,
 		uv_o: Vector2, uv_ot: Vector2, inv_cols: float, inv_rows: float,
-		light_of: Callable, face_normals: Array
+		light_of: Callable, face_normals: Array,
+		root_drop: bool = true
 ) -> void:
 	var cells: Array = node.cells()
 	var total: int = cells.size()
@@ -333,7 +392,11 @@ static func _emit_branch_segment(
 			# 续接——全局分叉格判定）：逐格变径的台阶环带曾满贴
 			# 年轮（"缝隙里出现年轮"）。
 			var ring_top: bool = i == total - 1 and not fork_cells.has(cell)
-			if i == 0:
+			# root_drop=false（倒树视觉）：跳过首格下探 0.5 盒——它
+			# 是站立树与下方段的接缝补丁；倒树 B 段下方=被砍空格，
+			# 下探盒悬在断口=底部多余半格，落地结算按格盖章时消失
+			# （实机"树往上跳一点"的错觉源）
+			if i == 0 and root_drop:
 				# 下探盒截面内缩 0.005——与下方段等宽时侧面共面闪烁
 				var wd := maxf(w - 0.005, 0.05)
 				var mna := Vector3(cx - wd, cy - 0.5, cz - wd)
@@ -349,7 +412,9 @@ static func _emit_branch_segment(
 			for f in 6:
 				_box(vertices, normals, uvs, colors, indices, mn, mx, f,
 						light_of.call(cell, f),
-						uv_ot if f == 2 and ring_top else uv_o,
+						uv_ot if (f == 2 and ring_top) \
+								or (f == 3 and i == 0 and not root_drop) \
+								else uv_o,
 						inv_cols, inv_rows)
 		else:
 			# 水平段（X 或 Z）：轴向满格，截面 = 竖直方向 w×w
@@ -379,6 +444,19 @@ static func _emit_branch_segment(
 						mx2.z = minf(mx2.z, cz + wch_v)
 					else:
 						mn2.z = maxf(mn2.z, cz - wch_v)
+			# 末端收缩：无子枝续接的末格，轴向远端面收回半格（停在
+			# 末格中心，年轮端面即切口）——满格盒延伸到格边界会戳出
+			# 叶团/结构外（实机横向枝末端突出；竖直段顶面=切顶自然
+			# 不缩，向上延长无此问题）
+			elif i == total - 1 and not child_forks.has(cell):
+				if axis.x > 0:
+					mx2.x = minf(mx2.x, cx)
+				elif axis.x < 0:
+					mn2.x = maxf(mn2.x, cx)
+				elif axis.z > 0:
+					mx2.z = minf(mx2.z, cz)
+				else:
+					mn2.z = maxf(mn2.z, cz)
 			# 年轮只上外露端面：末格/首格的轴向端面且该格无任何
 			# 子枝续接（全局分叉格；上翘子枝处的端面环带贴树皮衔接）
 			var tip_f := 0

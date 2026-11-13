@@ -39,6 +39,9 @@ class BranchNode:
 	var end_cell: Vector3i
 	var radius_start: int = 1
 	var radius_end: int = 1
+	## 单格段轴向提示（v2 生长模拟：转向后立即终止/再转向产生
+	## start==end 的段，轴向无法从端点差推导）。零向量=未指定。
+	var axis_hint: Vector3i = Vector3i.ZERO
 
 	func length() -> int:
 		return (end_cell - start_cell).length() as int + 1
@@ -55,8 +58,9 @@ class BranchNode:
 			p += d
 		return out
 
-	## 轴向单位步进（start→end）。单格段（d 为零向量）默认竖直
-	##（上翘末梢都是单格——曾返回 (0,0,0) 被渲染成 Z 轴横片）
+	## 轴向单位步进（start→end）。单格段（d 为零向量）：优先
+	## axis_hint（v2 单格转向段），未指定默认竖直（上翘末梢都是
+	## 单格——曾返回 (0,0,0) 被渲染成 Z 轴横片）
 	func axis_step() -> Vector3i:
 		var d := end_cell - start_cell
 		if d.x != 0:
@@ -65,7 +69,8 @@ class BranchNode:
 			return Vector3i(0, 0, sign(d.z))
 		if d.y != 0:
 			return Vector3i(0, sign(d.y), 0)
-		return Vector3i(0, 1, 0)
+		return axis_hint if axis_hint != Vector3i.ZERO \
+				else Vector3i(0, 1, 0)
 
 
 func register_branch(node: BranchNode) -> void:
@@ -96,6 +101,17 @@ func split_branch_at_cell(cell: Vector3i) -> Dictionary:
 	var cells := node.cells()
 	var idx := cells.find(cell)
 	assert(idx >= 0)
+	# 段内任意格的插值半径（与 mesh_builder 同式：按段参数线性）。
+	# 切割后所有新端点半径都按"新端点格"重算——曾简化成 A.end=
+	# r_start / B.start=r_end：砍主干中段（游戏里"最底部"常是
+	# 第二格，贴地格被地面挡住）时上半主干 B 段变成 r_end→r_end
+	# 细柱，物理化后整树主干变很细（实机报告+盒级探针实锤：
+	# 刚体枝干 mesh 无任何宽盒）
+	var n_cells := cells.size()
+	var radius_at_index := func(i: int) -> int:
+		return clampi(int(round(lerpf(float(node.radius_start),
+				float(node.radius_end),
+				float(i) / float(maxi(n_cells - 1, 1))))), 1, 8)
 
 	# 清除被切格的索引
 	cell_to_branch.erase(cell)
@@ -110,6 +126,7 @@ func split_branch_at_cell(cell: Vector3i) -> Dictionary:
 			# 底格被挖树不倒、存档重放后树原地复活。
 			if cells.size() >= 2:
 				node.start_cell = cells[1]
+				node.radius_start = radius_at_index.call(1)
 			else:
 				branches.erase(node.id)
 		else:
@@ -124,17 +141,21 @@ func split_branch_at_cell(cell: Vector3i) -> Dictionary:
 	if idx == cells.size() - 1:
 		# 段缩短：end 回退一格
 		node.end_cell = cells[idx - 1]
-		node.radius_end = node.radius_start  # 简化：缩短后端半径取起点
+		node.radius_end = radius_at_index.call(n_cells - 2)
 		revision += 1
 		return {"changed": true, "new_tail_id": -1}
 
 	# 中间格：分裂为 A + B
 	var tail := BranchNode.new()
+	# 轴向提示必须随段——单格转向段（翘梢/斜接）全靠 axis_hint 定轴，
+	# 丢失则 axis_step() 推导回退竖直：物理化/倒伏的枝干方向与粗细
+	# 观感全变（实机"倒地或物理化后枝干粗细变"）
+	tail.axis_hint = node.axis_hint
 	tail.id = next_branch_id
 	next_branch_id += 1
 	tail.start_cell = cells[idx + 1]
 	tail.end_cell = node.end_cell
-	tail.radius_start = node.radius_end  # B 的起点半径沿用原终点
+	tail.radius_start = radius_at_index.call(idx + 1)  # B 首格插值半径
 	tail.radius_end = node.radius_end
 	# 原段子的子枝全部转挂 B
 	for cid in node.child_ids:
@@ -143,7 +164,7 @@ func split_branch_at_cell(cell: Vector3i) -> Dictionary:
 			tail.child_ids.append(cid)
 	node.child_ids = []
 	node.end_cell = cells[idx - 1]
-	node.radius_end = node.radius_start
+	node.radius_end = radius_at_index.call(idx - 1)  # A 末格插值半径
 	# B 的体素索引重建（原索引指向旧段 id）
 	for c in tail.cells():
 		cell_to_branch[c] = tail.id

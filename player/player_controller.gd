@@ -42,6 +42,24 @@ const DROP_THROW_SPEED := 5.0
 const DROP_ARC_UP := 1.2
 const DROP_PICKUP_DELAY := 1.0
 
+# ---- 移动手感 v2（轻微惯性 + 跳跃增强 + 镜头反馈）----
+const ACCEL_GROUND := 46.0    # 地面加速（m/s²）：走速 0.1s 达成
+const DECEL_GROUND := 62.0    # 地面制动（松键 ~0.13s 滑停）
+const ACCEL_AIR := 13.0       # 空中操控（惯性保留，只微调方向）
+const DRAG_AIR := 0.9         # 空中无输入的水平阻尼（滑翔感）
+const COYOTE_TIME := 0.12     # 走出边缘后仍可跳的宽限
+const JUMP_BUFFER := 0.15     # 落地前按跳的预输入窗
+const JUMP_CUT := 0.55        # 提前松开跳跃：上升速度乘数（短跳）
+const FOV_SPRINT_ADD := 5.0   # 冲刺 FOV 拉镜增量（度）
+const FOV_LERP_RATE := 6.0
+const BOB_WALK_AMP := 0.032   # 头部摆动振幅（米，保守防 3D 眩晕）
+const BOB_SPRINT_AMP := 0.055
+const BOB_FREQ_WALK := 1.7    # 步频（Hz）
+const BOB_FREQ_SPRINT := 2.3
+const LAND_DIP_SCALE := 0.022 # 落地下沉：每 m/s 超额下落速度的相机下沉
+const LAND_DIP_MAX := 0.26
+const LAND_DIP_DECAY := 9.0
+
 # 落定动画（放置成功：倾斜→摆正 + 缩放回落）
 const SETTLE_SECONDS := 0.16
 
@@ -78,6 +96,17 @@ var inventory_open := false
 var avatar
 ## 相机模式：0 第一人称 / 1 第三人称背后 / 2 第三人称面前（F5 循环）
 var camera_mode := 0
+# 手感状态（v2）
+var _coyote := 0.0
+var _jump_buf := 0.0
+var _space_prev := false
+var _was_grounded := true
+var _bob_phase := 0.0
+var _bob_y := 0.0
+var _bob_x := 0.0
+var _land_dip := 0.0
+var _fov_base := 0.0
+var _sprinting := false
 var _cam_dist := 3.2
 
 # 挖掘进度状态（目标方块切换/松开左键即重置）
@@ -114,6 +143,7 @@ var _underwater_tint: ColorRect
 
 func _ready() -> void:
 	camera.position = Vector3(0.0, EYE_HEIGHT, 0.0)
+	_fov_base = camera.fov
 	camera.make_current()
 	inventory = GridInv.new(item_registry)
 	inventory.changed.connect(_refresh_hud)
@@ -276,26 +306,70 @@ func _physics_process(delta: float) -> void:
 	if motion.length_squared() > 0.0:
 		motion = motion.normalized() * speed
 	# 闪避冲量叠加（拔刀双击方向；局部→世界，指数衰减 ~0.35s）
+	var dodge_add := Vector3.ZERO
 	if avatar != null:
 		var imp: Vector3 = avatar.take_dodge_impulse()
 		if imp != Vector3.ZERO:
 			_dodge_vel = global_transform.basis * imp
 		if _dodge_vel != Vector3.ZERO:
-			motion += _dodge_vel
+			dodge_add = _dodge_vel
 			_dodge_vel = _dodge_vel.move_toward(Vector3.ZERO,
 					DODGE_DECAY * delta)
-	velocity.x = motion.x
-	velocity.z = motion.z
+	# 手感 v2：目标速度 → 加速/制动逼近（地面快、空中弱保惯性）；
+	# 闪避冲量在平滑后叠加（不被巡航速度上限吞掉）
+	var grounded := is_on_floor()
+	_sprinting = Input.is_physical_key_pressed(KEY_SHIFT) \
+			and motion != Vector3.ZERO
+	var horiz := Vector3(velocity.x, 0.0, velocity.z)
+	if grounded or deep_water:
+		var rate := DECEL_GROUND if motion == Vector3.ZERO \
+				else ACCEL_GROUND
+		horiz = horiz.move_toward(motion, rate * delta)
+	elif motion != Vector3.ZERO:
+		horiz = horiz.move_toward(motion, ACCEL_AIR * delta)
+	else:
+		horiz = horiz.move_toward(Vector3.ZERO, DRAG_AIR * delta)
+	horiz += dodge_add
+	velocity.x = horiz.x
+	velocity.z = horiz.z
+	var vy_before := velocity.y
 	if deep_water:
 		# 游泳：弱重力 + 缓沉，Space 上浮；水上跳出由跳速衰减自然处理。
 		# 玩家不被水流冲走（用户决策）：只有掉落物会被水流冲向下游
 		velocity.y = maxf(velocity.y - WATER_GRAVITY * delta, -WATER_TERMINAL)
 		if Input.is_physical_key_pressed(KEY_SPACE):
 			velocity.y = move_toward(velocity.y, SWIM_UP_SPEED, 24.0 * delta)
-	elif not is_on_floor():
-		velocity.y -= GRAVITY * delta
-	elif Input.is_physical_key_pressed(KEY_SPACE):
-		velocity.y = JUMP_VELOCITY
+		_coyote = 0.0
+	else:
+		var space := Input.is_physical_key_pressed(KEY_SPACE)
+		if space and not _space_prev:
+			_jump_buf = JUMP_BUFFER
+		else:
+			_jump_buf = maxf(_jump_buf - delta, 0.0)
+		if grounded:
+			_coyote = COYOTE_TIME
+		else:
+			_coyote = maxf(_coyote - delta, 0.0)
+		# 土狼时间（刚离地）或地面 → 缓冲的跳跃触发
+		if _jump_buf > 0.0 and (grounded or _coyote > 0.0):
+			velocity.y = JUMP_VELOCITY
+			_jump_buf = 0.0
+			_coyote = 0.0
+			grounded = false
+		elif grounded and space:
+			velocity.y = JUMP_VELOCITY  # 按住连跳（原行为）
+		# 可变跳高：上升中松开 Space 削速度（短跳）
+		if _space_prev and not space and velocity.y > 2.0:
+			velocity.y *= JUMP_CUT
+		_space_prev = space
+		if not grounded:
+			velocity.y -= GRAVITY * delta
+	# 落地轻沉：离地→着地瞬间按超额下落速度叠冲击（指数回弹）
+	if is_on_floor() and not _was_grounded and vy_before < -3.0:
+		_land_dip = minf(_land_dip
+				+ (-vy_before - 3.0) * LAND_DIP_SCALE + 0.03,
+				LAND_DIP_MAX)
+	_was_grounded = is_on_floor()
 	move_and_slide()
 	_update_underwater_tint()
 	if avatar != null:
@@ -419,15 +493,34 @@ func _try_place() -> void:
 	var hit := _raycast_from_camera()
 	if not hit.hit or hit.normal == Vector3i.ZERO:
 		return
-	if BlockPlacement.place(world, hit.block_pos + hit.normal,
+	var placed_pos: Vector3i = hit.block_pos + hit.normal
+	if BlockPlacement.place(world, placed_pos,
 			block_id, _player_aabb(), hit.normal):
 		inventory.remove_at_entry(entry, 1)
+		_snap_onto_placed_block(placed_pos)
 	else:
 		# 放置被拒要有反馈（无支撑/与身体重叠）——静默拒绝曾被
 		# 用户误读为"模型丢失"
 		var parent_node := get_parent()
 		if parent_node != null and parent_node.has_method("show_hint"):
 			parent_node.show_hint("无法放置：位置无支撑或与身体重叠")
+
+
+## 垫脚：下落中往脚下放方块（放置瞬间不与身体重叠——通过检查），
+## 但碰撞体 1-2 帧后才出现，玩家此时已落进该格 → 嵌进方块卡在
+## 空中（实机报告）。放置成功后若新格水平重叠且脚部在其高度区间
+## 内，把玩家抬到方块顶站上（MC 式搭塔）；速度清零防挣脱抖动
+func _snap_onto_placed_block(cell: Vector3i) -> void:
+	var pa := _player_aabb()
+	var feet := global_position.y - 1.0
+	var h_overlap: bool = pa.end.x > float(cell.x) \
+			and pa.position.x < float(cell.x + 1) \
+			and pa.end.z > float(cell.z) \
+			and pa.position.z < float(cell.z + 1)
+	if h_overlap and feet > float(cell.y) - 0.1 \
+			and feet < float(cell.y + 1) - 0.05:
+		global_position.y = float(cell.y + 1) + 1.0 + 0.01
+		velocity.y = 0.0
 
 
 func _raycast_from_camera() -> Dictionary:
@@ -1001,8 +1094,25 @@ func _cycle_camera() -> void:
 ##   右侧偏），遮挡体素 DDA 收缩（命中即收到命中面-0.3，解除按 3m/s
 ##   慢回弹——快收慢放是 TPS 防抖惯例）；位置指数平滑跟靶。
 func _position_camera(delta: float) -> void:
+	# 头部摆动（仅地面移动积累相位；走/跑分频幅）+ 落地下沉指数回弹
+	var hspd := Vector2(velocity.x, velocity.z).length()
+	if is_on_floor() and hspd > 0.6:
+		var sprinting_b := hspd > WALK_SPEED + 0.6
+		var freq := BOB_FREQ_SPRINT if sprinting_b else BOB_FREQ_WALK
+		var amp := BOB_SPRINT_AMP if sprinting_b else BOB_WALK_AMP
+		_bob_phase += TAU * freq * delta
+		_bob_y = sin(_bob_phase) * amp
+		_bob_x = sin(_bob_phase * 0.5) * amp * 0.4
+	else:
+		var decay := exp(-8.0 * delta)
+		_bob_y *= decay
+		_bob_x *= decay
+	_land_dip *= exp(-LAND_DIP_DECAY * delta)
 	if camera_mode == 0:
-		camera.position = Vector3(0.0, EYE_HEIGHT, 0.0)
+		# 第一人称：眼位 + 摆动/落地沉（第三人称机位在外轨道，
+		# bob 由化身动画本体表达，不叠机位）
+		camera.position = Vector3(_bob_x,
+				EYE_HEIGHT + _bob_y - _land_dip, 0.0)
 		camera.rotation = Vector3(_pitch, 0.0, 0.0)
 		return
 	if world == null:
@@ -1057,6 +1167,10 @@ func _position_camera(delta: float) -> void:
 
 func _process(delta: float) -> void:
 	_position_camera(delta)
+	# 冲刺 FOV 拉镜（全模式；平滑进出防突变）
+	var want_fov := _fov_base + (FOV_SPRINT_ADD if _sprinting else 0.0)
+	camera.fov = lerpf(camera.fov, want_fov,
+			1.0 - exp(-FOV_LERP_RATE * delta))
 	# 挖掘进度条实时刷新
 	if _progress_fill == null:
 		return

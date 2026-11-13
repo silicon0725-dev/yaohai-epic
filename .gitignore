@@ -14,6 +14,8 @@ debug/*.jpg.import
 # 临时截图/裁剪工作目录（视觉验证中间产物）
 .tmp_shots/
 debug/_crops/
+debug/tmp_v5/
+debug/treev2_crops/
 debug/_zoom_tmp/
 
 # 本地 Conquest 材质暂存（许可禁止再分发，绝不入库；见 assets/textures/CREDITS.md）

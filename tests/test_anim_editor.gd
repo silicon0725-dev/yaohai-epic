@@ -100,8 +100,33 @@ func _test_dock_integration() -> void:
 	tree_root.add_child(dock)
 	check(dock.avatar != null and dock.avatar.animator != null,
 			"dock avatar 同步装载（内置动作即时可用）")
+	# EF：用户目录 user://anim_ef 自放（97 个 DMC 提取件）。目录缺失
+	# /清空时清单=内置+CMU（~9）——阈值按 EF 可用性自适应（曾硬编
+	# 100：用户清空 anim_ef 后等待全打满 83s 且断言恒炸）
+	var ef_present := false
+	var ef_root := DirAccess.open(ProjectSettings.globalize_path(
+			"user://anim_ef"))
+	if ef_root != null:
+		ef_root.list_dir_begin()
+		var ef_name := ef_root.get_next()
+		while ef_name != "" and not ef_present:
+			if ef_root.current_is_dir():
+				var sub := DirAccess.open(ef_root.get_current_dir()
+						+ "/" + ef_name)
+				if sub != null:
+					sub.list_dir_begin()
+					var sf := sub.get_next()
+					while sf != "":
+						if sf.get_extension() == "json":
+							ef_present = true
+							break
+						sf = sub.get_next()
+			elif ef_name.get_extension() == "json":
+				ef_present = true
+			ef_name = ef_root.get_next()
+	var expected_min := 100 if ef_present else 9
 	# EF/CMU 分帧重定向就位等待（曾同步 97 个卡主线程十几秒）。
-	# ⚠ 只等数量会竞速：CMU 装载排在 EF 全部重定向之后（clips≥100
+	# ⚠ 只等数量会竞速：CMU 装载排在 EF 全部重定向之后（clips≥阈值
 	# 提前退出时 cmu/ 还没进清单——"清单含 CMU"断言曾因此假失败）
 	var has_cmu_key := func() -> bool:
 		for k in dock.avatar.clips:
@@ -109,14 +134,14 @@ func _test_dock_integration() -> void:
 				return true
 		return false
 	var waited := 0
-	while (dock.avatar.clips.size() < 100 or not has_cmu_key.call()) \
+	while (dock.avatar.clips.size() < expected_min or not has_cmu_key.call()) \
 			and waited < 12000:
 		await tree_root.get_tree().process_frame
 		waited += 1
 	var load_ms := Time.get_ticks_msec() - t0
-	check(dock.avatar.clips.size() >= 100,
-			"异步重定向就位 ≥100 个（实际 %d，%d ms）" % [
-					dock.avatar.clips.size(), load_ms])
+	check(dock.avatar.clips.size() >= expected_min,
+			"异步重定向就位 ≥%d 个（实际 %d，%d ms）" % [
+					expected_min, dock.avatar.clips.size(), load_ms])
 	check(load_ms < 20000, "装载 <20s（实际 %d ms）" % load_ms)
 	var clip_count: int = dock.avatar.clips.size()
 	check(clip_count >= 8, "动作清单 ≥8（实际 %d：内置+CMU+EF 全量）" % clip_count)

@@ -37,10 +37,17 @@ const NativeTerrainBridge := preload("res://meshing/native_terrain_bridge.gd")
 @export var unload_padding := 2
 ## 在途任务上限（生成+网格合计）。
 @export var max_in_flight := 32
+## 玩家编辑的区块集合（插队重网格：入队绕过 max_in_flight+2、
+## 提交最优先）——放置/挖掘的视觉响应曾排在流式任务后面=延迟
+var _edit_dirty := {}
+const EDIT_BYPASS_IN_FLIGHT := 2
 ## 每帧最多提交的生成结果（提交成本低，可以放宽）。
 @export var gen_commit_budget := 8
 ## 每帧最多提交的网格结果（需创建引擎资源，控制在毫秒级预算内）。
 @export var mesh_commit_budget := 3
+## 单帧网格提交时间预算（微秒）：超时停提交（重提交 2-60ms 不等，
+## 按数量预算曾叠 3 个重提交=30-90ms 卡帧）
+const MESH_COMMIT_BUDGET_USEC := 8000
 ## 视线前方的优先级加成权重。
 @export var view_bias := 2.0
 ## 自动保存间隔（秒，§9.2 定期保存）。
@@ -412,8 +419,32 @@ func _poll_jobs() -> void:
 		if _commit_generation(job):
 			gen_committed += 1
 	var mesh_committed := 0
+	# 提交时间预算：单个网格提交（ArrayMesh+碰撞体顶点汤）2-60ms
+	# 不等——按数量预算（3/帧）曾把 3 个重提交叠进同一帧=30-90ms
+	# 卡帧（实机放置段尖刺）。先到数量或时间任一上限即停，重提交
+	# 留下一帧
+	var mesh_t0 := Time.get_ticks_usec()
+	# 玩家编辑区块优先提交（预算豁免 +2——放置响应即时性优先；
+	# 普通提交仍受数量+时间双预算）
+	var edit_committed := 0
 	for task_id in _mesh_jobs.keys():
-		if mesh_committed >= mesh_commit_budget:
+		if edit_committed >= EDIT_BYPASS_IN_FLIGHT:
+			break
+		var job0: Dictionary = _mesh_jobs[task_id]
+		if not _edit_dirty.has(job0["coord"]):
+			continue
+		if not WorkerThreadPool.is_task_completed(task_id):
+			continue
+		WorkerThreadPool.wait_for_task_completion(task_id)
+		_mesh_jobs.erase(task_id)
+		_mesh_by_coord.erase(job0["coord"])
+		_edit_dirty.erase(job0["coord"])
+		if _commit_mesh(job0):
+			edit_committed += 1
+	for task_id in _mesh_jobs.keys():
+		if mesh_committed >= mesh_commit_budget \
+				or (mesh_committed > 0 and Time.get_ticks_usec() - mesh_t0
+						> MESH_COMMIT_BUDGET_USEC):
 			break
 		if not WorkerThreadPool.is_task_completed(task_id):
 			continue
@@ -423,6 +454,17 @@ func _poll_jobs() -> void:
 		_mesh_by_coord.erase(job["coord"])
 		if _commit_mesh(job):
 			mesh_committed += 1
+	# 玩家编辑区块插队入队（在途上限豁免 +2）：放置/挖掘的网格
+	# 任务不等流式队列
+	for coord in _edit_dirty.keys():
+		if in_flight_count() >= max_in_flight + EDIT_BYPASS_IN_FLIGHT:
+			break
+		var echunk: ChunkData = world.chunks.get(coord)
+		if echunk == null or _mesh_by_coord.has(coord) \
+				or not (echunk.mesh_dirty or echunk.collision_dirty):
+			_edit_dirty.erase(coord)
+			continue
+		_enqueue_mesh(coord)
 	# 脏区块网格任务（首次网格化与修改重建共用该路径）；
 	# collision_dirty 单独触发（玩家进入碰撞圈的补建路径——重网格
 	# 产出同 arrays，提交时按圈半径决定建碰撞）
@@ -433,6 +475,12 @@ func _poll_jobs() -> void:
 		if (chunk.mesh_dirty or chunk.collision_dirty) \
 				and not _mesh_by_coord.has(coord):
 			_enqueue_mesh(coord)
+
+
+## 玩家编辑（voxel_world.edit_dirty_cb 注入）：该区块优先重网格
+func _on_player_edit(world_pos: Vector3i) -> void:
+	var coord := VoxelCoords.world_to_chunk(world_pos, world.config.chunk_size)
+	_edit_dirty[coord] = true
 
 
 func _enqueue_generation(coord: Vector3i) -> void:

@@ -28,6 +28,17 @@ var _clock := 0.0
 var _rescan_timer := 0.0
 var _last_center := Vector3i(99999, 99999, 99999)
 var _dirty := true
+## 分帧扫描状态：曾一次性同步扫 441 柱（每柱逐格向下+天光+顶盖
+## 检测 ≈ 1.5-4 万次世界查询 = 40-120ms 硬卡）——挖/放方块标脏或
+## 每走 6 格都触发，实机"放/拆方块卡一下"主源。改耗时预算式分帧：
+## 每帧扫 ~2.5ms 的柱，跨帧推进，扫完一次性 apply（雾更新延迟
+## ~1s，观感无差）
+var _scan_columns: Array = []
+var _scan_marks := {}
+var _scan_center := Vector3i.ZERO
+var _scan_active := false
+## 单帧扫描预算（微秒）
+const SCAN_BUDGET_USEC := 2500
 
 
 func setup(p_world: VoxelWorld, follow: Node3D) -> void:
@@ -59,11 +70,43 @@ func _process(delta: float) -> void:
 			floori(_target.global_position.y),
 			floori(_target.global_position.z))
 	var moved := center.distance_squared_to(_last_center) > 36
-	if (_dirty or moved) and _rescan_timer > 0.5:
+	if (_dirty or moved) and _rescan_timer > 0.5 and not _scan_active:
 		_dirty = false
 		_rescan_timer = 0.0
 		_last_center = center
-		_apply(scan_for_mouths(world, center))
+		_start_scan(center)
+	if _scan_active:
+		_scan_step()
+
+
+func _start_scan(center: Vector3i) -> void:
+	_scan_active = true
+	_scan_center = center
+	_scan_marks = {}
+	_scan_columns = []
+	for wx in range(center.x - SCAN_RADIUS,
+			center.x + SCAN_RADIUS + 1, COLUMN_STRIDE):
+		for wz in range(center.z - SCAN_RADIUS,
+				center.z + SCAN_RADIUS + 1, COLUMN_STRIDE):
+			_scan_columns.append(Vector2i(wx, wz))
+
+
+## 单帧预算内的柱扫描推进；队列空 = 扫描完成 → 聚类 apply
+func _scan_step() -> void:
+	var t0 := Time.get_ticks_usec()
+	var chunk_size := world.config.chunk_size
+	var y_lo := maxi(_scan_center.y - SCAN_WINDOW, 1)
+	var y_hi := _scan_center.y + SCAN_WINDOW
+	while not _scan_columns.is_empty():
+		var col: Vector2i = _scan_columns.pop_back()
+		var cells := _scan_column(world, col.x, col.y, y_lo, y_hi,
+				chunk_size)
+		if not cells.is_empty():
+			_scan_marks["%d,%d" % [col.x, col.y]] = cells
+		if Time.get_ticks_usec() - t0 > SCAN_BUDGET_USEC:
+			return  # 本帧预算用尽，剩余柱下帧继续
+	_scan_active = false
+	_apply(_cluster(_scan_marks, _scan_center))
 
 
 ## 检测（纯函数，单测直调）：绕 center 扫柱，返回洞口簇列表
@@ -73,28 +116,34 @@ static func scan_for_mouths(p_world: VoxelWorld, center: Vector3i) -> Array:
 	var marks := {}  # "x,z" -> {cells: [Vector3i], col: Vector2i}
 	var y_lo := maxi(center.y - SCAN_WINDOW, 1)
 	var y_hi := center.y + SCAN_WINDOW
-	var x0 := center.x - SCAN_RADIUS
-	var x1 := center.x + SCAN_RADIUS
-	var z0 := center.z - SCAN_RADIUS
-	var z1 := center.z + SCAN_RADIUS
-	for wx in range(x0, x1 + 1, COLUMN_STRIDE):
-		for wz in range(z0, z1 + 1, COLUMN_STRIDE):
-			# 每柱自上而下找第一个"有天光的洞内空气"（顶盖下沿）
-			for wy in range(y_hi, y_lo, -1):
-				var pos := Vector3i(wx, wy, wz)
-				if p_world.get_block(pos) != VoxelTypes.AIR_ID:
-					continue
-				if _sky_at(p_world, pos, chunk_size) < SKY_THRESHOLD:
-					continue
-				if not _has_ceiling(p_world, pos):
-					continue
-				# 找到了：该柱的顶盖光柱格。邻柱同柱合并成簇
-				var key := "%d,%d" % [wx, wz]
-				if not marks.has(key):
-					marks[key] = []
-				marks[key].append(pos)
-				break  # 只取最顶一个（洞口上沿）
+	for wx in range(center.x - SCAN_RADIUS,
+			center.x + SCAN_RADIUS + 1, COLUMN_STRIDE):
+		for wz in range(center.z - SCAN_RADIUS,
+				center.z + SCAN_RADIUS + 1, COLUMN_STRIDE):
+			var cells := _scan_column(p_world, wx, wz, y_lo, y_hi,
+					chunk_size)
+			if not cells.is_empty():
+				marks["%d,%d" % [wx, wz]] = cells
 	return _cluster(marks, center)
+
+
+## 扫单柱：自上而下找第一个"有天光的洞内空气"（顶盖下沿），
+## 返回该柱的洞口格列表（可能为空）
+static func _scan_column(p_world: VoxelWorld, wx: int, wz: int,
+		y_lo: int, y_hi: int, chunk_size: int) -> Array:
+	var out: Array = []
+	for wy in range(y_hi, y_lo, -1):
+		var pos := Vector3i(wx, wy, wz)
+		if p_world.get_block(pos) != VoxelTypes.AIR_ID:
+			continue
+		if _sky_at(p_world, pos, chunk_size) < SKY_THRESHOLD:
+			continue
+		if not _has_ceiling(p_world, pos):
+			continue
+		# 找到了：该柱的顶盖光柱格。只取最顶一个（洞口上沿）
+		out.append(pos)
+		break
+	return out
 
 
 static func _sky_at(p_world: VoxelWorld, pos: Vector3i, chunk_size: int) -> int:

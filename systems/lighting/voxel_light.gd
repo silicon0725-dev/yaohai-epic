@@ -269,6 +269,15 @@ func on_chunk_ready(chunk: ChunkData) -> void:
 # ============================================================
 
 func _on_block_changed(pos: Vector3i, old_id: int, new_id: int) -> void:
+	var _t0 := Time.get_ticks_usec()
+	_on_block_changed_impl(pos, old_id, new_id)
+	var _dt := Time.get_ticks_usec() - _t0
+	if _dt > 2000:
+		print("[perf] light_on_block_changed %.1fms at %s"
+				% [_dt * 0.001, pos])
+
+
+func _on_block_changed_impl(pos: Vector3i, old_id: int, new_id: int) -> void:
 	var old_op := VoxelTypes.light_opacity(old_id)
 	var new_op := VoxelTypes.light_opacity(new_id)
 	var old_em := VoxelTypes.light_emission(old_id)
@@ -283,6 +292,7 @@ func _on_block_changed(pos: Vector3i, old_id: int, new_id: int) -> void:
 	if new_op > old_op:
 		# 变遮挡（放置/水淹）：两通道回收该格并减光；
 		# 半透明（水/枝）残值由减光后的边界种子重扩散回来
+		var _td := Time.get_ticks_usec()
 		var old_sky := chunk.get_sky_light(local)
 		if old_sky > 0:
 			chunk.set_sky_light(local, 0)
@@ -291,6 +301,9 @@ func _on_block_changed(pos: Vector3i, old_id: int, new_id: int) -> void:
 		if old_blk > 0:
 			chunk.set_block_light(local, 0)
 			_decrease(pos, old_blk, false)
+		_td = Time.get_ticks_usec() - _td
+		if _td > 2000:
+			print("[perf] light_decrease %.1fms at %s" % [_td * 0.001, pos])
 		# 收敛兜底：宽区域逐格封盖时，回灌梯度网的减光波前会在
 		# 高值残留处断链（实测封 5x5 坑残留 sky=12）——对本块做
 		# C# 全量重算（~0.5ms）覆盖为精确值，diff 有变化才标脏

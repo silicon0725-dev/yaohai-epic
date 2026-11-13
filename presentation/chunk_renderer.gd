@@ -93,6 +93,16 @@ func has_collision(coord: Vector3i) -> bool:
 func apply_mesh(
 		coord: Vector3i, mesh_arrays: Dictionary, rebuild_collision := true
 ) -> void:
+	var _t0 := Time.get_ticks_usec()
+	_apply_mesh_impl(coord, mesh_arrays, rebuild_collision)
+	var _dt := Time.get_ticks_usec() - _t0
+	if _dt > 2000:
+		print("[perf] apply_mesh %.1fms chunk=%s" % [_dt * 0.001, coord])
+
+
+func _apply_mesh_impl(
+		coord: Vector3i, mesh_arrays: Dictionary, rebuild_collision := true
+) -> void:
 	var entry: Dictionary = _entries.get(coord, {})
 	if entry.is_empty():
 		return
@@ -139,7 +149,11 @@ func apply_mesh(
 		entry.erase("water_inst")
 		entry.erase("water_mesh")
 	if rebuild_collision:
+		var _tc := Time.get_ticks_usec()
 		var shape := ChunkCollisionBuilder.build_collision_shape(mesh_arrays)
+		var _tcd := Time.get_ticks_usec() - _tc
+		if _tcd > 2000:
+			print("[perf] collision_build %.1fms chunk=%s" % [_tcd * 0.001, coord])
 		PhysicsServer3D.body_clear_shapes(entry.body)
 		PhysicsServer3D.body_add_shape(entry.body, shape.get_rid())
 		entry.shape = shape

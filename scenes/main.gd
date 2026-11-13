@@ -148,9 +148,14 @@ func _ready() -> void:
 	tree_manager.apply_save_state(meta)
 	tree_manager.drop_spawner = func(item_id: int, count: int, pos: Vector3) -> void:
 		drop_manager.spawn_drop(item_id, count, pos)
+	# 主干动画倒伏倒向砍树的人（DT 语义）
+	tree_manager.player_provider = func() -> Node3D:
+		return player
 	# 光照脏重烘等区块管线空闲（光照传播异步落定）再执行
 	tree_manager.idle_check = func() -> bool:
 		return chunk_manager.is_idle()
+	# 玩家编辑区块插队重网格（放置/挖掘即时反馈）
+	world.edit_dirty_cb = chunk_manager._on_player_edit
 	# 掉落物撞得上树干：掉落走体素碰撞感知不到树 StaticBody，
 	# 主干实心由树管理器实时查询补齐（枝干无碰撞，与玩家一致）
 	drop_manager.trunk_solid_probe = tree_manager.is_solid_for_items
@@ -461,7 +466,7 @@ func _update_hud() -> void:
 	var hint_line := ("[ " + _hint_text + " ]") if not _hint_text.is_empty() else ""
 	_hud_label.text = "\n".join([
 		hint_line,
-		"BUILD 2026-11-06.角色系统 — 若无此行=旧程序未重启",
+		"BUILD 2026-11-14.移动v2手感 — 若无此行=旧程序未重启",
 		"Voxel Terrain MVP - Items Layer (inventory + tools + ground drops)",
 		"chunks: %d    faces: %d    in-flight: %d    saved: %d    drops: %d" % [
 			world.chunk_count(), chunk_renderer.total_faces,

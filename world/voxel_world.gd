@@ -90,7 +90,21 @@ func get_block(world_pos: Vector3i) -> int:
 ## 方块被替换后其状态清空（放置方随后按需重新写入状态）。
 ## affects_collision=false 供无碰撞语义的变化用（水位流动：水/空气
 ## 互转不影响固体碰撞体），跳过碰撞标脏避免整块碰撞形状白重建。
+## 玩家编辑通知（main 注入 chunk_manager._on_player_edit）：编辑
+## 区块插队重网格
+var edit_dirty_cb: Callable
+
+
 func set_block(world_pos: Vector3i, id: int, affects_collision := true) -> bool:
+	var _t0 := Time.get_ticks_usec()
+	var _ok := _set_block_impl(world_pos, id, affects_collision)
+	var _dt := Time.get_ticks_usec() - _t0
+	if _ok and _dt > 2000:
+		print("[perf] set_block %.1fms at %s (id %d)" % [_dt * 0.001, world_pos, id])
+	return _ok
+
+
+func _set_block_impl(world_pos: Vector3i, id: int, affects_collision := true) -> bool:
 	if not config.in_block_bounds(world_pos):
 		return false
 	var chunk_coord := VoxelCoords.world_to_chunk(world_pos, config.chunk_size)
@@ -104,7 +118,17 @@ func set_block(world_pos: Vector3i, id: int, affects_collision := true) -> bool:
 	chunk.clear_state(local)
 	_invalidate_affected_meshes(chunk_coord, local, affects_collision)
 	if old_id != id:
+		var _te := Time.get_ticks_usec()
 		block_changed.emit(world_pos, old_id, id)
+		_te = Time.get_ticks_usec() - _te
+		if _te > 4000:
+			print("[perf] signal_fanout %.1fms at %s" % [_te * 0.001, world_pos])
+		# 玩家编辑（affects_collision=true；水/树清占位传 false）→
+		# 区块管理器优先重网格该块所在区块（插队：绕过在途上限+
+		# 优先提交）——异步管线按序排队曾让放置的方块 5-10 帧后才
+		# 出现（实机"放置有延迟"）
+		if affects_collision and edit_dirty_cb.is_valid():
+			edit_dirty_cb.call(world_pos)
 	return true
 
 

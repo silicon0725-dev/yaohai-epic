@@ -21,12 +21,80 @@ public partial class NativeTerrain : RefCounted
 {
     private const int GeneratorVersion = 8;
     private const int DirtLayerDepth = 3;
+
+    // ---- 树撒种判定（与 systems/trees/tree_scatter.gd 逐位同式，对拍测试钉死）----
+    // 换公式=全世界树位置重排；GD 侧改动必须同步本块。
+    private const int TreeCell = 6;
+    private const double TreeDensityMin = 0.0015;
+    private const double TreeDensityMax = 0.022;
+    private const double TreeWetFrom = 0.0;
+    private const double TreeWetTo = 0.45;
+
+    /// <summary>三整数 splitmix 风格混合 → [0,1)。u32 环算术（GD 侧
+    /// int 64 位 &amp; 0xFFFFFFFF 同域——对拍测试钉死）。三次迭代
+    /// 手写展开（曾 foreach 分配数组：壳每格 16 采样列的热路径）。</summary>
+    public static double Hash01(long a, long b, long c)
+    {
+        uint h = 0x9E3779B9;
+        h ^= (uint)(a & 0xFFFFFFFF);
+        h *= 0x85EBCA6B;
+        h ^= h >> 13;
+        h *= 0xC2B2AE35;
+        h ^= h >> 16;
+        h ^= (uint)(b & 0xFFFFFFFF);
+        h *= 0x85EBCA6B;
+        h ^= h >> 13;
+        h *= 0xC2B2AE35;
+        h ^= h >> 16;
+        h ^= (uint)(c & 0xFFFFFFFF);
+        h *= 0x85EBCA6B;
+        h ^= h >> 13;
+        h *= 0xC2B2AE35;
+        h ^= h >> 16;
+        return h / 4294967296.0;
+    }
+
+    /// <summary>Hash01 实例包装（GDScript 经工厂实例调 static 不便）。</summary>
+    public double Hash01I(long a, long b, long c) => Hash01(a, b, c);
+
+    /// <summary>列密度（降水场平滑映射；_precip 与 terrain_generator
+    /// 同参 seed+303/1÷2048/3oct——cell 中心采样与 GD 一致）。</summary>
+    private double TreeDensityAt(int x, int z)
+    {
+        double p = _precip.GetNoise2D(x, z);
+        double t = Math.Clamp((p - TreeWetFrom) / (TreeWetTo - TreeWetFrom), 0.0, 1.0);
+        double forest = t * t * (3.0 - 2.0 * t);
+        return TreeDensityMin + (TreeDensityMax - TreeDensityMin) * forest;
+    }
+
+    /// <summary>撒种判定：该列是否长树（cell 存在+jitter 唯一落点，
+    /// 与 GD TreeScatter.has_tree_at 逐位一致——LOD 树烘壳同源）。
+    /// jitter 先行：35/36 的列 2 次 hash 早退，不算密度噪声
+    ///（与 GD 同序，两侧改动必须同步）。</summary>
+    public bool TreeAt(int worldSeed, int x, int z)
+    {
+        int cx = (int)Math.Floor(x / (double)TreeCell);
+        int cz = (int)Math.Floor(z / (double)TreeCell);
+        int jx = (int)(Hash01(worldSeed + 2, cx, cz) * TreeCell);
+        if (x != cx * TreeCell + jx)
+            return false;
+        int jz = (int)(Hash01(worldSeed + 3, cx, cz) * TreeCell);
+        if (z != cz * TreeCell + jz)
+            return false;
+        double exist = Hash01(worldSeed + 1, cx, cz);
+        double density = TreeDensityAt(cx * TreeCell + TreeCell / 2,
+            cz * TreeCell + TreeCell / 2);
+        return exist < density * (TreeCell * TreeCell);
+    }
+
     // v9 高度联动：海平面/沙线/铁矿带随世界高度派生（构造期算；
     // GD 侧 TerrainGenerator.sea_level_for 位同步——48 高=7 逐格一致，
     // 其余 H/8）
     private readonly int _seaLevel;
     private readonly int _sandMaxHeight;
     private readonly int _ironOreMaxY;
+    // 原始世界种子（树撒种判定 TreeAt 需要——噪声对象只吃派生 seed）
+    private readonly long _worldSeed;
     private const int OreSurfaceMargin = 4;
     // v7 洞穴与矿脉（Minetest cavegen/mg_ore 算法移植）。
     // 阈值按归一化噪声实测分位标定（探针：W=0.88 → 隧道 ~3.5%、
@@ -126,6 +194,7 @@ public partial class NativeTerrain : RefCounted
         Variant blockIdsV)
     {
         int[] b = blockIdsV.AsInt32Array();
+        _worldSeed = worldSeed;
         _grassId = b[0];
         _dirtId = b[1];
         _stoneId = b[2];
@@ -509,6 +578,8 @@ public partial class NativeTerrain : RefCounted
             var grassN = new byte[W * W];
             var rockN = new byte[W * W];
             var sandN = new byte[W * W];
+            // 树烘壳：格内树采样比例（0-4 量纲同 grassN，MixCol 混叶绿）
+            var treeN = new byte[W * W];
             // 格中心距壳心距离（水色过渡用——真水→壳水观感衔接）
             var rdist = new int[W * W];
             var inRing = new bool[W * W];
@@ -593,6 +664,31 @@ public partial class NativeTerrain : RefCounted
                         ? Math.Min(hCenter, hMin)
                         : hCenter;
                     tops[ci] = Math.Max(top, _seaLevel + 1);
+                    // ---- 树烘壳（阶段 2.5，DH 聚合思想）----
+                    // 格内采样列调 TreeAt（与 GD 撒种逐位同源）：
+                    // 树列计入 treeN（MixCol 叶绿混合——远山森林带
+                    // 色调）；r>288 按树比例微抬格顶（0-4 格树冠
+                    // 高度感，森林带远看毛茸茸起伏）。重叠带不抬
+                    //（chunk 恒覆盖，抬升会重新穿出真实地形——
+                    // 上一轮穿出修复的边界条件）。step 随格距放大：
+                    // 4 格级全列 16 采样、8 级 2×2、16 级 4×4
+                    int tStep = Math.Max(1, S / 4);
+                    int trees = 0, tSamples = 0;
+                    for (int sz = 0; sz < S; sz += tStep)
+                        for (int sx = 0; sx < S; sx += tStep)
+                        {
+                            tSamples++;
+                            if (TreeAt((int)_worldSeed, bx + sx, bz + sz))
+                                trees++;
+                        }
+                    treeN[ci] = (byte)Math.Min(255,
+                        trees * 4 / tSamples);
+                    if (rdist[ci] > 288 && trees > 0)
+                    {
+                        float tf = (float)trees / tSamples;
+                        tops[ci] += (int)Math.Round(
+                            Math.Min(4.0, 2.0 + 4.0 * tf));
+                    }
                 }
             }
 
@@ -759,16 +855,33 @@ public partial class NativeTerrain : RefCounted
                         0.42f + 0.05f * f);
                 }
                 float k = 1.0f + 0.16f * t;
+                // treeN：树烘壳叶绿。两轮判读教训：①按比例加权混
+                //（叶 PIL 均值）在壳 lum 压暗体系下与草地暗绿不可辨；
+                // ②提权重仍被归一化抵消。改 alpha 混合+阈值化：
+                // 树比例≥50% 的格直接吃 85% 叶绿亮色（比草 G 通道
+                // 高 43%——真实树冠反射率也高于草地）
                 float tot = grassN[ci] + rockN[ci] + sandN[ci];
                 if (tot <= 0)
                     tot = 1;
-                return new Color(
+                var col = new Color(
                     (0.26f * grassN[ci] + 0.53f * rockN[ci]
-                        + 0.50f * sandN[ci]) / tot * k,
+                        + 0.50f * sandN[ci]) / tot,
                     (0.35f * grassN[ci] + 0.52f * rockN[ci]
-                        + 0.47f * sandN[ci]) / tot * k,
+                        + 0.47f * sandN[ci]) / tot,
                     (0.16f * grassN[ci] + 0.49f * rockN[ci]
-                        + 0.37f * sandN[ci]) / tot * k);
+                        + 0.37f * sandN[ci]) / tot);
+                if (treeN[ci] > 0)
+                {
+                    float tf = Math.Min(1.0f, treeN[ci] / 3.0f);
+                    // 色相迭代：①PIL 叶均值按比例混——暗部不可辨；
+                    // ②亮橄榄 (0.37,0.78,0.25)——远带可辨但读作
+                    // "草地绿"非森林（v5 判读）。终值=深冷森林绿
+                    //（G 0.62 低于草 0.35×1.55、B 抬到 0.26 降温，
+                    // 饱和结构=针叶林冠；亮度预补壳 lum 压暗同②）
+                    col = col.Lerp(
+                        new Color(0.30f, 0.62f, 0.26f), tf * 0.85f);
+                }
+                return col * k;
             }
 
             // 格顶面（陆格=量化高度；水格=sea-0.125 方块风水面，

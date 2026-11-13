@@ -55,8 +55,11 @@ func _pick_column(generator) -> Vector2i:
 				continue
 			var solid_deep := true
 			for wy in range(1, 6):
-				if generator.block_for_column(prof, false, false,
-						wx, wy, wz, h) == VoxelTypes.AIR_ID:
+				# 公开 5 参签名（rocky/sandy 由 profile 携带）——曾按
+				# 旧私有签名传 7 参：Invalid call 软错误，深层实心
+				# 判定整段失效、静默走回退分支
+				if generator.block_for_column(
+						prof, wx, wy, wz, h) == VoxelTypes.AIR_ID:
 					solid_deep = false
 					break
 			if solid_deep:

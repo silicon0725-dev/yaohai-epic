@@ -185,31 +185,53 @@ func run() -> void:
 				"cross_colors", "cross_indices"]
 		var any_water := false
 		for wkey in wkeys:
-			var gd_arr = gd_naive.get(wkey, PackedInt32Array())
-			var cs_arr = cs_water.get(wkey, PackedInt32Array())
-			if gd_arr.size() > 0:
+			var gd_arr = gd_naive.get(wkey)
+			var cs_arr = cs_water.get(wkey)
+			if _packed_size(gd_arr) > 0:
 				any_water = true
-			# .get 双侧默认（水通道结果无 cross 键——裸访问软报错吞检查）
-			check(cs_arr == gd_arr,
+			# 键缺失安全（水通道结果无 cross 键；曾用 PackedInt32Array
+			# 兜底默认——撞上另一侧的 PackedVector3Array 报 Invalid
+			# operands，该键检查被软吞）
+			check(_packed_equal(cs_arr, gd_arr),
 					"%s：%s 一致（%d vs %d）" % [
-						wlabel, wkey, cs_arr.size(), gd_arr.size()])
+						wlabel, wkey, _packed_size(cs_arr),
+						_packed_size(gd_arr)])
 		check(any_water, "%s：GD 水面非空（用例有效性）" % wlabel)
 		# 组合门面：整体输出（C# opaque+water vs GD 全程）等价
 		var cs_combo := ChunkMesher.build_mesh_arrays(registry, wchunk, wneigh)
 		for wkey in wkeys:
-			check(cs_combo.get(wkey, PackedInt32Array()) == gd_naive.get(
-					wkey, PackedInt32Array()),
+			check(_packed_equal(cs_combo.get(wkey), gd_naive.get(wkey)),
 					"%s：门面组合 %s 一致" % [wlabel, wkey])
 		# 贪心门面组合（贪心 opaque 不含水，水全来自 build_water）
 		var cs_greedy := GreedyMesher.build_mesh_arrays(registry, wchunk, wneigh)
 		var gd_greedy := GreedyMesher._build_gd(registry, wchunk, wneigh)
 		for wkey in wkeys:
-			check(cs_greedy.get(wkey, PackedInt32Array()) == gd_greedy.get(
-					wkey, PackedInt32Array()),
+			check(_packed_equal(cs_greedy.get(wkey), gd_greedy.get(wkey)),
 					"%s：贪心门面组合 %s 一致" % [wlabel, wkey])
 
 	print("[INFO] 等价测试覆盖 %d 个世界 x 2 种网格器 + %d 个水通道用例" % [
 		worlds.size(), water_cases.size()])
+
+
+## 键缺失安全比较/计数（.get 无默认：缺键返回 null——异类型默认值
+## 比较曾报 Invalid operands 吞掉检查）
+func _packed_size(a) -> int:
+	if a == null:
+		return 0
+	return a.size()
+
+
+func _packed_equal(a, b) -> bool:
+	# 空数组等价无关类型（C# 侧总写键=空 PackedVector3Array，GD 侧
+	# 缺键=null——双侧皆空是等价，曾按类型敏感比较误判失败）。
+	# 显式 int 标注：Variant 表达式 `:=` 推断会 Parse error
+	var asz: int = _packed_size(a)
+	var bsz: int = _packed_size(b)
+	if asz != bsz:
+		return false
+	if asz == 0:
+		return true
+	return typeof(a) == typeof(b) and a == b
 
 
 func _make_world() -> VoxelWorld:

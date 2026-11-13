@@ -37,11 +37,12 @@ func run() -> void:
 					tree_col.x, tree_col.y)["height"]) + 2,
 					config.chunk_size),
 			VoxelCoords.floordiv(tree_col.y, config.chunk_size))
-	for cz in 2:
-		for cx in 2:
-			var chunk: ChunkData = generator.generate_chunk(
-					center + Vector3i(cx, 0, cz))
-			world.add_chunk(chunk)
+	for cy in 2:
+		for cz in 2:
+			for cx in 2:
+				var chunk: ChunkData = generator.generate_chunk(
+						center + Vector3i(cx, cy, cz))
+				world.add_chunk(chunk)
 	var light: Node = preload("res://systems/lighting/voxel_light.gd").new()
 	tree_root.add_child(light)
 	light.setup(world)

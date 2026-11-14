@@ -1,12 +1,16 @@
-# 体素地形内核 — Stage E（性能与资源体系）
+# 瑶海 EPIC — 体素沙盒（阶段 A-E 内核 + 玩法扩展进行中）
 
-Godot 4 体素沙盒游戏的技术原型，开发文档（`docs/DEVELOPMENT_PLAN.md`）
-的 **阶段 A-E 全部完成**：静态地形 -> 交互 -> 流式加载 -> 增量存档 ->
-基准测试与真实材质包。水平无限世界，15 种方块（含静止水），Conquest 写实材质包，
-Greedy Meshing 可切换。物品层 v1（背包/工具/合成）之上接入
-**地面掉落实体**：挖掘产物落地成实体，走近自动拾取，随存档持久化。
-**水系统**：海平面海洋、半透明独立水面、玩家游泳、掉落物浮沉、
-MC 式水位流动/扩散（挖沟引水、拆坝放水、断供回退）。
+Godot 4 体素沙盒游戏，开发文档（`docs/DEVELOPMENT_PLAN.md`）的
+**阶段 A-E 内核全部完成**，此后进入玩法扩展：物品/合成/掉落实体、
+水系统（海洋/游泳/浮沉/MC 式水位流动）、**结构化树 v2**（枝干图/
+砍伐倒伏/幽灵树根除）、**体素光照阶段 1+2**（LightManager 阴影调度、
+天光/方块光传播、顶点色渲染、日夜循环）、**植被系统**（B5-B10b 十轮
+观感迭代的草/花/高草，GG 密度+曲线叶+噪声风场+距离分级）、**声音系统**
+（程序化脚步+MAtmos 式音景+早期反射）、**角色系统**（YSM 模型+EF 动画）、
+**网格背包**（塔科夫式多分区）、**移动手感 v2**（惯性/土狼时间/镜头反馈）。
+世界：水平无限 + 垂直 512 高（v9 垂直流式带），默认视距 16 区块 +
+三级远景壳推到 4096 格。已完成一轮全面代码审查（`docs/CODE_AUDIT.md`，
+100 条发现分批修复：数据安全/测试可信度/帧尖刺三轮落地）。
 
 ## 引擎版本锁定
 
@@ -24,67 +28,83 @@ MC 式水位流动/扩散（挖沟引水、拆坝放水、断供回退）。
 
 ## 运行
 
+> 本机为 Windows（Git Bash）；Godot 可执行文件：
+> `C:/Users/Administrator/Documents/godothub/engine/4.7.2-stable_csharp_windows_x64/
+> Godot_v4.7.2-stable_mono_win64/Godot_v4.7.2-stable_mono_win64.exe`
+> （下称 `$GODOT`）。**禁跑 `--import`**（本机卡死；.godot 缓存已在库内
+> 可用状态，新增 class_name 一律 `preload` 引用绕过缓存刷新）。
+> C# 改动后必须先 `dotnet build`。
+
 ```bash
 cd "<本项目目录>"
+GODOT="C:/Users/Administrator/Documents/godothub/engine/4.7.2-stable_csharp_windows_x64/Godot_v4.7.2-stable_mono_win64/Godot_v4.7.2-stable_mono_win64.exe"
 
-# 1. 首次运行前导入（生成 .godot 全局类缓存，git 忽略该目录）
-~/godot/godot --headless --path . --import
+# 1. 单元测试（headless；34 套件 12971 项。退出码：0=全过，
+#    1=有失败，2=对拍套件 SKIP（C# 不可用——覆盖缺失显式上报）；
+#    每套件带耗时打印，挂死保护由外层 timeout 承担）
+"$GODOT" --headless --path . -s tests/run_all_tests.gd
 
-# 2. 单元测试（headless，无需显示环境；退出码 0 = 全部通过）
-~/godot/godot --headless --path . -s tests/run_all_tests.gd
+# 1b. 单套件调试迭代（同退出码语义；3=套件加载失败）
+"$GODOT" --headless --path . -s tests/run_one.gd -- res://tests/test_xxx.gd
 
-# 3. 运行原型（需要显示环境）
-~/godot/godot --path .
+# 2. 运行游戏（需要显示环境）
+"$GODOT" --path .
 
-# 4. 打开编辑器
-~/godot/godot --editor --path .
+# 2b. 调试注入物品（实机验收用；例：给 64 个火把）
+"$GODOT" --path . -- --give core:torch 64
 
-# 5. 世界统计（headless 冒烟检查：区块数 / 可见面 / 耗时）
-~/godot/godot --headless --path . -s debug/world_stats.gd
+# 3. 打开编辑器
+"$GODOT" --editor --path .
 
-# 6. 渲染回归检查（需要显示环境；等待流式安定后校验绕序/剔除）
-~/godot/godot --path . res://debug/render_check.tscn
-# 7. 新增视觉验收场景：用 debug/capture_lib.gd 公共库（隔离启动/
-#    截图/FPS/找水找岸），禁止整文件复制旧场景（capture_shadow2..16
-#    共 16 份副本已归档 debug/archive/，仅保留各族最新一份）
+# 4. 世界统计（headless 冒烟检查：区块数 / 可见面 / 耗时）
+"$GODOT" --headless --path . -s debug/world_stats.gd
 
-# 7. 流式加载集成检查（headless 可跑：加载/卸载/休眠恢复/修改存活）
-~/godot/godot --headless --path . res://debug/streaming_check.tscn
+# 5. 渲染回归检查（需要显示环境；等待流式安定后校验绕序/剔除）
+"$GODOT" --path . res://debug/render_check.tscn
+# 新增视觉验收场景：用 debug/capture_lib.gd 公共库（隔离启动/
+# 截图/FPS/找水找岸），禁止整文件复制旧场景（capture_shadow2..16
+# 共 16 份副本已归档 debug/archive/，仅保留各族最新一份）
 
-# 8. 任意角度截图（等待流式安定，保存到 debug/last_capture.png）
-~/godot/godot --path . res://debug/capture.tscn
+# 6. 流式加载集成检查（headless 可跑：加载/卸载/休眠恢复/修改存活）
+"$GODOT" --headless --path . res://debug/streaming_check.tscn
 
-# 9. 基准套件（headless，§10.3：生成/网格/重网格/存档/区块尺寸）
-~/godot/godot --headless --path . -s debug/benchmark.gd
+# 7. 任意角度截图（等待流式安定，保存到 debug/last_capture.png）
+"$GODOT" --path . res://debug/capture.tscn
 
-# 10. Greedy Meshing 模式（任意调试场景追加 -- --greedy）
-~/godot/godot --path . -- --greedy
+# 8. 基准套件（headless，§10.3：生成/网格/重网格/存档/区块尺寸）
+"$GODOT" --headless --path . -s debug/benchmark.gd
 
-# 11. C# 可用性探针（headless 实例化 NativeMesher，验证 .NET 运行时）
-~/godot/godot --headless --path . -s debug/probe_csharp.gd
+# 9. Greedy Meshing 对比模式（任意调试场景追加 -- --greedy）
+"$GODOT" --path . -- --greedy
 
-# 12. 强制禁用 C# 原生路径（A/B 基准 / 问题隔离）
-VOXEL_NO_NATIVE=1 ~/godot/godot --headless --path . -s debug/benchmark.gd
+# 10. C# 可用性探针（headless 实例化 NativeMesher，验证 .NET 运行时）
+"$GODOT" --headless --path . -s debug/probe_csharp.gd
 
-# 13. 物品层 HUD 布局检查（headless：快捷栏几何/起始装备/背包开关）
-~/godot/godot --headless --path . res://debug/items_ui_check.tscn
+# 11. 强制禁用 C# 原生路径（A/B 基准 / 问题隔离）
+VOXEL_NO_NATIVE=1 "$GODOT" --headless --path . -s debug/benchmark.gd
 
-# 14. 物品层视觉截图（需要显示环境；输出 debug/capture_hud.png 与
+# 12. 物品层 HUD 布局检查（headless：快捷栏几何/起始装备/背包开关）
+"$GODOT" --headless --path . res://debug/items_ui_check.tscn
+
+# 13. 物品层视觉截图（需要显示环境；输出 debug/capture_hud.png 与
 #     capture_inventory.png，隔离存档）
-~/godot/godot --path . res://debug/capture_items.tscn
+"$GODOT" --path . res://debug/capture_items.tscn
 
-# 15. 掉落实体集成检查（headless 可跑：挖掘->落地->拾取->存档往返）
-~/godot/godot --headless --path . res://debug/drops_check.tscn
+# 14. 掉落实体集成检查（headless 可跑：挖掘->落地->拾取->存档往返）
+"$GODOT" --headless --path . res://debug/drops_check.tscn
 
-# 16. 掉落实体视觉截图（需要显示环境；输出 debug/last_capture_drops.png）
-~/godot/godot --path . res://debug/capture_drops.tscn
+# 15. 掉落实体视觉截图（需要显示环境；输出 debug/last_capture_drops.png）
+"$GODOT" --path . res://debug/capture_drops.tscn
 
-# 17. 海岸线截图（自动扫描出生区找水陆交界，传送到岸边俯拍水面）
-~/godot/godot --path . res://debug/capture_terrain.tscn
+# 16. 海岸线截图（自动扫描出生区找水陆交界，传送到岸边俯拍水面）
+"$GODOT" --path . res://debug/capture_terrain.tscn
 
-# 18. 水流动演示（找平地造石碗装水，拆壁放水，输出前后对比截图
+# 17. 水流动演示（找平地造石碗装水，拆壁放水，输出前后对比截图
 #     debug/last_water_before.png 与 last_water_flow.png + 级别统计）
-~/godot/godot --path . res://debug/capture_water_flow.tscn
+"$GODOT" --path . res://debug/capture_water_flow.tscn
+
+# 18. 性能监测会话（带窗口跑并重定向日志，事后 grep [perf] 埋点分析）
+"$GODOT" --path . > debug/monitor_session.log 2>&1
 ```
 
 ### 操作（第一人称玩家）
@@ -102,7 +122,12 @@ VOXEL_NO_NATIVE=1 ~/godot/godot --headless --path . -s debug/benchmark.gd
   （点击拿起/放下/交换/合并堆；左侧合成面板点击配方行合成，材料
   不足整行置灰；关背包时手中还有堆会丢到身边地面）
 - `Q` 朝视线方向抛出 1 个手持物品，`Ctrl+Q` 抛出整堆（1 秒保护期内
-  不能被拾取，防止扔出瞬间又捡回）
+  不能被拾取，防止扔出瞬间又捡回；实体满 128 时自动回滚入包不丢件）
+- `F5` 循环相机（第一人称/第三人称背后/第二人称/越肩），`F6` 切换
+  角色模型显隐，`F7` 拔刀/收刀；背包拖拽中 `R` 旋转多格物品
+- **移动手感 v2**：地面惯性起步/滑停、土狼时间（走出边缘仍可跳）、
+  跳跃预输入缓冲、可变跳高（上升中松 Space 短跳）、疾跑 FOV 拉镜、
+  落地轻沉、第一人称头部摆动；拔刀态双击 WASD 闪避
 - 升级闭环：砍原木→合成木板/木棍→木镐→挖石得圆石→石镐
 - 新世界起始装备：木镐 + 泥土×16 + 木板×16；石头系需要镐才掉落物品
 - 挖穿悬空岛边缘掉落后自动回到出生点
@@ -504,13 +529,13 @@ v1（信号生长+体素网格枝干）经多轮迭代效果不佳后**按结构
 
 | 任务 | 实现 |
 | --- | --- |
-| 区块管理器 | `world/chunk_manager.gd`：按玩家位置流式加载/卸载（视距 5 区块半径 + 卸载缓冲 2） |
+| 区块管理器 | `world/chunk_manager.gd`：按玩家位置流式加载/卸载（默认视距 16 区块半径 + 卸载缓冲 2；玩家编辑区块三层插队） |
 | 后台生成/网格构建（§10.1） | WorkerThreadPool 工作线程只做纯计算（生成区块数据、网格数组）；主线程验证后创建 ArrayMesh/碰撞形状 |
 | 任务队列与过期检查（§4.4） | 入队时快照区块与面邻居的 edit_serial；提交时比对，不匹配即丢弃重排；区块卸载后任务结果作废 |
 | 加载优先级与预算（§10.2） | 玩家列 > 视线前方（相机朝向加成）> 近距离；每帧限提交生成 8 / 网格 3，在途上限 32 |
 | 区块边界（§6.4） | 邻区块未加载按空气临时处理；数据到达时把已存在邻居标脏重建，网格用真实边界数据 |
 | 卸载数据保全（§4.4） | 被玩家修改过的区块卸载时进入休眠缓存，重回视距原样恢复（阶段 D 存档落地前的保底） |
-| 世界无限化 | 水平方向无限流式，垂直高度固定（3 区块）；玩家脚下区块未就绪时冻结物理 |
+| 世界无限化 | 水平无限流式 + 垂直 512 高（v9 垂直流式带随玩家层伸缩，含滞回；见"玩法扩展阶段"一节）；玩家脚下区块未就绪时冻结物理 |
 
 阶段 C 调试过程中修掉的三个代表性缺陷（均有检查兜底）：
 网格任务活锁（入队清脏 + 序列号判过期，防止无限重排）、对角邻居序列号
@@ -529,8 +554,10 @@ v1（信号生长+体素网格枝干）经多轮迭代效果不佳后**按结构
 | 写盘失败兜底 | 保留内存缓存绝不丢玩家修改（§4.4），下次卸载/自动保存重试写盘 |
 | 损坏/不兼容处理（§9.3） | 损坏元数据按新世界处理；损坏区块回退重新生成；未知方块名替换为石头并告警 |
 
-存档位置：`user://saves/world1/`（snap 版即 `~/snap/godot-4/common/...`）。
-删除存档 = 删除该目录（或 `WorldSave.erase_all()`）。
+存档位置：`user://saves/world1/`（Windows 下即
+`%APPDATA%/Godot/app_userdata/瑶海 EPIC/saves/world1/`）。
+删除存档 = 删除该目录（或 `WorldSave.erase_all()`——已防误删
+`user://` 根与 `saves` 父目录）。
 
 ## Stage E 已实现（对照文档 §12 阶段 E / §6.3 / §10.3 / §7）
 
@@ -540,6 +567,23 @@ v1（信号生长+体素网格枝干）经多轮迭代效果不佳后**按结构
 | Greedy Meshing（§6.3） | `meshing/greedy_mesher.gd`（与面剔除共用填充缓存/剔除语义）+ 图集平铺着色器（UV2 携带 tile 原点、fract 平铺）；启动加 `-- --greedy` 或设 `ChunkManager.use_greedy_meshing` 切换 |
 | 基准测试（§10.3） | `debug/benchmark.gd`：生成吞吐、面剔除 vs 贪心、编辑重网格延迟、存档读写、区块尺寸对比 |
 | 区块尺寸对比（§4.1） | 16^3 vs 32^3 同体积实测，维持 16^3（见下表） |
+
+## 玩法扩展阶段已实现（阶段 A-E 之后的迭代，按系统）
+
+| 系统 | 要点 |
+| --- | --- |
+| 结构化树 v2 | 枝干图+段分裂+BFS 连通性+引用计数生命周期；砍伐分流（主干=动画倒伏朝砍击者 / 树枝=刚体掉落）；砍伐记录经参数链注入生成器重放——重生成区块体素与结构同源（幽灵树/悬浮叶根除）；树占位清理走批量通道（砍树秒级卡顿→ms 级） |
+| 体素光照阶段 1+2 | Forward+ LightManager（三态滞回阴影预算）；体素天光/方块光传播+局部失效+顶点色渲染（C# 封盖重算 ~0.5ms/块，编辑队列 2ms 帧预算摊销——火把放置 70ms 尖刺清零）；日夜循环（顶点色双通道，周期 480s） |
+| 植被系统 | 草/花/高草：GG 真默认密度（56/64/72 片/格）、4 关键曲线叶、格级叶向+十字双面、噪声风场、32 格大区草浪；距离分级（近 2/中 1/远 0 档，跨档刷新）；草坡融合+侧面过渡变体；块级草叶预算（>160 格降档） |
+| 水面反射 | 真镜像相机 SubViewport 投影法；洞口体积雾（TG 公式 FogVolume+引擎阴影积分） |
+| 声音系统 | 程序化脚步（材质区分）+MAtmos 式音景机+早期反射（1 阶镜像源，走廊粗判裁剪）；PF 素材 Noncompete 红线 |
+| 角色系统 | YSM 模型+EF 动画（蒙皮走数据纹理）；EF 资产禁入库红线；MC/Blockbench 模型 JSON→ArrayMesh 加载器 |
+| 网格背包 | 塔科夫式 GridInventory 多分区/uid/旋转（R 键）/AUTO 优先快捷栏 |
+| 移动手感 v2 | 惯性/土狼时间/预输入缓冲/可变跳高/FOV 拉镜/落地轻沉/头部摆动/闪避 |
+| 世界尺度 v8/v9 | Epic-Terrain 大陆 4096 侵蚀链+河流窄带（分位重标）；512 高垂直流式带；三级远景壳推到 4096 格（DH 式逐列壁+主导方块着色） |
+| 高视距配套 | 默认 view16 + 远景壳；碰撞分级（半径 4 圈内建碰撞） |
+| C# 网格器 | 面剔除/贪心/水通道/草叶/光照 BFS 全 C#（干区块 4.5×）；GD/C# 逐位等价测试 226 项守护；已拆 partial 三文件（主体/Grass/Lighting） |
+| 代码审查轮 | `docs/CODE_AUDIT.md`（100 条发现）：批次 0 测试可信度（SKIP 退出码/看门狗/Invalid Task ID 清零）、批次 1 数据安全（dormant 兜底/掉落丢失三处/幽灵树/键盘 echo/相机穿墙/图集导出/活锁）、批次 2 帧尖刺（光照队列化/撒树剪枝/草叶预算/padded 复用/音效裁剪/autosave 分帧）——实机监测验证（火把 70→6-22ms，砍树秒级→ms 级，零错误） |
 
 ## 阶段 E 实测数据（官方构建 / 2 核 / 调试构建，3 次取中位）
 
@@ -662,10 +706,18 @@ docs/           开发文档
   `NativeMeshBridge` 保持中立供等价测试直调（5 世界 × 2 网格器 × 60 检查）。
   `VOXEL_NO_NATIVE=1` 可强制全 GDScript（A/B 与隔离用）。
 
-## 下一步（掉落实体与 Q 丢弃完成，继续玩法扩展）
+## 下一步
 
-阶段 A-E 体素内核 + 物品/合成层 v1 + 地面掉落实体（含 Q 投掷丢弃）
-完成。后续迭代方向：工具耐久与数值、有形配方（工作台方块 + 网格
-摆放）、掉落实体进阶（死亡掉落）。再往后按文档 §1.2 逐步接入：
-生存数值、机械与自动化、NPC 与 Boss、维度与远征——性能敏感路径
-按既有基准方法评估是否继续下沉 C#。
+**性能**（实机监测定位的存量，见"玩法扩展阶段"审查轮一行）：
+树砍伐管线同步段异步化（16-24ms 最后玩法尖刺）、水面镜像
+SubViewport 按需更新（fps 25.5 固定开销大户）、加载 7.4s 压缩
+（光照播出 C# 化）、光照队列化后二次重烘合并。
+
+**审查遗留**（`docs/CODE_AUDIT.md` 批次 3/4）：512 高/v9 垂直流式
+测试覆盖、GD/C# 常量契约收敛（id/tile 序号单源化）、CI（headless
+测试+日志关键字准入）、addons 死重清理、P2/P3 持续清扫。
+
+**玩法**：工具耐久与数值、有形配方（工作台方块+网格摆放）、掉落
+进阶（死亡掉落）、EF 光照实机验收（ef-000001）、火把光源方块
+（emission 表已就位）。再往后按文档 §1.2：生存数值、机械与自动化、
+NPC 与 Boss、维度与远征——性能敏感路径按既有基准方法评估下沉 C#。

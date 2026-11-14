@@ -13,6 +13,10 @@ func run() -> void:
 	_test_smooth_convergence()
 	_test_weather01_composition()
 	_test_rain_stream()
+	_test_debug_cycle()
+	_test_rain_particles_visual()
+	_test_lightning_sequence()
+	_test_bolt_lifecycle()
 
 
 ## 转移表合法性：概率和 ≤1（余概率保持）、目标都是合法状态
@@ -103,3 +107,98 @@ func _test_rain_stream() -> void:
 	check(rms > 2000.0, "能量可观（RMS %.0f）" % rms)
 	check(nonzero > count * 90 / 100, "绝大多数样本有声（%d/%d）"
 			% [nonzero, count])
+
+
+## F8 调试循环：四态循环顺序、参数瞬时对齐、雷暴快速闪电、
+## 转移计时重置（不被立刻转走）
+func _test_debug_cycle() -> void:
+	var w: Node = WeatherScript.new()
+	# 从晴出发连按四次 → 回到晴（循环闭合）
+	var seen_states := []
+	for i in 4:
+		w.debug_cycle_state()
+		seen_states.append(w.state)
+	check_eq(seen_states, [
+		WeatherScript.State.CLOUDY, WeatherScript.State.RAIN,
+		WeatherScript.State.THUNDER, WeatherScript.State.CLEAR],
+		"四态循环顺序 晴→多云→雨→雷暴→晴")
+	# 瞬时对齐：切完参数即等于状态目标（无平滑残留）
+	w.debug_cycle_state()  # 晴 → 多云
+	var target: Vector3 = WeatherScript.STATE_TARGETS[w.state]
+	check(absf(w.cloudiness - target.x) < 0.001
+			and absf(w.rain_intensity - target.y) < 0.001
+			and absf(w.wind_strength - target.z) < 0.001,
+			"参数瞬时对齐状态目标")
+	check(absf(w.weather01 - (target.x * 0.7 + target.y * 0.3)) < 0.001,
+			"暗度同步重算")
+	# 雷暴快速闪电：切到雷暴后 _thunder_timer 压到 2s（不等 7-22s）
+	w.debug_cycle_state()  # 多云 → 雨
+	w._thunder_timer = 20.0
+	w.debug_cycle_state()  # 雨 → 雷暴
+	check(absf(w._thunder_timer - 2.0) < 0.001, "雷暴切入闪电窗压到 2s")
+	# 转移计时重置：切完 _next_step 回到步进窗内
+	check(w._next_step >= WeatherScript.STEP_WINDOW.x
+			and w._next_step <= WeatherScript.STEP_WINDOW.y,
+			"转移计时重置回窗内")
+	w.free()
+
+
+## 雨粒子可见性（实机"看不到雨"回归守卫）：材质必须粒子 billboard
+##（固定朝向时侧视角细边对相机≈不可见），透明度/尺寸在可见范围
+func _test_rain_particles_visual() -> void:
+	var w: Node = WeatherScript.new()
+	w._setup_rain_particles()
+	var quad: QuadMesh = w._rain_particles.draw_pass_1
+	var mat: StandardMaterial3D = quad.material
+	check_eq(mat.billboard_mode, BaseMaterial3D.BILLBOARD_FIXED_Y,
+			"雨材质 FIXED_Y billboard（侧视可见+抬头仍竖直）")
+	check(mat.albedo_color.a >= 0.25 and mat.albedo_color.a <= 0.5,
+			"雨丝半透柔和（%.2f）" % mat.albedo_color.a)
+	check(quad.size.y >= 0.6 and quad.size.x >= 0.03,
+			"雨丝尺寸（宽度下限防 <1px 不可见，%.3f×%.2f）"
+					% [quad.size.x, quad.size.y])
+	check(w._rain_process.initial_velocity_min >= 14.0,
+			"雨速写实（≥14 m/s）")
+	w.free()
+
+
+## 闪电回击频闪：主闪全亮 + 1-2 次回击排程 + 回击抬升亮度
+func _test_lightning_sequence() -> void:
+	var w: Node = WeatherScript.new()
+	tree_root.add_child(w)  # _trigger_strike 走雷声调度（需在树）
+	w._trigger_strike()
+	check(absf(w.flash01 - 1.0) < 0.001, "主闪全亮")
+	check(w._flash_pending >= 1 and w._flash_pending <= 2,
+			"排程 1-2 次回击（%d）" % w._flash_pending)
+	# 人为推进到回击窗内：计数递减且亮度被回击抬回
+	w._flash_gap = 0.01
+	var pending_before: int = w._flash_pending
+	w._update_lightning(0.05)
+	check_eq(w._flash_pending, pending_before - 1, "回击计数递减")
+	check(w.flash01 > 0.4, "回击窗内亮度可观（%.2f）" % w.flash01)
+	# 衰减到黑：无回击后 1 秒彻底归零
+	w._flash_pending = 0
+	w._update_lightning(1.0)
+	check(absf(w.flash01) < 0.001, "闪后归零")
+	w.free()
+
+
+## 雷击 bolt：出现于玩家 25-70m 环带、0.3s 后隐去（进树——
+## global_position/look_at 依赖树；_ready 全套装配自动跑）
+func _test_bolt_lifecycle() -> void:
+	var w: Node = WeatherScript.new()
+	tree_root.add_child(w)
+	var dummy := Node3D.new()
+	tree_root.add_child(dummy)
+	dummy.global_position = Vector3(10.0, 60.0, -5.0)
+	w.setup_player(dummy)
+	w._trigger_strike()
+	check(w._bolt_mesh.visible, "雷击 bolt 出现")
+	check(w._bolt_life > 0.0, "bolt 生命周期启动")
+	var d: float = w._bolt_mesh.global_position.distance_to(
+			dummy.global_position)
+	check(d >= 19.0 and d <= 46.0, "雷击点在 20-45m 环带（%.0fm）" % d)
+	w._update_lightning(0.35)
+	check(not w._bolt_mesh.visible, "bolt 0.3s 后隐去")
+	dummy.free()
+	w.free()

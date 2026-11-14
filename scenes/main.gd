@@ -220,7 +220,9 @@ func _ready() -> void:
 	water_ripples = WaterRipplesScript.new()
 	add_child(water_ripples)
 
-	# 天气系统（阶段 1：状态机 + 天空/太阳/环境联动 + 程序化雨声）
+	# 天气系统（批 1：状态机 + 天空/太阳/环境联动 + 程序化雨声；
+	# 批 2：雨粒子跟随玩家 + 闪电/雷声。player 接线在 _spawn_player
+	# 末尾——此处 player 尚未创建）
 	weather_system = WeatherSystemScript.new()
 	add_child(weather_system)
 
@@ -340,6 +342,20 @@ func _finish_loading() -> void:
 		overlay.finish()
 
 
+## F8 调试指令（实机验收）：循环切换天气 晴→多云→雨→雷暴，
+## 参数瞬时对齐（不用等 2-6 分钟自然转移）。HUD 行本就显示
+## 当前天气，这里再弹一次 hint 给切后参数即时反馈
+func _unhandled_input(event: InputEvent) -> void:
+	if event is InputEventKey and event.pressed and not event.echo \
+			and event.keycode == KEY_F8:
+		weather_system.debug_cycle_state()
+		show_hint("天气 → %s（云 %d%% 雨 %d%% 风 %d%%）" % [
+			weather_system.state_name(),
+			int(weather_system.cloudiness * 100.0),
+			int(weather_system.rain_intensity * 100.0),
+			int(weather_system.wind_strength * 100.0)])
+
+
 func _process(delta: float) -> void:
 	# 加载遮罩期跳过全部渲染侧子系统（审查二轮 D15）：波时钟/涟漪/
 	# HUD 文本/曝光/日夜在遮罩后面白跑（加载 7s × 每帧掉落遍历+统计
@@ -411,6 +427,7 @@ var _wind_mats: Array = []
 ## 天空色上次写入的 day01（C5 脏检查；-1 = 首帧强制写）
 var _last_sky_day01 := -1.0
 var _last_weather01 := -1.0  # 天气暗度上次写入（同上脏检查）
+var _last_flash01 := -1.0  # 闪电天空乘子上次写入（闪时每帧、稳态零写）
 ## 水面材质表（u_time/storm/sun_direction/涟漪参数多段下发共用——
 ## 每帧三处字面量数组分配曾是隐性 GC 压力，审查二轮 D11）
 var _water_mats: Array = []
@@ -449,6 +466,21 @@ func _update_day_night(delta: float) -> void:
 	if weather_system != null:
 		w01 = weather_system.weather01
 	_sun.light_energy *= 1.0 - 0.65 * w01
+	# 闪电脉冲（天气批 2，实机修复）：太阳×7 只亮直射面——阴天屏幕
+	# 大头是自发光天空（ProceduralSky 不受 DirectionalLight 影响），
+	# 观感≈没有闪电。正道（社区惯例）：背景能量乘子全天空瞬时
+	# 爆白 + fog 同步脉冲；闪完写回基线 1.0（值不变零写）
+	var flash: float = weather_system.flash01 if weather_system != null \
+			else 0.0
+	if flash > 0.001:
+		_sun.light_energy *= 1.0 + 6.0 * flash
+	_environment.ambient_light_energy = 1.0 + 2.0 * flash
+	if flash != _last_flash01:
+		# 4.7 属性名是 background_energy_multiplier（乘整个背景/
+		# 天空渲染；sky_energy_multiplier 不存在——实机验证抓出）
+		_environment.background_energy_multiplier = 1.0 + 4.0 * flash
+		_environment.fog_light_energy = 1.0 + 3.0 * flash
+		_last_flash01 = flash
 	# 天空/环境：昼端取 BSL 白天色，夜端藏青，阴天向灰蓝插值。
 	# 脏检查（审查二轮 C5）：这些写入触发 radiance cubemap 重烘
 	#（0.2-0.6ms GPU/次）——day01 变化 >0.002（或天气暗度 >0.005）才写
@@ -493,6 +525,12 @@ func _update_day_night(delta: float) -> void:
 				_wind_mats.append(m)
 	for wmat in _wind_mats:
 		wmat.set_shader_parameter("u_wind_time", wind_t)
+	# 风力系数（天气批 2）：常态 0.25 基线风，暴雨天草浪显著放大
+	var wind_strength := 0.25
+	if weather_system != null:
+		wind_strength = 0.25 + weather_system.wind_strength * 0.75
+	for wmat in _wind_mats:
+		wmat.set_shader_parameter("u_wind_strength", wind_strength)
 	tree_manager.set_day_factor(u_day)
 	# 角色化身同通道（天光顶点色 × u_day）
 	if player != null and player.avatar != null:
@@ -550,7 +588,7 @@ func _update_hud() -> void:
 	var hint_line := ("[ " + _hint_text + " ]") if not _hint_text.is_empty() else ""
 	_hud_label.text = "\n".join([
 		hint_line,
-		"BUILD 2026-11-14.天气1 — 若无此行=旧程序未重启",
+		"BUILD 2026-11-15.天气2修2 — 若无此行=旧程序未重启",
 		"Voxel Terrain MVP - Items Layer (inventory + tools + ground drops)",
 		"chunks: %d    faces: %d    in-flight: %d    saved: %d    drops: %d" % [
 			world.chunk_count(), chunk_renderer.total_faces,
@@ -601,6 +639,26 @@ func _update_ripples(_delta: float) -> void:
 		# 漂流尾迹：移动才注入（静止漂浮物不持续扰动水面）
 		elif Vector2(drop.velocity.x, drop.velocity.z).length() > 0.3:
 			water_ripples.add_impulse(pos_xz, 0.12, 0.4)
+	# 雨滴打水面（天气批 2）：按雨强随机采样玩家周围水格注入弱冲量
+	#（涟漪休眠会被雨唤醒——雨强低于 0.05 不注入，雨歇后水面自然
+	# 平静归零休眠）
+	if weather_system != null and weather_system.rain_intensity > 0.05:
+		var base_cell := Vector3i(
+				floori(player.global_position.x),
+				floori(player.global_position.y),
+				floori(player.global_position.z))
+		var drops := int(weather_system.rain_intensity * 12.0)
+		for i in drops:
+			var rx := base_cell.x + randi_range(-9, 9)
+			var rz := base_cell.z + randi_range(-9, 9)
+			# 向下扫 3 格找水面（雨滴落在玩家层附近的水面）
+			for dy in 4:
+				var cell := Vector3i(rx, base_cell.y - dy, rz)
+				if world.get_block(cell) == VoxelTypes.WATER_ID:
+					water_ripples.add_impulse(
+							Vector2(float(rx) + 0.5, float(rz) + 0.5),
+							0.05, 0.3)
+					break
 	# 同步涟漪纹理与窗口参数到水面材质（纹理/中心脏检查 + 常量窗口
 	# 首帧一次——每帧 6 次 uniform 重发与 texture() 重复调用是无谓
 	# 开销，审查 D11/D16）
@@ -725,6 +783,11 @@ func _spawn_player(spawn_block: Vector2i) -> void:
 	drop_manager.pickup_inventory = player.inventory
 	if sound_manager != null:
 		sound_manager.attach_player(player)
+	# 天气接线必须在此（player 已建）：_ready 期接线传的是 null，
+	# 雨发射盒悬停世界原点（玩家头顶无雨）+ bolt 永不生成——
+	# 实机"看不到雨/闪电"真凶（tmp_main_weather 探针实测 pos=(0,0,0)）
+	if weather_system != null:
+		weather_system.setup_player(player)
 	# 脚 = 出生列最高实心方块顶面 +1（预热后数据已就绪）
 	var surface := 0
 	for y in range(config.world_height_blocks() - 1, -1, -1):

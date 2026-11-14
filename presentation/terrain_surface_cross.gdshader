@@ -23,7 +23,9 @@ uniform float u_day = 1.0;
 // 底 0 顶 1（平方衰减=根不动梢摆）。火把无 UV2=0 天然不摆。主摆+叶尖
 // 微颤双频（GrassierGrass 动画模型的顶点着色器廉价版：零 compute/
 // SSBO，相位与空间波前让相邻叶片连贯成浪）
+// 风力系数（天气系统 wind_strength 0..1）：乘阵风幅度——暴雨天草浪大浪
 uniform float u_wind_time = 0.0;
+uniform float u_wind_strength = 0.25;
 
 varying vec3 wpos;
 
@@ -43,7 +45,7 @@ void vertex() {
 		// 匀速正弦的"机械钟摆感"由此破除——风有阵性
 		float wind = n2(wpos.xz * 0.06
 				- vec2(u_wind_time * 0.55, u_wind_time * 0.35));
-		float gust = 0.55 + 0.9 * (0.5 + 0.5 * wind);
+		float gust = (0.55 + 0.9 * (0.5 + 0.5 * wind)) * mix(0.45, 1.7, u_wind_strength);
 		// UV2.x 由网格器烘"沿叶位置×(0.6+0.4×实际叶高)"（叶底恒 0）：
 		// 平方衰减下端点摆幅 ∝ 叶高²——高草（2-3 格）受风远大于矮草
 		// 地毯（力臂语义）；主摆常数 0.075 补偿矮草权重降幅

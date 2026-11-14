@@ -71,6 +71,9 @@ var drop_spawner: Callable
 var _light_dirty := {}
 ## tid -> 上次重烘时刻（BAKE_COOLDOWN_MSEC 冷却用）
 var _bake_last := {}
+## 砍伐重段在途标记（ef-000001 验收 B：连砍合并——deferred 期间
+## 再砍同树只更新结构，不重复排队）
+var _chop_pending := {}
 ## 异步首建队列：tid -> {task_id, tree, snap, rev, trunk, crown, shadow}
 var _tree_async := {}
 ## 列 -> [tid] 空间索引（origin 列）：光照脏标记曾对全部树做
@@ -637,6 +640,27 @@ func on_branch_broken(cell: Vector3i) -> void:
 	})
 	# 被挖格的 set_block 已由 BlockMining 完成（信号驱动本函数）
 	_cell_lookup.erase(cell)
+	# 重段后置一帧（ef-000001 验收 B：实测砍树干一刀同步段
+	# spawn 10.3ms + batch 6.0ms + 重建 ~4ms = 挖掘输入被卡 ~21ms）：
+	# 同步段只做结构分割（split/BFS 数据一致），倒伏视觉/占位清除/
+	# 重建走 deferred——按键响应即时，倒伏动画晚 1 帧无感。连砍
+	# 自然合并（pending 在途只排一次队，deferred 段在最新结构上
+	# 重新 BFS，覆盖两次砍的失支撑分量）
+	if not _chop_pending.has(tree.tree_id):
+		_chop_pending[tree.tree_id] = cut_id
+		_chop_heavy.call_deferred(tree.tree_id)
+
+
+## 砍伐重段（deferred）：BFS → 倒伏/刚体 → strip → 占位批量清除 →
+## 保留树重建。树可能在等待期被销毁（卸载/倒伏结算）——校验后放弃。
+func _chop_heavy(tree_id: int) -> void:
+	var first_cut: int = _chop_pending.get(tree_id, -1)
+	_chop_pending.erase(tree_id)
+	var entry: Dictionary = _trees.get(tree_id, {})
+	var tree: TreeInstance = entry.get("instance")
+	if tree == null:
+		return
+	var cut_id := first_cut
 
 	# BFS 连通性
 	var unsup := tree.find_unsupported()

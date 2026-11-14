@@ -29,6 +29,10 @@ const NativeMeshBridge := preload("res://meshing/native_mesh_bridge.gd")
 
 var world: VoxelWorld
 var _chunk_size := 16
+## 光照变化块的插队重网格回调（main 接 chunk_manager._on_light_mesh_dirty；
+## ef-000001 验收修复——挖掘后明暗 70-130ms 滞后的主因是重网格排
+## 普通脏块通道）
+var mesh_dirty_cb: Callable
 ## 当前 BFS 事务中光照变化的区块（coord -> true），flush 时标 mesh_dirty
 var _dirty_chunks := {}
 
@@ -355,6 +359,12 @@ func _recalc_one(coord: Vector3i) -> void:
 		init_chunk_light(chunk, six)  # GD 回退（无 C# 降级形态）
 	if chunk.light != _before_buf:
 		chunk.mesh_dirty = true
+		# 光照变化的块走插队重网格（ef-000001 验收：光照计算当帧
+		# 0.13ms 完成，但重网格排普通脏块通道（4 帧分频 + 2/帧限流
+		# + 流式在途竞争）→ 挖掘后明暗滞后 70-130ms 被用户实机感知。
+		# 回调由 main 接到 chunk_manager 的光照豁免通道）
+		if mesh_dirty_cb.is_valid():
+			mesh_dirty_cb.call(coord)
 		for d in DIRS:
 			_light_dirty[coord + d] = true
 

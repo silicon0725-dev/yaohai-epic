@@ -40,6 +40,10 @@ const NativeTerrainBridge := preload("res://meshing/native_terrain_bridge.gd")
 ## 玩家编辑的区块集合（插队重网格：入队绕过 max_in_flight+2、
 ## 提交最优先）——放置/挖掘的视觉响应曾排在流式任务后面=延迟
 var _edit_dirty := {}
+## 光照变化块的插队重网格集合（ef-000001 验收 A）：voxel_light 经
+## mesh_dirty_cb 注入——挖掘后明暗更新与方块本体同优先级重建
+var _light_dirty_mesh := {}
+const LIGHT_BYPASS_IN_FLIGHT := 2
 ## 草叶距离分级（性能 B9/B10b）：coord → 构建时档位。跨列时对比
 ## 新旧档位重排草区块（mesh_dirty 通用路径自动入队）
 var _chunk_grass_detail := {}
@@ -530,8 +534,8 @@ func _poll_jobs() -> void:
 	# 卡帧（实机放置段尖刺）。先到数量或时间任一上限即停，重提交
 	# 留下一帧
 	var mesh_t0 := Time.get_ticks_usec()
-	# 玩家编辑区块优先提交（预算豁免 +2——放置响应即时性优先；
-	# 普通提交仍受数量+时间双预算）
+	# 玩家编辑/光照变化区块优先提交（预算豁免各 +2——放置响应与
+	# 挖掘后明暗即时性优先；普通提交仍受数量+时间双预算）
 	var edit_committed := 0
 	for task_id in _mesh_jobs.keys():
 		if edit_committed >= EDIT_BYPASS_IN_FLIGHT:
@@ -547,6 +551,21 @@ func _poll_jobs() -> void:
 		_edit_dirty.erase(job0["coord"])
 		if _commit_mesh(job0):
 			edit_committed += 1
+	var light_committed := 0
+	for task_id in _mesh_jobs.keys():
+		if light_committed >= LIGHT_BYPASS_IN_FLIGHT:
+			break
+		var jobL: Dictionary = _mesh_jobs[task_id]
+		if not _light_dirty_mesh.has(jobL["coord"]):
+			continue
+		if not WorkerThreadPool.is_task_completed(task_id):
+			continue
+		WorkerThreadPool.wait_for_task_completion(task_id)
+		_mesh_jobs.erase(task_id)
+		_mesh_by_coord.erase(jobL["coord"])
+		_light_dirty_mesh.erase(jobL["coord"])
+		if _commit_mesh(jobL):
+			light_committed += 1
 	for task_id in _mesh_jobs.keys():
 		if mesh_committed >= mesh_commit_budget \
 				or (mesh_committed > 0 and Time.get_ticks_usec() - mesh_t0
@@ -569,6 +588,19 @@ func _poll_jobs() -> void:
 		if echunk == null or _mesh_by_coord.has(coord) \
 				or not (echunk.mesh_dirty or echunk.collision_dirty):
 			_edit_dirty.erase(coord)
+			continue
+		_enqueue_mesh(coord)
+	# 光照变化块插队入队（ef-000001 验收 A：挖掘后明暗滞后主因——
+	# 光照块曾排普通脏块通道（4 帧分频扫描 + 2/帧限流 + 流式在途
+	# 竞争），现在当帧入队当帧/次帧提交）
+	for coord in _light_dirty_mesh.keys():
+		if in_flight_count() >= max_in_flight + EDIT_BYPASS_IN_FLIGHT \
+				+ LIGHT_BYPASS_IN_FLIGHT:
+			break
+		var lchunk: ChunkData = world.chunks.get(coord)
+		if lchunk == null or _mesh_by_coord.has(coord) \
+				or not lchunk.mesh_dirty:
+			_light_dirty_mesh.erase(coord)
 			continue
 		_enqueue_mesh(coord)
 	# 脏区块网格任务（首次网格化与修改重建共用该路径）；
@@ -597,6 +629,11 @@ func _poll_jobs() -> void:
 func _on_player_edit(world_pos: Vector3i) -> void:
 	var coord := VoxelCoords.world_to_chunk(world_pos, world.config.chunk_size)
 	_edit_dirty[coord] = true
+
+
+## 光照变化块（voxel_light.mesh_dirty_cb 注入）：优先重网格
+func _on_light_mesh_dirty(coord: Vector3i) -> void:
+	_light_dirty_mesh[coord] = true
 
 
 func _enqueue_generation(coord: Vector3i) -> void:

@@ -210,6 +210,9 @@ func _ready() -> void:
 	voxel_light.setup(world)
 	chunk_manager.light_init_cb = voxel_light.init_chunk_light
 	chunk_manager.on_chunk_data_ready_cb = voxel_light.on_chunk_ready
+	# 光照变化块插队重网格（ef-000001 验收 A：挖掘后明暗即时性）
+	voxel_light.mesh_dirty_cb = Callable(chunk_manager,
+			"_on_light_mesh_dirty")
 
 	# 互动涟漪（Physics Mod 波动方程模拟的移植）：玩家/掉落物扰动水面
 	water_ripples = WaterRipplesScript.new()
@@ -527,7 +530,7 @@ func _update_hud() -> void:
 	var hint_line := ("[ " + _hint_text + " ]") if not _hint_text.is_empty() else ""
 	_hud_label.text = "\n".join([
 		hint_line,
-		"BUILD 2026-11-14.P3清尾 — 若无此行=旧程序未重启",
+		"BUILD 2026-11-14.验收AB — 若无此行=旧程序未重启",
 		"Voxel Terrain MVP - Items Layer (inventory + tools + ground drops)",
 		"chunks: %d    faces: %d    in-flight: %d    saved: %d    drops: %d" % [
 			world.chunk_count(), chunk_renderer.total_faces,

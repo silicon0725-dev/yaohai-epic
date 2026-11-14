@@ -40,6 +40,8 @@ const WaterRipplesScript := preload("res://world/water_ripples.gd")
 const DistantShellScript := preload("res://presentation/distant_shell.gd")
 var sound_manager: Node  # SoundManager（preload 绕开类缓存）
 const SoundManagerScript := preload("res://systems/sound/sound_manager.gd")
+var weather_system: Node  # WeatherSystem 天气（preload 绕开类缓存）
+const WeatherSystemScript := preload("res://systems/weather/weather_system.gd")
 var save_system: WorldSave
 var player: PlayerController
 var water_reflection: Node  # 水面镜像反射（preload 绕开类缓存）
@@ -218,6 +220,10 @@ func _ready() -> void:
 	water_ripples = WaterRipplesScript.new()
 	add_child(water_ripples)
 
+	# 天气系统（阶段 1：状态机 + 天空/太阳/环境联动 + 程序化雨声）
+	weather_system = WeatherSystemScript.new()
+	add_child(weather_system)
+
 	_setup_environment()
 
 	# 预热出生/存档位置的区块列，再放置玩家
@@ -390,6 +396,10 @@ const NIGHT_SKY_TOP := Color(0.012, 0.02, 0.055)
 const NIGHT_SKY_HORIZON := Color(0.045, 0.06, 0.11)
 const DAY_AMBIENT := Color(0.29, 0.41, 0.61)
 const NIGHT_AMBIENT := Color(0.16, 0.19, 0.30)
+# 阴天天空/环境色（BSL 写实取向：灰蓝不脏；天气系统向此插值）
+const OVERCAST_SKY_TOP := Color(0.40, 0.44, 0.51)
+const OVERCAST_SKY_HORIZON := Color(0.54, 0.57, 0.62)
+const OVERCAST_AMBIENT := Color(0.34, 0.38, 0.46)
 # 远景雾色初值（运行时每帧被地平线天色覆盖，见 _update_day_night）
 const DAY_FOG := Color(0.62, 0.74, 0.90)
 var _time_of_day := 0.1  # 起始上午
@@ -400,6 +410,7 @@ var _u_day_mats: Array = []
 var _wind_mats: Array = []
 ## 天空色上次写入的 day01（C5 脏检查；-1 = 首帧强制写）
 var _last_sky_day01 := -1.0
+var _last_weather01 := -1.0  # 天气暗度上次写入（同上脏检查）
 ## 水面材质表（u_time/storm/sun_direction/涟漪参数多段下发共用——
 ## 每帧三处字面量数组分配曾是隐性 GC 压力，审查二轮 D11）
 var _water_mats: Array = []
@@ -433,20 +444,29 @@ func _update_day_night(delta: float) -> void:
 		_sun.light_energy = MOON_ENERGY * smoothstep(0.0, 0.25, melev)
 		_sun.light_color = MOON_SUN
 		_sun.light_volumetric_fog_energy = 0.0  # 夜里没有太阳光束
-	# 天空/环境：昼端取 BSL 白天色，夜端藏青。
+	# 天气联动（阶段 1）：云层压太阳/月亮（连续参数驱动，零跳变）
+	var w01 := 0.0
+	if weather_system != null:
+		w01 = weather_system.weather01
+	_sun.light_energy *= 1.0 - 0.65 * w01
+	# 天空/环境：昼端取 BSL 白天色，夜端藏青，阴天向灰蓝插值。
 	# 脏检查（审查二轮 C5）：这些写入触发 radiance cubemap 重烘
-	#（0.2-0.6ms GPU/次）——day01 变化 >0.002 才写（晨昏约 2-3 次/s，
-	# 白天/深夜稳态零写入；曾每帧重写 4 色全量重烘）
-	if absf(day01 - _last_sky_day01) > 0.002 or _last_sky_day01 < 0.0:
+	#（0.2-0.6ms GPU/次）——day01 变化 >0.002（或天气暗度 >0.005）才写
+	#（晨昏约 2-3 次/s，白天/深夜稳态零写入；曾每帧重写 4 色全量重烘）
+	if absf(day01 - _last_sky_day01) > 0.002 or _last_sky_day01 < 0.0 \
+			or absf(w01 - _last_weather01) > 0.005:
 		_last_sky_day01 = day01
+		_last_weather01 = w01
 		var sky_mat: ProceduralSkyMaterial = _sky.sky_material
-		sky_mat.sky_top_color = DAY_SKY_TOP.lerp(NIGHT_SKY_TOP, 1.0 - day01)
+		sky_mat.sky_top_color = DAY_SKY_TOP.lerp(NIGHT_SKY_TOP, 1.0 - day01) \
+				.lerp(OVERCAST_SKY_TOP, w01)
 		sky_mat.sky_horizon_color = DAY_SKY_HORIZON.lerp(
-				NIGHT_SKY_HORIZON, 1.0 - day01)
+				NIGHT_SKY_HORIZON, 1.0 - day01).lerp(
+				OVERCAST_SKY_HORIZON, w01)
 		sky_mat.ground_bottom_color = sky_mat.sky_horizon_color
 		sky_mat.ground_horizon_color = sky_mat.sky_horizon_color
 		_environment.ambient_light_color = DAY_AMBIENT.lerp(
-				NIGHT_AMBIENT, 1.0 - day01)
+				NIGHT_AMBIENT, 1.0 - day01).lerp(OVERCAST_AMBIENT, w01)
 		# 深度雾色=当前地平线天色（大气透视的物理本义：远景混向天色）。
 		# 曾用独立 DAY/NIGHT_FOG 常量 lerp day01——日落时天空已暗红而
 		# 雾还亮蓝白，雾把远山推得比天空亮 = "远处发光"（PIL 真值实测
@@ -530,14 +550,15 @@ func _update_hud() -> void:
 	var hint_line := ("[ " + _hint_text + " ]") if not _hint_text.is_empty() else ""
 	_hud_label.text = "\n".join([
 		hint_line,
-		"BUILD 2026-11-14.验收AB — 若无此行=旧程序未重启",
+		"BUILD 2026-11-14.天气1 — 若无此行=旧程序未重启",
 		"Voxel Terrain MVP - Items Layer (inventory + tools + ground drops)",
 		"chunks: %d    faces: %d    in-flight: %d    saved: %d    drops: %d" % [
 			world.chunk_count(), chunk_renderer.total_faces,
 			chunk_manager.in_flight_count(),
 			save_system.saved_chunk_count(), drop_manager.drop_count()],
-		"seed: %d    view: %d chunks    world: infinite horizontal" % [
-			config.world_seed, chunk_manager.view_distance],
+		"seed: %d    view: %d chunks    weather: %s" % [
+			config.world_seed, chunk_manager.view_distance,
+			weather_system.state_name() if weather_system != null else "-"],
 		"Hold LMB mine (drops to ground) | walk over to auto-pickup | RMB place",
 		"Q drop held | Ctrl+Q drop stack | 1-8/wheel select | E inventory | R rotate while dragging",
 		"F5 camera (1st person / 3rd behind / 2nd front / shoulder) | F6 character model | F7 draw/sheathe katana",

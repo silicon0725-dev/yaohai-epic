@@ -30,6 +30,14 @@ const BRANCH_ID := 15
 const LEAVES_ID := 16
 const TORCH_ID := 17
 const LANTERN_ID := 18
+const TALL_GRASS_ID := 19
+const FLOWER_POPPY_ID := 20
+const FLOWER_DANDELION_ID := 21
+
+## 植物方块集合（放置可替换/失去支撑即断——BlockPlacement 与
+## 挖掘支撑级联消费）
+const PLANT_IDS := [TALL_GRASS_ID, FLOWER_POPPY_ID,
+		FLOWER_DANDELION_ID]
 
 ## 光照不透明度（光照阶段 2）：索引 = 数值 ID（与上方常量顺序一致，
 ## 由 registry 一致性测试保护）。0 = 完全透光；实心方块 15 全挡；
@@ -43,6 +51,7 @@ const LIGHT_OPACITY := [
 	1,   # leaves
 	0,
 	0,
+	0, 0, 0,   # 植物（草/花）：透光不衰减
 ]
 
 ## 方块光发射等级（0-15）：光源方块在此登记（火把等，下轮接入；
@@ -51,6 +60,7 @@ const LIGHT_EMISSION := [
 	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
 	14,
 	15,
+	0, 0, 0,
 ]
 
 
@@ -85,7 +95,11 @@ static func build_default_registry() -> VoxelRegistry:
 	registry.register_block({
 		"id": "core:grass",
 		"render_type": "opaque",
-		"textures": {"top": "grass_top", "side": "grass_side", "bottom": "dirt"},
+		"textures": {"top": "grass_top", "side": "grass_side", "bottom": "dirt",
+				# 侧面过渡变体（草坡融合交界的草垂带；网格器按邻居
+				# 条件选用，普通面渲染不读这三个键）
+				"side_u0": "grass_side_u0", "side_u1": "grass_side_u1",
+				"side_u01": "grass_side_u01"},
 		"collision": true,
 		"occludes_neighbors": true,
 		"hardness": 0.9,
@@ -243,5 +257,33 @@ static func build_default_registry() -> VoxelRegistry:
 		"collision": false,
 		"occludes_neighbors": false,
 		"hardness": 0.3,
+	})
+	# 植被轮（GrassierGrass 思想自研实现——贴图全自绘，ARR mod
+	# 零像素搬运）：render_type "plant"=十字面片网格（cutout 桶），
+	# 不碰撞不遮挡透光，秒拆；高草无掉落、花掉自身（可再放置，
+	# 需草地/土支撑）。必须追加在注册表末尾（ID 顺序红线）
+	registry.register_block({
+		"id": "core:tall_grass",
+		"render_type": "plant",
+		"textures": {"side": "grass_tuft", "top": "grass_blade", "bottom": "grass_blade"},
+		"collision": false,
+		"occludes_neighbors": false,
+		"hardness": 0.05,
+	})
+	registry.register_block({
+		"id": "core:flower_poppy",
+		"render_type": "plant",
+		"textures": {"side": "flower_poppy"},
+		"collision": false,
+		"occludes_neighbors": false,
+		"hardness": 0.05,
+	})
+	registry.register_block({
+		"id": "core:flower_dandelion",
+		"render_type": "plant",
+		"textures": {"side": "flower_dandelion"},
+		"collision": false,
+		"occludes_neighbors": false,
+		"hardness": 0.05,
 	})
 	return registry

@@ -36,6 +36,13 @@ const TILES := [
 	"leaves",
 	"torch",
 	"lantern",
+	"grass_blade",
+	"grass_tuft",
+	"flower_poppy",
+	"flower_dandelion",
+	"grass_side_u0",
+	"grass_side_u1",
+	"grass_side_u01"
 ]
 
 ## 矿石斑点中心（程序化占位图用，确定性团簇）。

@@ -37,3 +37,9 @@ EmacEArtStylizedGrass/
 
 # Godot/工具写入的临时文件（~ 前缀，如 addons 构建的中间 dll）
 ~*
+
+# 一次性调试脚本与 Python 产物（tmp_* 先例见 tmp_v5；pycache 防外带）
+debug/tmp_*
+__pycache__/
+*.pyc
+debug/archive/*.png

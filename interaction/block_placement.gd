@@ -21,7 +21,9 @@ static func place(
 	if block_id == VoxelTypes.AIR_ID:
 		return false
 	# 水视同空气：可以往水里放方块（替换水）
-	if world.get_block(target_pos) != VoxelTypes.AIR_ID 			and world.get_block(target_pos) != VoxelTypes.WATER_ID:
+	# 植物格可被替换（MC 语义：往草丛上放方块顶掉草）
+	var tgt: int = world.get_block(target_pos)
+	if tgt != VoxelTypes.AIR_ID and tgt != VoxelTypes.WATER_ID 			and not VoxelTypes.PLANT_IDS.has(tgt):
 		return false
 	# 支撑检查（火把）：下方碰撞固体 -> 落地火把；否则若贴着点击的
 	# 墙面（face_normal 水平）-> 墙挂火把（写 attach 状态，模型贴墙）。

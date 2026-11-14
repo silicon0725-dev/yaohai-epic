@@ -15,6 +15,14 @@ func _init(atlas_texture: Texture2D) -> void:
 	var cutout := _create_atlas_material(atlas_texture)
 	cutout.set_shader_parameter("cutout_mode", true)
 	_materials["cutout"] = cutout
+	# cross 表面（草/植物/火把）：cull_disabled 变体（双面渲染——网格器
+	# 单绕序索引，性能 B9；与 terrain_surface_cross.gdshader 配套）
+	var cutout_cross := ShaderMaterial.new()
+	cutout_cross.shader = load(
+			"res://presentation/terrain_surface_cross.gdshader")
+	cutout_cross.set_shader_parameter("atlas", atlas_texture)
+	cutout_cross.set_shader_parameter("cutout_mode", true)
+	_materials["cutout_cross"] = cutout_cross
 
 
 func material_for(render_type: String) -> Material:

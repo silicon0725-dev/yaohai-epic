@@ -394,7 +394,7 @@ func _is_cave(world_x: int, world_y: int, world_z: int,
 
 
 ## 矿脉细脉（Minetest mg_ore OreVein）：vein 双噪声等值线交叉
-## + hash 抖动控制厚度；煤浅带、铁更深（IRon_ORE_MAX_Y）。
+## + hash 抖动控制厚度；煤浅带、铁更深（IRON_ORE_MAX_Y）。
 ## hash 为整型算术（GD/C# 位同步——RandomNumberGenerator 序列
 ## 不可跨语言复现）。
 static func _hash_unit(x: int, y: int, z: int) -> float:
@@ -448,9 +448,11 @@ func generate_chunk(chunk_coord: Vector3i) -> ChunkData:
 	if not native.is_empty():
 		chunk.block_ids = native["ids"]
 		_scatter_trees(chunk, native)
+		_scatter_plants(chunk, native)
 	else:
 		_fill_columns_gd(chunk, origin, size)
 		_scatter_trees(chunk, {})
+		_scatter_plants(chunk, {})
 	chunk.state = ChunkState.State.DATA_READY
 	return chunk
 
@@ -489,6 +491,66 @@ func _fill_columns_gd(chunk: ChunkData, origin: Vector3i, size: int) -> void:
 ## 落在本层的格——跨层树在每层各写各的部分，完整无截断。
 ## profiles 非空时（C# 路径）界内列直接查 height/sandy/rocky 数组，
 ## 界外列（±TREE_REACH 圈）回退 column_profile——每树 1-2 次，量小。
+## 植被撒布（草/花，生成期确定性 hash——同树重放先例留 GD 侧，
+## C# 生成路径不碰）：草地表面、上方空气且非水下。密度 v1 定值：
+## 高草 10%、两种花各 1%（与高草互斥）。树占位优先（树在植物前
+## 撒布，_ref 占位非空气自然跳过）。
+const TreeScatterScript := preload("res://systems/trees/tree_scatter.gd")
+const PLANT_SALT := 777
+const TALL_GRASS_DENSITY := 0.22
+const FLOWER_DENSITY := 0.01
+
+
+func _scatter_plants(chunk: ChunkData, profiles: Dictionary) -> void:
+	var size := chunk.dimensions.x
+	var origin := chunk.chunk_coord * size
+	var heights: PackedInt32Array = profiles.get("heights",
+			PackedInt32Array())
+	var sandy_arr: PackedByteArray = profiles.get("sandy",
+			PackedByteArray())
+	var rocky_arr: PackedByteArray = profiles.get("rocky",
+			PackedByteArray())
+	for lz in size:
+		for lx in size:
+			var col := lz * size + lx
+			var height: int
+			var sandy: bool
+			var rocky: bool
+			if not heights.is_empty():
+				height = heights[col]
+				sandy = sandy_arr[col] == 1
+				rocky = rocky_arr[col] == 1
+			else:
+				var prof := column_profile(origin.x + lx, origin.z + lz)
+				height = int(prof["height"])
+				sandy = bool(prof["sandy"])
+				rocky = bool(prof["rocky"])
+			if sandy or rocky or height <= sea_level:
+				continue
+			# 地表格必须在本区块内且其上格也在（跨顶界跳过——上层
+			# 区块生成时该列地表不在其内，天然不重复）
+			var surf_y := height - origin.y
+			if surf_y < 0 or surf_y >= size or surf_y + 1 >= size:
+				continue
+			var base := col + surf_y * size
+			if chunk.block_ids[base] != VoxelTypes.GRASS_ID:
+				continue
+			if chunk.block_ids[base + size] != VoxelTypes.AIR_ID:
+				continue
+			var wx := origin.x + lx
+			var wz := origin.z + lz
+			var r := TreeScatterScript.hash01(wx, wz, PLANT_SALT)
+			var plant: int = VoxelTypes.AIR_ID
+			if r < FLOWER_DENSITY:
+				plant = VoxelTypes.FLOWER_POPPY_ID
+			elif r < FLOWER_DENSITY * 2.0:
+				plant = VoxelTypes.FLOWER_DANDELION_ID
+			elif r < FLOWER_DENSITY * 2.0 + TALL_GRASS_DENSITY:
+				plant = VoxelTypes.TALL_GRASS_ID
+			if plant != VoxelTypes.AIR_ID:
+				chunk.block_ids[base + size] = plant
+
+
 func _scatter_trees(chunk: ChunkData, profiles: Dictionary) -> void:
 	var origin := Vector3i(chunk.chunk_coord.x * chunk.dimensions.x,
 			chunk.chunk_coord.y * chunk.dimensions.y,
@@ -544,7 +606,9 @@ func _grow_tree_into_chunk(chunk: ChunkData, root: Vector3i) -> void:
 		if tree.cell_to_branch[cell] == tree.root_branch_id:
 			var r: int = TreeGenerator.trunk_radius_at(tree, cell)
 			if r > 1:
-				chunk.set_state(local, "radius", r)
+				# 生成期写入：不标记玩家修改（审查修复 P1-4——
+				# 曾把纯生成区块持久化+阻碍生成器升级重建）
+				chunk.set_state(local, "radius", r, true)
 	# 树叶占位
 	for leaf in TreeGenerator.leaf_cells(tree):
 		var local: Vector3i = leaf - origin

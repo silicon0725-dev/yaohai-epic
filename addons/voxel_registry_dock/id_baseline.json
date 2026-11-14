@@ -21,6 +21,9 @@
     "core:branch",
     "core:leaves",
     "core:torch",
-    "core:lantern"
+    "core:lantern",
+    "core:tall_grass",
+    "core:flower_poppy",
+    "core:flower_dandelion"
   ]
 }

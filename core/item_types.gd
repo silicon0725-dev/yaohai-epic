@@ -70,6 +70,9 @@ static func build_default_item_registry(
 	})
 	_block_item(registry, "core:torch", "Torch", "torch")
 	_block_item(registry, "core:lantern", "Lantern", "lantern")
+	_block_item(registry, "core:flower_poppy", "Poppy", "flower_poppy")
+	_block_item(registry, "core:flower_dandelion", "Dandelion",
+			"flower_dandelion")
 	return registry
 
 

@@ -75,6 +75,13 @@ static func mine(
 	# 驱动 TreeManager 砍伐管线（不再用 static var 回调——失效过）
 	if not world.set_block(block_pos, VoxelTypes.AIR_ID):
 		return []
+	# 断支撑级联：植物失去下方实体即折断（掉自身——花可拾取，
+	# 高草 DropTable 无掉落自然为空）
+	var above: int = world.get_block(block_pos + Vector3i(0, 1, 0))
+	if VoxelTypes.PLANT_IDS.has(above):
+		world.set_block(block_pos + Vector3i(0, 1, 0), VoxelTypes.AIR_ID)
+		if allow_drops:
+			DropTable.drops_for(above, world.registry, item_registry)
 	if not allow_drops:
 		return []
 	return DropTable.drops_for(block_id, world.registry, item_registry)

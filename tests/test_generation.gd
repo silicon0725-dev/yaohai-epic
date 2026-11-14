@@ -215,7 +215,8 @@ func run() -> void:
 			var height: int = profile["height"]
 			# 地表之上必须是空气或水（海平面以下的水柱）
 			var above: int = world.get_block(Vector3i(x, height + 1, z))
-			if above != VoxelTypes.AIR_ID and above != VoxelTypes.WATER_ID:
+			# 植被轮：地表之上一格允许植物（高草/花——撒布写入）
+			if above != VoxelTypes.AIR_ID and above != VoxelTypes.WATER_ID 					and not VoxelTypes.PLANT_IDS.has(above):
 				violations += 1
 			if world.get_block(Vector3i(x, 0, z)) != VoxelTypes.BEDROCK_ID:
 				violations += 1

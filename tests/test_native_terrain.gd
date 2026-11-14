@@ -87,6 +87,7 @@ func run() -> void:
 			var origin := VoxelCoords.chunk_origin(coord, config.chunk_size)
 			gen._fill_columns_gd(chunk_gd, origin, config.chunk_size)
 			gen._scatter_trees(chunk_gd, {})
+			gen._scatter_plants(chunk_gd, {})
 			check(chunk_native.block_ids == chunk_gd.block_ids,
 					"seed %d %s：完整终态 ids 一致（含树占位）" % [seed, coord])
 			var n_states := 0

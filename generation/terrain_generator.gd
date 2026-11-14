@@ -428,7 +428,8 @@ func column_height(world_x: int, world_z: int) -> int:
 const TREE_REACH := 4
 
 
-func generate_chunk(chunk_coord: Vector3i) -> ChunkData:
+func generate_chunk(chunk_coord: Vector3i,
+		tree_cuts: Variant = null) -> ChunkData:
 	assert(config.in_chunk_bounds(chunk_coord),
 			"生成垂直越界区块: %s" % chunk_coord)
 	var size := config.chunk_size
@@ -439,6 +440,9 @@ func generate_chunk(chunk_coord: Vector3i) -> ChunkData:
 	)
 	chunk.state = ChunkState.State.GENERATING
 	var origin := VoxelCoords.chunk_origin(chunk_coord, size)
+	# 砍伐重放快照（主线程 job 构造时经参数链传入；worker 只读——
+	# 直接读 TreeManager._cut_events 有并发风险，同 states 快照先例）
+	var cuts: Dictionary = tree_cuts if tree_cuts is Dictionary else {}
 	# C# 优先（等价测试 native_terrain 多种子逐字节保证）：列剖面+方块
 	# 填充主体走原生；树重放留 GDScript（hash/RNG 等价风险长尾），
 	# 复用 C# 输出的列剖面数组免重复噪声采样。不可用回退 GD 全程
@@ -447,11 +451,11 @@ func generate_chunk(chunk_coord: Vector3i) -> ChunkData:
 			chunk_coord, size)
 	if not native.is_empty():
 		chunk.block_ids = native["ids"]
-		_scatter_trees(chunk, native)
+		_scatter_trees(chunk, native, cuts)
 		_scatter_plants(chunk, native)
 	else:
 		_fill_columns_gd(chunk, origin, size)
-		_scatter_trees(chunk, {})
+		_scatter_trees(chunk, {}, cuts)
 		_scatter_plants(chunk, {})
 	chunk.state = ChunkState.State.DATA_READY
 	return chunk
@@ -551,7 +555,8 @@ func _scatter_plants(chunk: ChunkData, profiles: Dictionary) -> void:
 				chunk.block_ids[base + size] = plant
 
 
-func _scatter_trees(chunk: ChunkData, profiles: Dictionary) -> void:
+func _scatter_trees(chunk: ChunkData, profiles: Dictionary,
+		tree_cuts: Dictionary = {}) -> void:
 	var origin := Vector3i(chunk.chunk_coord.x * chunk.dimensions.x,
 			chunk.chunk_coord.y * chunk.dimensions.y,
 			chunk.chunk_coord.z * chunk.dimensions.z)
@@ -585,13 +590,33 @@ func _scatter_trees(chunk: ChunkData, profiles: Dictionary) -> void:
 			# 草地判定（荒漠/裸岩不种）
 			if is_sandy or is_rocky:
 				continue
-			_grow_tree_into_chunk(chunk, Vector3i(wx, surf + 1, wz))
+			_grow_tree_into_chunk(chunk, Vector3i(wx, surf + 1, wz),
+					tree_cuts)
 
 ## 确定性重放一棵树并只把落在本 chunk 的枝干/树叶格写入占位
 ##（跨层/跨区块树由各层重放补齐，树系统 v2 接口）。
-func _grow_tree_into_chunk(chunk: ChunkData, root: Vector3i) -> void:
+func _grow_tree_into_chunk(chunk: ChunkData, root: Vector3i,
+		tree_cuts: Dictionary = {}) -> void:
 	var sp := TreeSpecies.new()
 	var tree := TreeGenerator.generate(sp, config.world_seed, root)
+	# 砍伐重放：已砍的树只写剩余格（体素与 TreeManager 结构同源——
+	# 曾生成器不知道砍伐记录，卸载重生成的 chunk 里已砍树全量长回
+	# BRANCH/LEAVES 占位=悬浮叶/幽灵遮挡且随存档永久化，审查 3-F2。
+	# 剪枝与 TreeManager._apply_cuts 同构（split→失支撑分量移除；
+	# 生成侧无 _cell_lookup 索引可清）
+	var cuts: Array = tree_cuts.get(Vector2i(root.x, root.z), [])
+	for cut in cuts:
+		var cut_cell := cut as Vector3i
+		tree.split_branch_at_cell(cut_cell)
+		tree.record_cut(cut_cell)
+	if not cuts.is_empty():
+		var unsup := tree.find_unsupported()
+		for bid in unsup:
+			tree.branches.erase(bid)
+		for bid in tree.branches:
+			var node: TreeInstance.BranchNode = tree.branches[bid]
+			node.child_ids = node.child_ids.filter(
+					func(cid): return tree.branches.has(cid))
 	var origin := Vector3i(chunk.chunk_coord.x * chunk.dimensions.x,
 			chunk.chunk_coord.y * chunk.dimensions.y,
 			chunk.chunk_coord.z * chunk.dimensions.z)

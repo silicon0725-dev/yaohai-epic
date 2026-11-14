@@ -76,12 +76,17 @@ static func mine(
 	if not world.set_block(block_pos, VoxelTypes.AIR_ID):
 		return []
 	# 断支撑级联：植物失去下方实体即折断（掉自身——花可拾取，
-	# 高草 DropTable 无掉落自然为空）
+	# 高草 DropTable 无掉落自然为空）。折断植物的掉落并入返回值
+	#（曾结果被丢弃=挖支撑方块上方花凭空消失——审查 5-F1）
 	var above: int = world.get_block(block_pos + Vector3i(0, 1, 0))
+	var above_drops: Array = []
 	if VoxelTypes.PLANT_IDS.has(above):
 		world.set_block(block_pos + Vector3i(0, 1, 0), VoxelTypes.AIR_ID)
 		if allow_drops:
-			DropTable.drops_for(above, world.registry, item_registry)
+			above_drops = DropTable.drops_for(
+					above, world.registry, item_registry)
 	if not allow_drops:
 		return []
-	return DropTable.drops_for(block_id, world.registry, item_registry)
+	var drops := DropTable.drops_for(block_id, world.registry, item_registry)
+	drops.append_array(above_drops)
+	return drops

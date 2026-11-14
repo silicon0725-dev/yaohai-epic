@@ -68,17 +68,18 @@ func run() -> void:
 				_:
 					world.set_block(pos, VoxelTypes.STONE_ID, false)
 		manager._poll_jobs()
-	# 全部任务回收（预算限流：逐个 wait + poll 直到在册清空）
+	# 全部任务回收（帧驱动：manager._poll_jobs 自行消化 worker 完成并
+	# 清任务表。禁直接 wait_for_task_completion——它会消费 task id，
+	# 之后 manager._poll_jobs 对失效 id 调 is_task_completed，每轮刷
+	# 1265-1401 条 Invalid Task ID 引擎错误淹没真实错误——审查 L2）
+	var tree := tree_root.get_tree()
 	for i in 600:
 		if manager.is_idle():
 			break
-		if manager._mesh_jobs.size() > 0:
-			WorkerThreadPool.wait_for_task_completion(
-					manager._mesh_jobs.keys()[0])
-		elif manager._gen_jobs.size() > 0:
-			WorkerThreadPool.wait_for_task_completion(
-					manager._gen_jobs.keys()[0])
 		manager._poll_jobs()
+		await tree.process_frame
+	if not manager.is_idle():
+		check(false, "600 帧内任务未回收（is_idle 恒 false——活锁/挂死）")
 	check(true, "并发压力 40 轮无崩溃（worker 与水位 tick 并发）")
 
 	# 终态确定性：同数据两次构建逐字节一致（hash 比对）
@@ -93,7 +94,6 @@ func run() -> void:
 	# free——曾间歇报 "Attempted to free a locked object"；多一帧
 	# 缓冲让分发中的信号落地）。process_frame 是 SceneTree 信号，
 	# RefCounted 用例须经注入的 tree_root 取树——裸 await 会 parse error
-	var tree := tree_root.get_tree()
 	var guard := 0
 	while manager.in_flight_count() > 0 and guard < 200:
 		await tree.process_frame

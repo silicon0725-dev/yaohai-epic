@@ -37,6 +37,40 @@ func setup(p_world: VoxelWorld) -> void:
 	world = p_world
 	_chunk_size = world.config.chunk_size
 	world.block_changed.connect(_on_block_changed)
+	world.blocks_changed_batch.connect(_on_blocks_changed_batch)
+
+
+## 批量变更（树占位清理）：涉及块+贴边命中邻块做全量重算（精确
+## 终态；C# ~0.5ms/块）——逐格增量 BFS 曾是砍树卡顿主源（审查
+## 3-F3）。重算 diff 无变化则不标脏（树占位不遮光时零成本）
+func _on_blocks_changed_batch(cells: Array) -> void:
+	var to_recalc := {}
+	for pos_v in cells:
+		var pos: Vector3i = pos_v
+		var cc := VoxelCoords.world_to_chunk(pos, _chunk_size)
+		to_recalc[cc] = true
+		var local: Vector3i = _to_local(pos)
+		for d in DIRS:
+			var nl: Vector3i = local + d
+			if nl.x < 0 or nl.y < 0 or nl.z < 0 \
+					or nl.x >= _chunk_size or nl.y >= _chunk_size \
+					or nl.z >= _chunk_size:
+				to_recalc[cc + d] = true
+	for cc_v in to_recalc:
+		var coord: Vector3i = cc_v
+		var chunk := _chunk_at(coord)
+		if chunk == null:
+			continue
+		var six: Array = []
+		for d in DIRS:
+			six.append(_chunk_at(coord + d))
+		var before := chunk.light.duplicate()
+		if _init_chunk_light_native(chunk, six, six[2] == null):
+			if chunk.light != before:
+				chunk.mesh_dirty = true
+		else:
+			init_chunk_light(chunk, six)
+			chunk.mesh_dirty = true
 
 
 # ============================================================

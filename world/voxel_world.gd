@@ -14,6 +14,10 @@ var registry: VoxelRegistry
 ## 方块实际变更时广播（set_block 成功路径）。水位模拟（WaterFlow）
 ## 据此把扰动位置入队；语义：只有"数据变化"事件，无负载语义。
 signal block_changed(pos: Vector3i, old_id: int, new_id: int)
+## 批量写通道（树占位清理等整组变更）：cells 为实际写入的世界格。
+## 消费方按区域重算（voxel_light 块级全量、cave_fog 标脏），替代
+## 每格一次的 block_changed（增量 BFS 曾每格 2-7ms——审查 3-F3）
+signal blocks_changed_batch(cells: Array)
 
 ## Vector3i（区块坐标） -> ChunkData
 var chunks := {}
@@ -102,6 +106,35 @@ func set_block(world_pos: Vector3i, id: int, affects_collision := true) -> bool:
 	if _ok and _dt > 2000:
 		print("[perf] set_block %.1fms at %s (id %d)" % [_dt * 0.001, world_pos, id])
 	return _ok
+
+
+## 批量写方块（树占位清理等整组同值变更）：逐格写数据+网格失效
+##（affects_collision 语义=false——批量通道当前只有树占位 AIR 化，
+## 无碰撞方块），单格 block_changed 不发——光照/cave_fog 由末尾
+## 一次 blocks_changed_batch 按区域重算（增量 BFS 曾每格 2-7ms，
+## 一棵树几十格=单次卡 100-300ms，审查 3-F3）。返回是否有写入。
+func set_blocks_batch(cells: Array, id: int) -> bool:
+	var written: Array = []
+	for pos_v in cells:
+		var pos: Vector3i = pos_v
+		if not config.in_block_bounds(pos):
+			continue
+		var chunk_coord := VoxelCoords.world_to_chunk(
+				pos, config.chunk_size)
+		var chunk: ChunkData = chunks.get(chunk_coord)
+		if chunk == null:
+			continue
+		var local := VoxelCoords.world_to_local(pos, config.chunk_size)
+		if chunk.get_block(local) == id:
+			continue
+		if not chunk.set_block(local, id):
+			continue
+		chunk.clear_state(local)
+		_invalidate_affected_meshes(chunk_coord, local, false)
+		written.append(pos)
+	if not written.is_empty():
+		blocks_changed_batch.emit(written)
+	return not written.is_empty()
 
 
 func _set_block_impl(world_pos: Vector3i, id: int, affects_collision := true) -> bool:

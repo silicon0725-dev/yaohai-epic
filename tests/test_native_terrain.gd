@@ -7,7 +7,9 @@ const NativeTerrainBridge := preload("res://meshing/native_terrain_bridge.gd")
 
 func run() -> void:
 	if not NativeTerrainBridge.available():
-		print("[SKIP] C# 原生地形不可用，跳过等价测试（纯 GDScript 模式）")
+		skip_reason = "C# 原生地形不可用（纯 GDScript 模式；对拍覆盖缺失）"
+		print("[SKIP] " + skip_reason)
+		skipped = true
 		return
 	var mismatches := 0
 	var checked_chunks := 0

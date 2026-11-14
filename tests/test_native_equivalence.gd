@@ -7,7 +7,9 @@ const VoxelLightScript := preload("res://systems/lighting/voxel_light.gd")
 
 func run() -> void:
 	if not NativeMeshBridge.available():
-		print("[SKIP] C# 原生网格器不可用，跳过等价测试（纯 GDScript 模式）")
+		skip_reason = "C# 原生网格器不可用（纯 GDScript 模式；对拍覆盖缺失）"
+		print("[SKIP] " + skip_reason)
+		skipped = true
 		return
 
 	var registry := VoxelTypes.build_default_registry()

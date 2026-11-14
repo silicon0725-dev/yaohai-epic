@@ -16,6 +16,8 @@ func _initialize() -> void:
 	var suite: VoxelTestCase = load(args[0]).new()
 	suite.tree_root = root
 	await suite.run()
-	var status := "PASS" if suite.failures.is_empty() else "FAIL"
+	var status := "FAIL" if not suite.failures.is_empty() \
+			else ("SKIP" if suite.skipped else "PASS")
 	print("[%s] %s — %s" % [status, args[0], suite.summary()])
-	quit(0 if suite.failures.is_empty() else 1)
+	quit(1 if not suite.failures.is_empty()
+			else (2 if suite.skipped else 0))

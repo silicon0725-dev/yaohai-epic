@@ -622,19 +622,21 @@ func on_branch_broken(cell: Vector3i) -> void:
 			var node: TreeInstance.BranchNode = tree.branches[bid]
 			node.child_ids = node.child_ids.filter(
 				func(cid): return tree.branches.has(cid))
-		# 占位清除（set_block AIR 走区块管线异步 remesh；会再次触发
-		# 本信号但 get_tree_at 已返回 null，无递归）。曾同步重建受
-		# 影响区块（v5，防"跳半格"竞态）——已移除：跳半格真因是
-		# 断口空隙悬空（v6 连根倒根治），且树 mesh 盒包住区块立方，
-		# 立方延迟 1-3 帧消失不可见；同步重建多 chunk 反致砍树卡帧
-		# （实机"破坏方块卡一下"）
+		# 占位清除：批量通道（逐格 set_block 曾每格触发一次光照增量
+		# BFS 2-7ms，一棵树几十格=单次砍伐卡 100-300ms——审查 3-F3；
+		# 批量末尾一次 blocks_changed_batch，光照按块全量重算）。
+		# 曾同步重建受影响区块（v5，防"跳半格"竞态）——已移除：
+		# 跳半格真因是断口空隙悬空（v6 连根倒根治），且树 mesh 盒
+		# 包住区块立方，立方延迟 1-3 帧消失不可见
+		var clear_cells: Array = []
 		for c in cells:
 			if world.get_block(c) == VoxelTypes.BRANCH_ID:
-				world.set_block(c, VoxelTypes.AIR_ID, false)
-		# 叶占位清除（走区块管线）
+				clear_cells.append(c)
 		for leaf_cell in fallen_leaves:
 			if world.get_block(leaf_cell) == VoxelTypes.LEAVES_ID:
-				world.set_block(leaf_cell, VoxelTypes.AIR_ID, false)
+				clear_cells.append(leaf_cell)
+		if not clear_cells.is_empty():
+			world.set_blocks_batch(clear_cells, VoxelTypes.AIR_ID)
 
 	# 重建保留树视觉
 	tree.revision += 1
@@ -1262,6 +1264,27 @@ func _settle_drop(cell_count: int, near := Vector3.ZERO) -> void:
 
 func get_save_bundle() -> Dictionary:
 	return {"trees": {"algorithm": "treegen-v2", "events": _cut_events}}
+
+
+## 砍伐记录的按树根分组快照（供 chunk_manager 生成 job 构造时取用，
+## worker 经参数链只读）——生成器重放树时据此剪枝，保证体素与结构
+## 同源（审查 3-F2）。每次全量重建：事件 ≤MAX_CUT_EVENTS（256），
+## 微秒级；砍树后新入队的生成任务自然拿到最新记录。
+func cut_events_by_root() -> Dictionary:
+	var by_root := {}
+	for event in _cut_events:
+		var t: Array = event.get("tree", [])
+		if t.size() != 3:
+			continue
+		var key := Vector2i(int(t[0]), int(t[2]))
+		var c: Array = event.get("cell", [])
+		if c.size() != 3:
+			continue
+		if not by_root.has(key):
+			by_root[key] = []
+		(by_root[key] as Array).append(
+				Vector3i(int(c[0]), int(c[1]), int(c[2])))
+	return by_root
 
 
 func apply_save_state(data: Dictionary) -> void:

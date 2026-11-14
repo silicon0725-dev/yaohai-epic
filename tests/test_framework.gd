@@ -9,6 +9,11 @@ var failures: Array[String] = []
 ## 在 _init 阶段为 null，节点入树测试经此通道；未注入时为 null）
 var tree_root: Node = null
 
+## 环境不满足时的显式跳过（如 C# 未 build 的对拍套件）——runner 单独
+## 统计并以退出码 2 上报，绝不允许静默全绿（审查 7-F2）
+var skipped := false
+var skip_reason := ""
+
 
 ## 子类覆盖此方法执行测试。
 func run() -> void:

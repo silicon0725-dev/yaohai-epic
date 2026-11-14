@@ -109,9 +109,18 @@ static func texture_from_image(image: Image) -> ImageTexture:
 
 static func _packed_image(tile_name: String) -> Image:
 	var path := TEXTURE_PACK_DIR + "/" + tile_name + ".png"
-	if not ResourceLoader.exists(path) and not FileAccess.file_exists(path):
-		return null
-	return Image.load_from_file(path)
+	# 优先走 ResourceLoader：导出包中 png 已导入为 .ctex 资源，
+	# res://…png 不再是原始文件，Image.load_from_file 读不到——曾整包
+	# 退化成程序化色块（引擎 69 条 "will not work on export" WARNING，
+	# 审查 L1/6-F9）
+	if ResourceLoader.exists(path):
+		var tex := ResourceLoader.load(path) as Texture2D
+		if tex != null:
+			return tex.get_image()
+	if FileAccess.file_exists(path):
+		# 外部目录（user:// 贴图包等非导入资源）仍直读文件
+		return Image.load_from_file(path)
+	return null
 
 
 static func _pixel_color(

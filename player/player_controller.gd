@@ -66,7 +66,10 @@ const SETTLE_SECONDS := 0.16
 # 相机模式（F5 循环）：0 第一人称 / 1 第三人称背后 / 2 第二人称面前 /
 # 3 越肩（TPS）。外置机位共用：体素 DDA 遮挡收缩（快收慢回弹防抖）
 const CAM_DIST := [0.0, 3.2, 3.6, 2.1]   # 各模式目标距离（米）
-const CAM_MIN_DIST := 0.5                # 收缩下限（别怼进头里）
+const CAM_MIN_DIST := 0.05               # 收缩下限：近贴眼（曾 0.5——头贴
+                                          # 墙时命中距离<0.5，clamp 把机位推
+                                          # 过命中面塞进实心方块=贴墙黑屏，
+                                          # 审查 4-F3；命中面由 PAD 保证不越）
 const CAM_COLLIDE_PAD := 0.3             # 命中面回退余量
 const CAM_PULL_IN := 9.0                 # 遮挡收拢限速（>跑速 8 防穿墙；防阈值角瞬跳）
 const OCCLUDE_RECOVER := 3.0             # 遮挡解除回弹速率（慢于收拢——快收慢放）
@@ -195,10 +198,12 @@ func _unhandled_input(event: InputEvent) -> void:
 					_cycle_selection(1)
 				elif not _drag.is_empty():
 					_rotate_drag()
-	elif event is InputEventKey and event.pressed:
+	elif event is InputEventKey and event.pressed and not event.echo:
+		# echo=系统按键重复（按住 Q 曾按重复率连续丢物品、E 反复开关
+		# 背包——统一入口过滤，审查 4-F1）
 		# 双击方向键 = 闪避（拔刀态；0.28s 窗口内同键二击）
 		var tap_dir := _dodge_dir_name(event.keycode)
-		if tap_dir != "" and not event.echo:
+		if tap_dir != "":
 			var now := Time.get_ticks_msec() / 1000.0
 			if _last_tap.has(tap_dir) \
 					and now - float(_last_tap[tap_dir]) <= DODGE_DOUBLE_TAP:
@@ -458,13 +463,19 @@ func _drop_held(whole_stack: bool) -> void:
 	var count := int(entry["count"]) if whole_stack else 1
 	var item_id := int(entry["item_id"])
 	inventory.remove_at_entry(entry, count)
-	# 从眼睛沿视线抛出（含俯仰）；保护期覆盖飞行时间，防止瞬吸回
+	# 从眼睛沿视线抛出（含俯仰）；保护期覆盖飞行时间，防止瞬吸回。
+	# 生成失败（实体满 128）回滚背包——曾先扣后生成且不检查返回值，
+	# 整堆物品静默消失（审查 5-F2）
 	var look := -camera.global_transform.basis.z
-	drop_manager.spawn_drop(
+	if drop_manager.spawn_drop(
 			item_id, count,
 			camera.global_position + look * 0.6,
 			look * DROP_THROW_SPEED + Vector3.UP * DROP_ARC_UP,
-			DROP_PICKUP_DELAY)
+			DROP_PICKUP_DELAY) == null:
+		var leftover: int = inventory.add(item_id, count)
+		if leftover > 0:
+			push_warning("丢弃回滚失败（背包已满），%d 个物品丢失" % leftover)
+		return
 
 
 func _reset_mining() -> void:

@@ -46,7 +46,10 @@ func _initialize() -> void:
 	# 跑一帧后再执行：_init/_initialize 期 root 未完全就绪，注入的
 	# tree_root 挂不进树（global_position 软报错吞检查——已踩坑）
 	await process_frame
+	# 单套件挂死保护由外层 timeout 命令承担（审查 7-F8）；曾尝试
+	# runner 内协程看门狗——lambda 挂起状态在引擎退出清理期 UAF
 	var failed_suites := 0
+	var skipped_suites := 0
 	var total_checks := 0
 	var total_failures := 0
 	print("=== 体素内核 Stage A 单元测试 ===")
@@ -54,14 +57,25 @@ func _initialize() -> void:
 		var suite: VoxelTestCase = load(path).new()
 		suite.tree_root = root
 		# await 兼容异步套件（test_distant_shell 等 worker 流程）；
-		# 同步 run() 返回立即值，await 直接继续
+		# 同步 run() 返回立即值，await 直接继续。
+		# 看门狗曾用协程 lambda + done 标志实现——lambda 捕获的挂起
+		# 状态在引擎退出清理期 UAF 段错误（exit 139，稳定复现），弃用；
+		# 挂死保护由外层 timeout 命令承担（CI 包装层）
+		var t0 := Time.get_ticks_msec()
 		await suite.run()
+		var elapsed := Time.get_ticks_msec() - t0
 		total_checks += suite.check_count
 		total_failures += suite.failures.size()
-		var status := "PASS" if suite.failures.is_empty() else "FAIL"
-		print("[%s] %s — %s" % [status, path, suite.summary()])
+		var status := "FAIL" if not suite.failures.is_empty() \
+				else ("SKIP" if suite.skipped else "PASS")
+		print("[%s] %s (%.1fs) — %s" % [status, path,
+				elapsed / 1000.0, suite.summary()])
 		if not suite.failures.is_empty():
 			failed_suites += 1
-	print("=== 总计：%d 套件，%d 项检查，%d 项失败 ===" % [
-		TEST_CASES.size(), total_checks, total_failures])
-	quit(1 if failed_suites > 0 else 0)
+		elif suite.skipped:
+			skipped_suites += 1
+	print("=== 总计：%d 套件，%d 项检查，%d 项失败，%d 套件跳过 ===" % [
+		TEST_CASES.size(), total_checks, total_failures, skipped_suites])
+	# 退出码：0 全过；1 有失败；2 仅跳过（对拍覆盖缺失必须显式上报，
+	# 静默全绿曾让 C# 生产路径不可用 34 套件照常全绿退出——审查 7-F2）
+	quit(1 if failed_suites > 0 else (2 if skipped_suites > 0 else 0))

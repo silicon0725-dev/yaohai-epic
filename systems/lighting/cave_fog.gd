@@ -45,6 +45,8 @@ func setup(p_world: VoxelWorld, follow: Node3D) -> void:
 	world = p_world
 	_target = follow
 	world.block_changed.connect(func(_p, _o, _n): _dirty = true)
+	# 批量通道（树占位清理）同样标脏——挖空树干位置的洞口光要重扫
+	world.blocks_changed_batch.connect(func(_cells): _dirty = true)
 	var shader := load("res://presentation/cave_fog.gdshader")
 	for i in MAX_VOLUMES:
 		var vol := FogVolume.new()

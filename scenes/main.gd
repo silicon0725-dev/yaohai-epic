@@ -147,8 +147,17 @@ func _ready() -> void:
 	add_child(tree_manager)
 	tree_manager.setup(world, registry, item_registry)
 	tree_manager.apply_save_state(meta)
+	# 砍伐记录→生成器参数链（apply 之后 _cut_events 已载入；砍树后
+	# 新入队任务经 provider 拿最新快照——重生成区块按记录剪枝树占位）
+	chunk_manager.tree_cuts_provider = func() -> Dictionary:
+		return tree_manager.cut_events_by_root()
 	tree_manager.drop_spawner = func(item_id: int, count: int, pos: Vector3) -> void:
-		drop_manager.spawn_drop(item_id, count, pos)
+		if drop_manager.spawn_drop(item_id, count, pos) == null:
+			# 掉落实体满 128：直接入背包兜底（与挖掘 _dispatch_drop 同
+			# 语义——曾整棵树产物静默丢失，审查 5-F4）
+			var leftover: int = player.inventory.add(item_id, count)
+			if leftover > 0:
+				push_warning("背包已满，%d 个伐木产物丢失" % leftover)
 	# 主干动画倒伏倒向砍树的人（DT 语义）
 	tree_manager.player_provider = func() -> Node3D:
 		return player

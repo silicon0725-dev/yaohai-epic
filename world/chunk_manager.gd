@@ -67,6 +67,11 @@ var world: VoxelWorld
 var registry: VoxelRegistry
 var generator: TerrainGenerator
 var renderer: ChunkRenderer
+## 树砍伐记录提供者（返回 {Vector2i(root.xz): [Vector3i...]}，由
+## TreeManager.cut_events_by_root 实现）。生成任务入队时快照进 job
+## 经参数链传 worker——重新生成的区块按砍伐记录剪枝树占位（曾体素
+## 与结构不同源，已砍树长回悬浮叶，审查 3-F2）
+var tree_cuts_provider: Callable
 
 ## 存档系统（阶段 D）。为空时退化为纯内存行为（不落盘）。
 var save_system: WorldSave
@@ -164,11 +169,30 @@ func save_all(player_state: Dictionary) -> int:
 		var chunk: ChunkData = world.chunks[coord]
 		if chunk.save_needed and save_system.save_chunk(chunk):
 			saved += 1
+	saved += _flush_dormant()
 	var meta_ok := save_system.save_meta(
 			world, player_state, _current_extra_state())
-	print("存档：写入 %d 个区块，元数据 %s" % [
-		saved, "成功" if meta_ok else "失败"])
+	var dormant_left := _dormant.size()
+	print("存档：写入 %d 个区块，元数据 %s%s" % [
+		saved, "成功" if meta_ok else "失败",
+		(", ⚠ %d 个区块写盘失败滞留内存（磁盘满/被占用？）将自动重试"
+				% dormant_left) if dormant_left > 0 else ""])
 	return saved
+
+
+## 重试落盘写盘失败的 dormant 区块（曾只在区块重进视距时才有机会
+## 恢复——autosave/退出从不遍历 _dormant，退出即永久丢玩家修改——
+## 审查 1-F2）。成功即出队；失败保留等下次。返回成功数。
+func _flush_dormant() -> int:
+	if _dormant.is_empty() or save_system == null:
+		return 0
+	var flushed: Array = []
+	for coord in _dormant:
+		if save_system.save_chunk(_dormant[coord]):
+			flushed.append(coord)
+	for coord in flushed:
+		_dormant.erase(coord)
+	return flushed.size()
 
 
 func _current_extra_state() -> Dictionary:
@@ -224,7 +248,9 @@ func load_column_now(column: Vector2i) -> void:
 		elif save_system != null:
 			chunk = save_system.load_chunk(coord)
 		if chunk == null:
-			chunk = generator.generate_chunk(coord)
+			chunk = generator.generate_chunk(coord,
+					tree_cuts_provider.call() \
+							if tree_cuts_provider.is_valid() else {})
 			chunk.state = ChunkState.State.DATA_READY
 			world.add_chunk(chunk)
 		renderer.register_chunk(coord)
@@ -331,11 +357,12 @@ func _update_streaming() -> void:
 		_stream_layer = layer
 		_stream_cursor = 0  # 带变化：完整列可能重新缺层
 		# 带扩展新含入的 DATA_READY 缓冲层补网格（曾在 gate 中清了
-		# 脏标记，无其他触发源）
+		# 脏标记，无其他触发源）。水平过滤 _is_wanted：padding 环
+		# 区块永不需要网格，标脏只会喂活锁（审查 1-F1）
 		for coord in world.chunks:
 			var bchunk: ChunkData = world.chunks[coord]
 			if bchunk.state == ChunkState.State.DATA_READY \
-					and _in_band(coord):
+					and _in_band(coord) and _is_wanted(coord):
 				bchunk.mesh_dirty = true
 	# 2) 列排序缓存：焦点列变化或视线偏转 >~30° 才重建（cos 阈值）
 	var view_dir := _view_direction()
@@ -506,6 +533,9 @@ func _enqueue_generation(coord: Vector3i) -> void:
 		"result": null,
 		# 光照初始化用的 6 面邻块快照（worker 内查 dict 有并发风险）
 		"light_neighbors": _collect_light_neighbors(coord),
+		# 砍伐记录快照（主线程重建；worker 只读 job，不碰 TreeManager）
+		"tree_cuts": tree_cuts_provider.call() \
+				if tree_cuts_provider.is_valid() else {},
 	}
 	var task_id := WorkerThreadPool.add_task(
 			_generate_job.bind(job, coord), false, "chunk_generate")
@@ -531,7 +561,7 @@ func _generate_job(job: Dictionary, coord: Vector3i) -> void:
 	if save_system != null:
 		chunk = save_system.load_chunk(coord)
 	if chunk == null:
-		chunk = generator.generate_chunk(coord)
+		chunk = generator.generate_chunk(coord, job.get("tree_cuts"))
 	# 光照初始化（transient 数组不入库，存档恢复的区块同样全量重算）
 	if light_init_cb.is_valid():
 		light_init_cb.call(chunk, job["light_neighbors"])
@@ -642,12 +672,15 @@ func _commit_mesh(job: Dictionary) -> bool:
 	if chunk == null or _outside_band(coord):
 		return false  # 已卸载/带外超 pad：不再需要（卸载即将发生）
 	if not _is_wanted(coord):
-		# 水平出视距。仍在卸载缓冲内（padding>0）的区块不会被卸载、
-		# 也无重排源——补回 mesh_dirty 触发重排，否则网格缺失卡
-		# MESH_QUEUED（_enqueue_mesh 已清标记）
-		if not should_unload_column(coord, _focus_column(),
-				view_distance, unload_padding):
-			chunk.mesh_dirty = true
+		# 水平出视距：padding 环（view<d≤view+pad）不被卸载也永不需
+		# 要网格。曾回写 mesh_dirty 触发重排——但脏循环入队不查水平
+		# wanted，下一帧再入队→worker 全量建网格→提交再拒收，无限
+		# 活锁（持续占用 worker+is_idle 恒 false，审查 1-F1）。按带外
+		# 语义清脏置 DATA_READY；重进视距由 center_moved 的补网格
+		# 循环（已加水平过滤）标脏
+		chunk.mesh_dirty = false
+		chunk.collision_dirty = false
+		chunk.state = ChunkState.State.DATA_READY
 		return false
 	if chunk.mesh_dirty:
 		return false  # 任务期间又被修改：丢弃，脏标记会触发重新排队

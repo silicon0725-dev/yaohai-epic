@@ -218,6 +218,11 @@ func _apply_action(pose: Dictionary) -> Dictionary:
 	var clip: Dictionary = clips[_action["name"]]
 	var w: float = _action["weight"]
 	var t: float = _action["time"]
+	if bool(clip["loop"]):
+		# loop 片段时间回绕（与基础层 fmod 同语义）——曾无回绕，
+		# dig（loop=true）0.5s 后 time 越界采样恒为末关键帧=挖掘
+		# 动作冻结，审查 4-F2
+		t = fmod(t, maxf(float(clip["length"]), 1e-4))
 	var mask_all: bool = String(_action["mask"]) == "all"
 	var tracks: Dictionary = clip["tracks"]
 	for jname in pose:

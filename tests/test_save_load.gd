@@ -135,6 +135,25 @@ func run() -> void:
 			{"generator_version": 999}),
 		"生成版本不一致判定")
 
+	# ---- _dormant 落盘兜底（审查 1-F2：写盘失败的内存缓存曾永不
+	# 重试——autosave/退出都不遍历 _dormant，退出即永久丢玩家修改）----
+	var world2 := VoxelWorld.new(WorldConfig.new(), registry)
+	var fail_save := FailingWorldSave.new(TMP_ROOT + "_dorm", registry)
+	fail_save.fail_times = 1  # 首次 flush 失败（模拟磁盘占用）
+	var mgr := ChunkManager.new()
+	mgr.world = world2
+	mgr.save_system = fail_save
+	var dchunk := _make_chunk(Vector3i(9, 0, 9))
+	dchunk.save_needed = true
+	mgr._dormant[dchunk.chunk_coord] = dchunk
+	mgr.save_all({})
+	check(mgr.dormant_count() == 1, "flush 失败时 dormant 保留待重试")
+	mgr.save_all({})
+	check(mgr.dormant_count() == 0, "save_all 重试成功后 dormant 清空")
+	check(fail_save.has_chunk(dchunk.chunk_coord), "dormant 区块已落盘")
+	mgr.free()
+	fail_save.erase_all()
+
 	# ---- 删除存档 ----
 	save.erase_all()
 	check(not save.has_save(), "erase_all 后元数据消失")
@@ -150,3 +169,14 @@ func _cleanup() -> void:
 	var relative := TMP_ROOT.trim_prefix("user://")
 	if base != null and base.dir_exists(relative):
 		WorldSave.new(TMP_ROOT, VoxelTypes.build_default_registry()).erase_all()
+
+
+## 首次 N 次 save_chunk 失败的存档桩（dormant 重试路径测试用）。
+class FailingWorldSave extends WorldSave:
+	var fail_times := 0
+
+	func save_chunk(chunk: ChunkData) -> bool:
+		if fail_times > 0:
+			fail_times -= 1
+			return false
+		return super.save_chunk(chunk)

@@ -77,7 +77,15 @@ const RENDER_CROSS := 3    # 排除桶（火把/提灯：实体渲染器呈现�
 const RENDER_PLANT := 4   # 植物（高草/花）：X 十字面片 + 草顶密叶
 						  # （cutout 材质双绕序；不进碰撞）
 
+## 注册表查找表缓存（审查二轮 A11）：发布后注册表只读，表按注册表
+## 实例缓存一次——网格任务（C#/GD 两路径）每次构建曾重复全表组装
+static var _lookup_cache := {}
+
+
 static func build_lookup_tables(registry: VoxelRegistry) -> Dictionary:
+	var cache_key := registry.get_instance_id()
+	if _lookup_cache.has(cache_key):
+		return _lookup_cache[cache_key]
 	var block_count := registry.block_count()
 	var solid_by_id := PackedByteArray()
 	var occludes_by_id := PackedByteArray()
@@ -106,12 +114,14 @@ static func build_lookup_tables(registry: VoxelRegistry) -> Dictionary:
 				kind = RENDER_PLANT
 		render_kind[id] = kind
 		textures_by_id[id] = registry.definition_for_id(id).get("textures", {})
-	return {
+	var tables := {
 		"solid": solid_by_id,
 		"occludes": occludes_by_id,
 		"render_kind": render_kind,
 		"textures": textures_by_id,
 	}
+	_lookup_cache[cache_key] = tables
+	return tables
 
 
 ## (s+2)^3 填充缓存：区块本体直拷；1 格边界从 27 邻域快照解析

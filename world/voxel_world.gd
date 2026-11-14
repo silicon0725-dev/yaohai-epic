@@ -118,6 +118,9 @@ func set_block(world_pos: Vector3i, id: int, affects_collision := true) -> bool:
 ## 一棵树几十格=单次卡 100-300ms，审查 3-F3）。返回是否有写入。
 func set_blocks_batch(cells: Array, id: int) -> bool:
 	var written: Array = []
+	# 聚合去重标脏（审查二轮 A10）：逐格失效曾每格分配受影响数组 +
+	# 同块反复标脏（砍树清叶 200 格 × 最多 7 块 = 上千次字典操作）
+	var affected := {}
 	for pos_v in cells:
 		var pos: Vector3i = pos_v
 		if not config.in_block_bounds(pos):
@@ -133,9 +136,13 @@ func set_blocks_batch(cells: Array, id: int) -> bool:
 		if not chunk.set_block(local, id):
 			continue
 		chunk.clear_state(local)
-		_invalidate_affected_meshes(chunk_coord, local, false)
+		_collect_affected(affected, chunk_coord, local)
 		written.append(pos)
 	if not written.is_empty():
+		for coord in affected:
+			var c: ChunkData = chunks.get(coord)
+			if c != null:
+				c.mesh_dirty = true  # 批量清叶语义：不标碰撞
 		edit_generation += 1
 		blocks_changed_batch.emit(written)
 	return not written.is_empty()
@@ -214,20 +221,34 @@ func replace_block(world_pos: Vector3i, expected_id: int, new_id: int) -> bool:
 func _invalidate_affected_meshes(
 		chunk_coord: Vector3i, local: Vector3i, affects_collision := true
 ) -> void:
+	var affected := {}
+	_collect_affected(affected, chunk_coord, local)
+	for coord in affected:
+		var chunk: ChunkData = chunks.get(coord)
+		if chunk != null:
+			chunk.mesh_dirty = true
+			if affects_collision:
+				chunk.collision_dirty = true
+
+
+## 受影响区块收集（纯计算，写入字典天然去重——单格与批量共用；
+## 审查二轮 A10：批量路径曾逐格分配 1-7 元素数组 + 重复标同块）
+func _collect_affected(affected: Dictionary,
+		chunk_coord: Vector3i, local: Vector3i) -> void:
 	var size := config.chunk_size
-	var affected: Array[Vector3i] = [chunk_coord]
+	affected[chunk_coord] = true
 	if local.x == 0:
-		affected.append(chunk_coord + Vector3i(-1, 0, 0))
+		affected[chunk_coord + Vector3i(-1, 0, 0)] = true
 	if local.x == size - 1:
-		affected.append(chunk_coord + Vector3i(1, 0, 0))
+		affected[chunk_coord + Vector3i(1, 0, 0)] = true
 	if local.y == 0:
-		affected.append(chunk_coord + Vector3i(0, -1, 0))
+		affected[chunk_coord + Vector3i(0, -1, 0)] = true
 	if local.y == size - 1:
-		affected.append(chunk_coord + Vector3i(0, 1, 0))
+		affected[chunk_coord + Vector3i(0, 1, 0)] = true
 	if local.z == 0:
-		affected.append(chunk_coord + Vector3i(0, 0, -1))
+		affected[chunk_coord + Vector3i(0, 0, -1)] = true
 	if local.z == size - 1:
-		affected.append(chunk_coord + Vector3i(0, 0, 1))
+		affected[chunk_coord + Vector3i(0, 0, 1)] = true
 	# 角点 2x2 采样跨对角区块（水面角点高度/岸衰减、光照平滑）：
 	# x、z 同时贴边时对角块也要标脏（曾漏标——角格挖放后对角区块
 	# 的水面角点错位/裂缝，serial 过期比对同扩全 26 邻）
@@ -236,13 +257,7 @@ func _invalidate_affected_meshes(
 	if x_edge and z_edge:
 		var dx := 1 if local.x == size - 1 else -1
 		var dz := 1 if local.z == size - 1 else -1
-		affected.append(chunk_coord + Vector3i(dx, 0, dz))
+		affected[chunk_coord + Vector3i(dx, 0, dz)] = true
 		if local.y == 0 or local.y == size - 1:
 			var dy := 1 if local.y == size - 1 else -1
-			affected.append(chunk_coord + Vector3i(dx, dy, dz))
-	for coord in affected:
-		var chunk: ChunkData = chunks.get(coord)
-		if chunk != null:
-			chunk.mesh_dirty = true
-			if affects_collision:
-				chunk.collision_dirty = true
+			affected[chunk_coord + Vector3i(dx, dy, dz)] = true

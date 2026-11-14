@@ -227,15 +227,11 @@ func on_chunk_unloaded(chunk_coord: Vector3i) -> void:
 		_col_active[col] = n
 		return
 	_col_active.erase(col)
-	var size := world.config.chunk_size
-	var ox := col.x * size
-	var oz := col.y * size
-	for tree_id in _trees.keys():
-		var entry: Dictionary = _trees[tree_id]
-		var origin: Vector3i = entry["instance"].origin
-		if origin.x >= ox and origin.x < ox + size \
-				and origin.z >= oz and origin.z < oz + size:
-			_destroy_tree(tree_id)
+	# 列索引直查（审查二轮 B13：曾全表扫 _trees.keys() 逐树判矩形）
+	#（duplicate：_destroy_tree 遍历中改写该数组）
+	for tid in (_trees_by_col.get(col, []) as Array).duplicate():
+		if _trees.has(tid):
+			_destroy_tree(tid)
 
 
 ## 查询某格所属树实例（无返回 null）。
@@ -298,7 +294,11 @@ func _ref_tree(col: Vector2i) -> void:
 		"aabb": AABB(Vector3(mn), Vector3(mx - mn) + Vector3.ONE),
 	}
 	_trees[tree_id] = entry
-	var ocol := Vector2i(origin.x, origin.z)
+	# 列索引（审查二轮 B13）：键 = chunk 列（与 on_column_unloaded
+	# 查询同空间——曾键为格坐标而查询走全表扫，索引形同虚设）
+	var cs0: int = world.config.chunk_size if world != null else 16
+	var ocol := Vector2i(floori(origin.x / float(cs0)),
+			floori(origin.z / float(cs0)))
 	if not _trees_by_col.has(ocol):
 		_trees_by_col[ocol] = []
 	(_trees_by_col[ocol] as Array).append(tree_id)
@@ -593,10 +593,13 @@ func _destroy_tree(tree_id: int) -> void:
 	if entry["body"] != null:
 		entry["body"].queue_free()
 	var o := (entry["instance"] as TreeInstance).origin
-	var arr: Array = _trees_by_col.get(Vector2i(o.x, o.z), [])
+	var cs1: int = world.config.chunk_size if world != null else 16
+	var col_key := Vector2i(floori(o.x / float(cs1)), floori(o.z / float(cs1)))
+	var arr: Array = _trees_by_col.get(col_key, [])
 	arr.erase(tree_id)
 	if arr.is_empty():
-		_trees_by_col.erase(Vector2i(o.x, o.z))
+		_trees_by_col.erase(col_key)
+	_bake_last.erase(tree_id)  # 烘焙冷却表随树清理（审查二轮 B13 无界）
 	for bkey in entry.get("blocks", []):
 		var barr: Array = _trees_by_block.get(bkey, [])
 		barr.erase(tree_id)

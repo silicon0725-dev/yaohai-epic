@@ -28,6 +28,29 @@ func run() -> void:
 	_test_leaf_clear_coverage()
 	_test_falling_settle_drop_position()
 	_test_light_dirty_rebuild()
+	_test_column_unload_index()
+
+
+## 列卸载走索引直查（审查二轮 B13）：伪树根注册到 chunk 列键 →
+## on_chunk_unloaded 回收（曾全表扫 + 索引键为格坐标与查询空间
+## 不匹配，索引形同虚设）；_bake_last 随树清理
+func _test_column_unload_index() -> void:
+	var mgr := _CountingManager.new()
+	tree_root.add_child(mgr)
+	var ti := TreeInstance.new()
+	ti.origin = Vector3i(20, 5, 35)  # 落 chunk 列 (1, 2)（16 格块）
+	mgr._trees[55] = {
+		"instance": ti, "mesh_node": null, "body": null, "refs": 1,
+		"aabb": AABB(Vector3(20, 3, 35), Vector3(3, 8, 3)),
+	}
+	mgr._trees_by_col[Vector2i(1, 2)] = [55]
+	mgr._bake_last[55] = 12345
+	mgr._active_chunks[Vector3i(1, 0, 2)] = true
+	mgr._col_active[Vector2i(1, 2)] = 1
+	mgr.on_chunk_unloaded(Vector3i(1, 0, 2))
+	check(not mgr._trees.has(55), "列卸载经索引回收树")
+	check(not mgr._trees_by_col.has(Vector2i(1, 2)), "索引条目清空")
+	check(not mgr._bake_last.has(55), "烘焙冷却表随树清理")
 
 
 ## 光照脏树重建（计数桩：只数 _build_visual 调用，不碰真实网格）
@@ -54,8 +77,7 @@ func _test_light_dirty_rebuild() -> void:
 	}
 	# 索引注册（_mark_light_dirty 按块级二级索引扫——伪树直插
 	# _trees 不注册则永远不标脏；AABB 0..3 落 (0,0) 块。审查二轮
-	# B6 前为列索引 _trees_by_col，现块索引 _trees_by_block）
-	mgr._trees_by_col[Vector2i(1, 1)] = [123]
+	# B6：列索引改块索引）
 	mgr._trees_by_block[Vector2i(0, 0)] = [123]
 	# 火把放置干旁 5 格：16 格光源影响半径内 → 标脏
 	mgr._on_block_changed(Vector3i(5, 5, 0), VoxelTypes.AIR_ID,

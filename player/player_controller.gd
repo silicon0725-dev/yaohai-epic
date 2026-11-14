@@ -99,6 +99,8 @@ var inventory_open := false
 var avatar
 ## 相机模式：0 第一人称 / 1 第三人称背后 / 2 第三人称面前（F5 循环）
 var camera_mode := 0
+## 鼠标位移累积（审查二轮 D13：渲染帧合并应用）
+var _mouse_accum := Vector2.ZERO
 # 手感状态（v2）
 var _coyote := 0.0
 var _jump_buf := 0.0
@@ -163,11 +165,7 @@ func _ready() -> void:
 func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventMouseMotion:
 		if Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
-			rotate_y(-event.relative.x * MOUSE_SENSITIVITY)
-			_pitch = clampf(
-					_pitch - event.relative.y * MOUSE_SENSITIVITY,
-					-PITCH_LIMIT, PITCH_LIMIT)
-			camera.rotation = Vector3(_pitch, 0.0, 0.0)
+			_mouse_accum += event.relative  # 渲染帧合并应用（见 _process）
 		elif not _drag.is_empty():
 			_drag_icon.global_position = \
 					_drag_icon.get_global_mouse_position() - _drag_icon.size / 2
@@ -1185,6 +1183,16 @@ func _position_camera(delta: float) -> void:
 
 
 func _process(delta: float) -> void:
+	# 鼠标视角合并应用（审查二轮 D13）：1000Hz 事件曾在 _unhandled_input
+	# 里逐事件 rotate_y + camera 写（3-8ms/s）——累积到渲染帧一次应用
+	#（渲染帧率同步，不进物理帧，无转向延迟回归）
+	if _mouse_accum != Vector2.ZERO:
+		rotate_y(-_mouse_accum.x * MOUSE_SENSITIVITY)
+		_pitch = clampf(
+				_pitch - _mouse_accum.y * MOUSE_SENSITIVITY,
+				-PITCH_LIMIT, PITCH_LIMIT)
+		camera.rotation = Vector3(_pitch, 0.0, 0.0)
+		_mouse_accum = Vector2.ZERO
 	_position_camera(delta)
 	# 冲刺 FOV 拉镜（全模式；平滑进出防突变）
 	var want_fov := _fov_base + (FOV_SPRINT_ADD if _sprinting else 0.0)

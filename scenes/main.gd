@@ -55,6 +55,7 @@ var _wave_clock := 0.0
 var _last_storm_scale := -1.0  # uniform 脏检查（storm 变化才重发）
 var _last_ripple_tex = null  # 涟漪纹理/中心脏检查
 var _last_ripple_center = null
+var _ripple_window_sent := false  # 常量窗口首帧一次（D11）
 var _hint_text := ""
 var _hint_expire := 0.0
 const OceanWavesScript := preload("res://presentation/ocean_waves.gd")
@@ -331,24 +332,34 @@ func _finish_loading() -> void:
 
 
 func _process(delta: float) -> void:
+	# 加载遮罩期跳过全部渲染侧子系统（审查二轮 D15）：波时钟/涟漪/
+	# HUD 文本/曝光/日夜在遮罩后面白跑（加载 7s × 每帧掉落遍历+统计
+	# 格式化）。时钟暂停 → 加载完成波从暂停处继续（无相位跳变）；
+	# 首帧全量恢复（HUD/曝光从默认起步，与冷启动一致）
+	if _loading:
+		_loading_tick(delta)
+		_update_hint(delta)
+		return
 	# 波时钟推进 + 同步到水面 shader（CPU 采样与 GPU 渲染同源）；
 	# storm_scale 当前恒 1.0，只在变化时重发（每帧 4 次 uniform 重发
 	# 是无谓开销——审查发现）
 	_wave_clock += delta
 	OceanWavesScript.global_time = _wave_clock
 	if chunk_renderer != null:
+		if _water_mats.is_empty():
+			for m in [chunk_renderer.water_material,
+					chunk_renderer.water_side_material]:
+				if m is ShaderMaterial:
+					_water_mats.append(m)
 		var storm := OceanWavesScript.storm_scale
-		for mat in [chunk_renderer.water_material, chunk_renderer.water_side_material]:
-			if mat != null:
-				mat.set_shader_parameter("u_time", _wave_clock)
-				if storm != _last_storm_scale:
-					mat.set_shader_parameter("storm_scale", storm)
+		for mat in _water_mats:
+			mat.set_shader_parameter("u_time", _wave_clock)
+			if storm != _last_storm_scale:
+				mat.set_shader_parameter("storm_scale", storm)
 		if storm != _last_storm_scale:
 			_last_storm_scale = storm
 	_update_ripples(delta)
 	_hud_accumulator += delta
-	if _loading:
-		_loading_tick(delta)
 	_update_hud()
 	_update_hint(delta)
 	_update_exposure(delta)
@@ -386,6 +397,9 @@ var _u_day_mats: Array = []
 var _wind_mats: Array = []
 ## 天空色上次写入的 day01（C5 脏检查；-1 = 首帧强制写）
 var _last_sky_day01 := -1.0
+## 水面材质表（u_time/storm/sun_direction/涟漪参数多段下发共用——
+## 每帧三处字面量数组分配曾是隐性 GC 压力，审查二轮 D11）
+var _water_mats: Array = []
 
 
 func _update_day_night(delta: float) -> void:
@@ -464,7 +478,7 @@ func _update_day_night(delta: float) -> void:
 		sound_manager.set_day01(day01)
 	# 水面反射的太阳方向（day/night 方位不同，随光重发）
 	var sun_dir: Vector3 = -_sun.global_transform.basis.z.normalized()
-	for mat in [chunk_renderer.water_material, chunk_renderer.water_side_material]:
+	for mat in _water_mats:
 		mat.set_shader_parameter("sun_direction", sun_dir)
 	# 壳的 u_day + 太阳漫反射方向同源下发（光照实时算——烘焙固定
 	# 正午方向在黄昏与场景错位成"发光"，恒亮夜里更明显；两轮实机反馈）
@@ -513,7 +527,7 @@ func _update_hud() -> void:
 	var hint_line := ("[ " + _hint_text + " ]") if not _hint_text.is_empty() else ""
 	_hud_label.text = "\n".join([
 		hint_line,
-		"BUILD 2026-11-14.审查修复5 — 若无此行=旧程序未重启",
+		"BUILD 2026-11-14.P3清尾 — 若无此行=旧程序未重启",
 		"Voxel Terrain MVP - Items Layer (inventory + tools + ground drops)",
 		"chunks: %d    faces: %d    in-flight: %d    saved: %d    drops: %d" % [
 			world.chunk_count(), chunk_renderer.total_faces,
@@ -563,19 +577,22 @@ func _update_ripples(_delta: float) -> void:
 		# 漂流尾迹：移动才注入（静止漂浮物不持续扰动水面）
 		elif Vector2(drop.velocity.x, drop.velocity.z).length() > 0.3:
 			water_ripples.add_impulse(pos_xz, 0.12, 0.4)
-	# 同步涟漪纹理与窗口参数到水面材质（纹理对象与常量窗口只在变化时
-	# 重发——每帧 6 次 uniform 重发是无谓开销，审查发现）
-	for mat in [chunk_renderer.water_material, chunk_renderer.water_side_material]:
-		if mat != null:
-			var rtex = water_ripples.texture()
-			if rtex != _last_ripple_tex:
-				mat.set_shader_parameter("ripple_map", rtex)
-			var rcenter = water_ripples.texture_center()
-			if rcenter != _last_ripple_center:
-				mat.set_shader_parameter("ripple_center", rcenter)
+	# 同步涟漪纹理与窗口参数到水面材质（纹理/中心脏检查 + 常量窗口
+	# 首帧一次——每帧 6 次 uniform 重发与 texture() 重复调用是无谓
+	# 开销，审查 D11/D16）
+	var rtex = water_ripples.texture()
+	var rcenter = water_ripples.texture_center()
+	for mat in _water_mats:
+		if rtex != _last_ripple_tex:
+			mat.set_shader_parameter("ripple_map", rtex)
+		if rcenter != _last_ripple_center:
+			mat.set_shader_parameter("ripple_center", rcenter)
+		if not _ripple_window_sent:
 			mat.set_shader_parameter("ripple_window", WaterRipplesScript.WINDOW)
-	_last_ripple_tex = water_ripples.texture()
-	_last_ripple_center = water_ripples.texture_center()
+	if not _ripple_window_sent:
+		_ripple_window_sent = true
+	_last_ripple_tex = rtex
+	_last_ripple_center = rcenter
 
 
 ## HUD 短时提示（放置被拒等操作反馈——静默拒绝曾被用户误读成

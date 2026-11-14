@@ -273,6 +273,7 @@ func _physics_process(delta: float) -> void:
 	if standing_chunk == null or standing_chunk.state != ChunkState.State.ACTIVE:
 		velocity = Vector3.ZERO
 		return
+	_escape_solid_if_embedded()
 	_update_mining(delta)
 	var speed := SPRINT_SPEED \
 			if Input.is_physical_key_pressed(KEY_SHIFT) else WALK_SPEED
@@ -387,6 +388,37 @@ func _physics_process(delta: float) -> void:
 		if avatar.visible:
 			avatar.update_locomotion(velocity, is_on_floor(), deep_water, delta)
 			avatar.set_mining(_mine_active and _mine_seconds != INF)
+
+
+## 碰撞缺口安全网（实机反馈"看到加载出来走过去陷进区块"）：块有
+## 视觉网格但碰撞体未建好时玩家会走进方块里，碰撞建好后卡死在
+## StaticBody 内。正常情况引擎碰撞会阻止进入实体格——嵌入只发生
+## 在碰撞缺失窗口，故"连续多帧嵌入实心体素"即可判定为缺口。
+## 逃逸=上浮到首个非实心格（陷入通常带下落分量，向上挖出感自然）。
+var _embedded_frames := 0
+const EMBED_ESCAPE_FRAMES := 3
+
+
+func _escape_solid_if_embedded() -> void:
+	var cell := Vector3i(floori(global_position.x),
+			floori(global_position.y + 0.1), floori(global_position.z))
+	if cell.y < 0 or cell.y >= world.config.world_height_blocks() \
+			or not world.registry.collides(world.get_block(cell)):
+		_embedded_frames = 0
+		return
+	_embedded_frames += 1
+	if _embedded_frames < EMBED_ESCAPE_FRAMES:
+		return  # 瞬时边界误判（跳跃/贴墙滑步）不触发
+	var y := cell.y + 1
+	var top := mini(cell.y + 12, world.config.world_height_blocks() - 1)
+	while y <= top and world.registry.collides(
+			world.get_block(Vector3i(cell.x, y, cell.z))):
+		y += 1
+	if y > top:
+		return  # 整柱实心（极端情况）：等碰撞任务插队建好后由嵌入卡死处理兜底
+	global_position.y = float(y)
+	velocity = Vector3.ZERO
+	_embedded_frames = 0
 
 
 # ---- 挖掘（按住累积进度，§8.2 + 物品层规则）----

@@ -114,6 +114,11 @@ var _autosave_accumulator := 0.0
 ## 脏块全表扫描分频计数（审查二轮 A1）
 var _scan_tick := 0
 var _unload_tick := 0  # 水平焦点变化计数（卸载/补网格分频，A4）
+var _scan_had_work := false  # 上次脏块扫描是否有活（自适应分频）
+const ENQUEUE_BUDGET_USEC := 8000  # 每帧网格入队时间预算
+## 碰撞圈补建插队集合（玩家逼近的块——碰撞优先于远处视觉网格）
+var _collision_ring_dirty := {}
+const COLLISION_BYPASS_IN_FLIGHT := 2
 # 调度缓存（避免每帧重算）：焦点列未变时跳过卸载扫描；列排序
 # 仅在焦点列变化或视线偏转 >~30° 时重建；已完整列由游标永久跳过
 #（曾每帧 desired_columns 全量生成 + O(n log n) 排序，800 列视距
@@ -512,6 +517,10 @@ func _ensure_collision_ring(center: Vector2i) -> void:
 		if renderer.has_collision(coord):
 			continue
 		chunk.collision_dirty = true
+		# 碰撞圈补建插队（实机反馈"看到加载出来走过去陷进区块"）：
+		# 纯碰撞补建曾与几百个视觉网格任务同队 FIFO——玩家脚下的
+		# 碰撞排在远处视觉后面，玩家先到 → 陷入。插队通道见 _poll_jobs
+		_collision_ring_dirty[coord] = true
 
 
 func _poll_jobs() -> void:
@@ -566,6 +575,21 @@ func _poll_jobs() -> void:
 		_light_dirty_mesh.erase(jobL["coord"])
 		if _commit_mesh(jobL):
 			light_committed += 1
+	var col_committed := 0
+	for task_id in _mesh_jobs.keys():
+		if col_committed >= COLLISION_BYPASS_IN_FLIGHT:
+			break
+		var jobC: Dictionary = _mesh_jobs[task_id]
+		if not _collision_ring_dirty.has(jobC["coord"]):
+			continue
+		if not WorkerThreadPool.is_task_completed(task_id):
+			continue
+		WorkerThreadPool.wait_for_task_completion(task_id)
+		_mesh_jobs.erase(task_id)
+		_mesh_by_coord.erase(jobC["coord"])
+		_collision_ring_dirty.erase(jobC["coord"])
+		if _commit_mesh(jobC):
+			col_committed += 1
 	for task_id in _mesh_jobs.keys():
 		if mesh_committed >= mesh_commit_budget \
 				or (mesh_committed > 0 and Time.get_ticks_usec() - mesh_t0
@@ -603,26 +627,49 @@ func _poll_jobs() -> void:
 			_light_dirty_mesh.erase(coord)
 			continue
 		_enqueue_mesh(coord)
+	# 碰撞圈补建插队入队（玩家逼近的块——碰撞优先于远处视觉；
+	# 曾与几百个视觉任务同队 FIFO，玩家先到碰撞未建 → 陷入方块）
+	for coord in _collision_ring_dirty.keys():
+		if in_flight_count() >= max_in_flight + EDIT_BYPASS_IN_FLIGHT \
+				+ LIGHT_BYPASS_IN_FLIGHT + COLLISION_BYPASS_IN_FLIGHT:
+			break
+		var cchunk: ChunkData = world.chunks.get(coord)
+		if cchunk == null or _mesh_by_coord.has(coord) \
+				or not (cchunk.mesh_dirty or cchunk.collision_dirty):
+			_collision_ring_dirty.erase(coord)
+			continue
+		_enqueue_mesh(coord)
 	# 脏区块网格任务（首次网格化与修改重建共用该路径）；
 	# collision_dirty 单独触发（玩家进入碰撞圈的补建路径——重网格
 	# 产出同 arrays，提交时按圈半径决定建碰撞）。
-	# 全表扫描降频（审查二轮 A1）：每 4 帧一扫（0.6-1.5ms/帧的
-	# 常驻开销 → 均摊 1/4；任务回收/提交仍每帧在上文跑）。玩家编辑
-	# 有 _edit_dirty 插队不依赖此扫描；新置脏最多晚 3 帧入队
-	# 入队限流（审查二轮 A5）：一次扫描曾连入 N 个（每入队 27 邻
-	# collect + states 深拷贝 = 3-10ms 主线程突发）；每帧最多 2 个
-	#（worker 吞吐是瓶颈，入队不减速流式；编辑插队在上文不受限）
+	# 扫描分频自适应（审查二轮 A1 修订）：上次扫描有活（入队了块）
+	# → 下一帧继续扫（流式加载期脏块成百上千，必须满速）；空扫 →
+	# 4 帧分频（稳态空扫 0.6-1.5ms/帧 均摊 1/4）。曾无条件分频 ×
+	# 数量限流 2 个 = 0.5 块/帧吞吐，4000 块脏队列 2 分钟清不完
+	#（用户实机反馈"区块更新慢，挖/放才加载"）
+	# 入队预算制（审查二轮 A5 修订）：每帧数量 8 或 8ms 保护性上限
+	# 先到即停——突发防治保留（每入队 27 邻 collect + states 深拷 =
+	# 0.5-3ms 主线程），但不再卡死吞吐（曾数量限流 2×4 帧分频 =
+	# 0.5 块/帧）；编辑插队在上文不受限
 	_scan_tick += 1
-	if _scan_tick % 4 == 0 or not _edit_dirty.is_empty():
+	if _scan_tick % 4 == 0 or _scan_had_work \
+			or not _edit_dirty.is_empty():
+		var enq_t0 := Time.get_ticks_usec()
 		var enqueued := 0
+		var found := false
 		for coord in world.chunks:
-			if in_flight_count() >= max_in_flight or enqueued >= 2:
+			if in_flight_count() >= max_in_flight:
+				break
+			if enqueued >= 8 or (enqueued > 0 and Time.get_ticks_usec()
+					- enq_t0 > ENQUEUE_BUDGET_USEC):
 				break
 			var chunk: ChunkData = world.chunks[coord]
 			if (chunk.mesh_dirty or chunk.collision_dirty) \
 					and not _mesh_by_coord.has(coord):
 				_enqueue_mesh(coord)
 				enqueued += 1
+				found = true
+		_scan_had_work = found
 
 
 ## 玩家编辑（voxel_world.edit_dirty_cb 注入）：该区块优先重网格

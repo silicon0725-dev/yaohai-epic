@@ -34,6 +34,10 @@ const SANDSTONE_LAYER_DEPTH := 3
 ## 遗留常量（48 高世界的值）；运行时一律用实例 sand_max_height
 ##（= sea_level + 1，随世界高度联动）。
 const SAND_MAX_HEIGHT := 8
+
+## 树垂直跨度保守上界（主干 10±2 + 冠球半径 + 余量）——撒树垂直
+## 剪枝用；TreeSpecies 若调高 trunk_height 需同步（审查 3-F1）
+const TREE_SPAN_Y := 26
 ## 矿石不生成的地表保护层厚度。
 const ORE_SURFACE_MARGIN := 4
 ## 海平面（v4）：低于它的空气列填水。取 7 与滩涂沙线上限（8）衔接
@@ -451,6 +455,10 @@ func generate_chunk(chunk_coord: Vector3i,
 			chunk_coord, size)
 	if not native.is_empty():
 		chunk.block_ids = native["ids"]
+		# C# 直填数组绕过 set_block_raw——has_water 就地统计一次
+		#（生成 worker 内每块一次，替代入队期 27 邻×4096 扫描）
+		if chunk.block_ids.has(VoxelTypes.WATER_ID):
+			chunk.has_water = true
 		_scatter_trees(chunk, native, cuts)
 		_scatter_plants(chunk, native)
 	else:
@@ -589,6 +597,13 @@ func _scatter_trees(chunk: ChunkData, profiles: Dictionary,
 				continue  # 水域/滩涂不种树
 			# 草地判定（荒漠/裸岩不种）
 			if is_sandy or is_rocky:
+				continue
+			# 垂直剪枝（审查 3-F1）：垂直流式带多层各自重放 ±TREE_REACH
+			# 的树，曾每层对不相交的树全量 generate+遍历（白算 4-10×）。
+			# 树垂直跨度保守上界=主干高（10±2）+冠球半径+余量；与
+			# 本 chunk 的 y 范围不相交即跳过 generate
+			var root_y := surf + 1
+			if root_y >= origin.y + size or root_y + TREE_SPAN_Y < origin.y:
 				continue
 			_grow_tree_into_chunk(chunk, Vector3i(wx, surf + 1, wz),
 					tree_cuts)

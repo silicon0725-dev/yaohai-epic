@@ -331,7 +331,7 @@ static func build_mesh_arrays(
 	var native := NativeMeshBridge.build(false, registry, chunk, neighbors,
 			null, grass_detail, states_snap)
 	if not native.is_empty():
-		if chunk.block_ids.has(VoxelTypes.WATER_ID):
+		if chunk.has_water:
 			var water := NativeMeshBridge.build_water(chunk, neighbors, water_levels)
 			if water.is_empty():
 				return _build_gd(registry, chunk, neighbors,
@@ -571,6 +571,14 @@ static func _build_gd(
 	var c := chunk.chunk_coord
 	var d := chunk.dimensions
 	var world_origin := Vector3i(c.x * d.x, c.y * d.y, c.z * d.z)
+	# 草叶块级预算（审查 2-F2）：detail=2 满密度单块上界 ~19MB 顶点
+	#（1152 顶点/格 × 最多 256 草顶格），编辑重烘必整块重发；草顶格
+	# 超预算强制降 detail 1（48 片/单面/2 关键，顶点 -75%，最坏块
+	# ~4.8MB）。**等价红线：C# BuildNaive 同常量同判定**（贪心对比
+	# 模式无预算——超 160 格时 naive 与 greedy 不再逐位等价，基准
+	# 模式语义，可接受）
+	if grass_top_cells.size() > GRASS_CELL_BUDGET and grass_detail > 1:
+		grass_detail = 1
 	for cell in plant_cells:
 		if padded[cell[3]] == VoxelTypes.TALL_GRASS_ID:
 			# 高草株：×3 高叶簇（GG TALL_PLANT_HEIGHT_MULTIPLIER，
@@ -630,6 +638,9 @@ const BLADE_LEAN := 0.16      # 梢歪更活（默认 0.12）
 const TALL_PLANT_MULT := 3.6  # GG TALL_PLANT_HEIGHT_MULTIPLIER 3.0 → B7
 const TALL_W_MULT := 1.35     # 高草叶整体加宽（粗细随机之外的基宽抬升）
 const TALL_PLANT_N := 18
+## 草顶格块级预算（审查 2-F2；C# NativeMesher.GrassCellBudget 同步）
+const GRASS_CELL_BUDGET := 160
+
 ## 高草株片数按距离分级（近 18 / 中 14 / 远 10——B9c 回补）
 const TALL_N_BY_DETAIL := [10, 14, 18]
 const TALL_PLANT_Y0 := 0.02   # 根部抬升防贴地 z-fight
@@ -897,7 +908,7 @@ static func collect_water_levels_world(
 
 
 static func _merge_water_levels(levels: Dictionary, chunk: ChunkData) -> void:
-	if chunk == null or not chunk.block_ids.has(VoxelTypes.WATER_ID):
+	if chunk == null or not chunk.has_water:
 		return
 	var c := chunk.chunk_coord
 	var d := chunk.dimensions

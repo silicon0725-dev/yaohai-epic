@@ -302,13 +302,73 @@ func on_chunk_ready(chunk: ChunkData) -> void:
 # block_changed 增量（主线程）
 # ============================================================
 
+## 编辑事件队列（帧预算摊销）：单格编辑（挖/放多数 <2ms）入队后
+## 立即 drain 当帧完成（即时手感与测试同步断言语义不变）；大 BFS
+##（火把大范围扩散/成片水）只做首 2ms、余量 _process 续摊——曾单格
+## 同步全量 70ms 尖刺、set_block 耗时 95% 在此（审查 L3/6-F2）。
+## 同格合并保留首事件 old + 最新 new：按序应用下与逐次处理终态
+## 等价（old 对应上一次处理后的光照状态）。
+const LIGHT_DRAIN_BUDGET_USEC := 2000
+var _edit_queue: Array = []  # [pos, ...] FIFO
+var _edit_pending := {}      # pos -> {"old": int, "new": int}
+
 func _on_block_changed(pos: Vector3i, old_id: int, new_id: int) -> void:
-	var _t0 := Time.get_ticks_usec()
-	_on_block_changed_impl(pos, old_id, new_id)
-	var _dt := Time.get_ticks_usec() - _t0
-	if _dt > 2000:
-		print("[perf] light_on_block_changed %.1fms at %s"
-				% [_dt * 0.001, pos])
+	if _edit_pending.has(pos):
+		_edit_pending[pos]["new"] = new_id
+	else:
+		_edit_pending[pos] = {"old": old_id, "new": new_id}
+		_edit_queue.append(pos)
+	_drain_edits()
+
+
+func _process(_delta: float) -> void:
+	if not _edit_queue.is_empty():
+		_drain_edits()
+
+
+func _drain_edits() -> void:
+	var t0 := Time.get_ticks_usec()
+	while not _edit_queue.is_empty():
+		var pos: Vector3i = _edit_queue.pop_front()
+		var e: Dictionary = _edit_pending[pos]
+		_edit_pending.erase(pos)
+		var it0 := Time.get_ticks_usec()
+		_on_block_changed_impl(pos, int(e["old"]), int(e["new"]))
+		var idt := Time.get_ticks_usec() - it0
+		if idt > 5000:
+			print("[perf] light_edit %.1fms at %s (预算外首格)"
+					% [idt * 0.001, pos])
+		if Time.get_ticks_usec() - t0 > LIGHT_DRAIN_BUDGET_USEC:
+			break
+
+
+## 编辑格光照封盖重算：本块+6 面邻逐块 C# 全量重算（每块以其现
+## 6 面邻为种子，按序重算两层收敛——编辑只改 1 格，光照跨界最多
+## 1 格深）。diff 有变化才标 mesh_dirty。任一块 C# 不可用即返回
+## false（已重算的块保持精确值，调用方增量算法在其上继续收敛——
+## 封盖兜底同语义，无害）。
+func _recalc_cover_native(chunk: ChunkData) -> bool:
+	var t0 := Time.get_ticks_usec()
+	var coords: Array[Vector3i] = [chunk.chunk_coord]
+	for d in DIRS:
+		coords.append(chunk.chunk_coord + d)
+	for coord in coords:
+		var c := _chunk_at(coord)
+		if c == null:
+			continue
+		var six: Array = []
+		for d in DIRS:
+			six.append(_chunk_at(coord + d))
+		var before := c.light.duplicate()
+		if not _init_chunk_light_native(c, six, six[2] == null):
+			return false
+		if c.light != before:
+			c.mesh_dirty = true
+	var dt := Time.get_ticks_usec() - t0
+	if dt > 5000:
+		print("[perf] light_cover_recalc %.1fms at %s"
+				% [dt * 0.001, chunk.chunk_coord])
+	return true
 
 
 func _on_block_changed_impl(pos: Vector3i, old_id: int, new_id: int) -> void:
@@ -322,6 +382,12 @@ func _on_block_changed_impl(pos: Vector3i, old_id: int, new_id: int) -> void:
 	var local := _to_local(pos)
 	var chunk := _chunk_at(VoxelCoords.world_to_chunk(pos, _chunk_size))
 	if chunk == null:
+		return
+	# C# 封盖路径：本块+6 面邻全量重算（精确终态 ~0.5ms/块，7 块
+	# ~3.5ms 有界）。增量 _bfs_world 跨块 BFS 曾无界 2-70ms（火把
+	# 放置实测 70ms，set_block 尖刺 95% 在此——审查 L3）；编辑队列
+	# 的帧预算只在格间生效、拦不住单格大 BFS。GD 回退保留原增量
+	if _recalc_cover_native(chunk):
 		return
 	if new_op > old_op:
 		# 变遮挡（放置/水淹）：两通道回收该格并减光；

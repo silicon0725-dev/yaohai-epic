@@ -103,12 +103,27 @@ static func _candidate_faces(world: VoxelWorld, source: Vector3,
 	var mx := Vector3i(maxi(floori(source.x), floori(ear.x)),
 			maxi(floori(source.y), floori(ear.y)),
 			maxi(floori(source.z), floori(ear.z))) 			+ Vector3i(SCAN_MARGIN + 1, SCAN_MARGIN + 1,
-			SCAN_MARGIN + 1)
+				SCAN_MARGIN + 1)
+	# 走廊粗判（审查 6-F1）：有效 1 阶反射面必在源↔听者直线路径
+	# 走廊内（镜像路径长有界 ⇒ 面离线段不远）——离线段远的格在
+	# get_block 细查（每格 7 次体素查询）前用一次点到线段距离整格
+	# 跳过；曾全盒×6 邻查询=方块音主线程 10-40ms 尖刺
+	var seg := ear - source
+	var seg_len2 := seg.length_squared()
+	var corridor: float = sqrt(seg_len2) * 0.5 + 3.0
+	var corridor2 := corridor * corridor
 	var faces := []
 	for x in range(mn.x, mx.x):
 		for y in range(mn.y, mx.y):
 			for z in range(mn.z, mx.z):
 				var cell := Vector3i(x, y, z)
+				var cc := Vector3(x + 0.5, y + 0.5, z + 0.5)
+				var rel := cc - source
+				var t := clampf(rel.dot(seg) / maxf(seg_len2, 1e-6),
+						0.0, 1.0)
+				var closest := source + seg * t
+				if cc.distance_squared_to(closest) > corridor2:
+					continue
 				var b := world.get_block(cell)
 				if not Acoustic.is_opaque_block(b):
 					continue

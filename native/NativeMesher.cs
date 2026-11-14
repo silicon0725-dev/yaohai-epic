@@ -222,7 +222,11 @@ public partial class NativeMesher : RefCounted
             }
         }
         // cross 桶循环后统一发射（与 GDScript 同序：植物 → 草叶；
-        // 火把由实体渲染器呈现，网格不出几何——torch 发射已删）
+        // 火把由实体渲染器呈现，网格不出几何——torch 发射已删）。
+        // 草叶块级预算（审查 2-F2）：超预算块强制 detail 1（GD 同判
+        // 定同常量——等价红线）
+        if (grassTopCells.Count > GrassCellBudget && grassDetail > 1)
+            grassDetail = 1;
         bool hasCross = plantCells.Count > 0 || grassTopCells.Count > 0;
         if (hasCross)
         {
@@ -501,23 +505,31 @@ public partial class NativeMesher : RefCounted
 
     // ---- 共用内部 ----
 
+    // padded 缓冲每线程复用（审查 2-F1：曾每任务 new 18³ int≈23KB
+    // ×26 邻拆分≈426KB——LOH 分配是流式加载期托管垃圾主源）
+    [ThreadStatic] static int[] _paddedCache;
+
+    static int[] RentPadded(int size)
+    {
+        var cache = _paddedCache;
+        if (cache == null || cache.Length != size)
+        {
+            cache = new int[size];
+            _paddedCache = cache;
+        }
+        return cache;
+    }
+
     private static int[] BuildPaddedCache(
         Vector3I chunkCoord, int s,
         int[] blockIds, int[] neighborIds, byte[] neighborExists)
     {
         int ps = s + 2;
         int volume = s * s * s;
-        int[] padded = new int[ps * ps * ps];
-        int[][] nb = new int[27][];
-        for (int i = 0; i < 27; i++)
-        {
-            if (neighborExists[i] != 0)
-            {
-                int[] arr = new int[volume];
-                System.Array.Copy(neighborIds, i * volume, arr, 0, volume);
-                nb[i] = arr;
-            }
-        }
+        int[] padded = RentPadded(ps * ps * ps);
+        // 边界直接读扁平 neighborIds（审查 2-F1：曾拆 int[27][] 二次
+        // 拷贝 26×16KB/任务——扁平布局本来就是 slot*volume+局部偏移，
+        // nb[][] 完全多余）。全索引覆盖写入，复用缓冲无残留旧数据
 
         for (int z = 0; z < s; z++)
         for (int y = 0; y < s; y++)
@@ -542,8 +554,9 @@ public partial class NativeMesher : RefCounted
                 if (lc < 0) { dz = -1; lc = s - 1; } else if (lc >= s) { dz = 1; lc = 0; }
                 int slot = (dz + 1) * 9 + (dy + 1) * 3 + (dx + 1);
                 int borderId = 0;
-                if (nb[slot] != null)
-                    borderId = nb[slot][la + s * lb + s * s * lc];
+                if (neighborExists[slot] != 0)
+                    borderId = neighborIds[
+                        slot * volume + la + s * lb + s * s * lc];
                 else if (worldBelow + b < 0)
                     borderId = 4;
                 padded[px + py * ps + pz * ps * ps] = borderId;

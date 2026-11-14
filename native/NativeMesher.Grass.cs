@@ -49,6 +49,8 @@ public partial class NativeMesher
     const long BladeSaltOz = 921;
     const long BladeSaltH = 931;
     const long BladeSaltD = 941;
+    // 草顶格块级预算（审查 2-F2；GD GRASS_CELL_BUDGET 同步——等价红线）
+    const int GrassCellBudget = 160;
     // grass_blade 的 TILES 序号（native_mesh_bridge.TILE_NAMES 同序）
     const int BladeTileIndex = 18;
     // 草侧面过渡变体序号（TILE_NAMES 同序；GD 侧 tile_grid 同名同号）

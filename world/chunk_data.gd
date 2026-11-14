@@ -10,6 +10,11 @@ var chunk_coord: Vector3i
 var dimensions: Vector3i
 var block_ids: PackedInt32Array
 
+## 本块是否含过水（保守永真）：水位表收集用它跳过无水块——曾每块
+## PackedInt32Array.has(WATER) 线性扫 4096 格×27 邻，流式加载期主
+## 线程白扫（审查 1-F10）
+var has_water := false
+
 ## 体素光照（光照阶段 2）：1 字节/格，高 4bit 天光、低 4bit 方块光
 ##（0-15）。transient 派生数据：不入库，加载/生成时由 VoxelLightSystem
 ## 重算（WaterFlow _pending 的"派生不持久化"同模式）。
@@ -82,6 +87,8 @@ func set_block(local: Vector3i, id: int) -> bool:
 		push_error("ChunkData.set_block 越界: %s in %s" % [local, chunk_coord])
 		return false
 	block_ids[local_index(local)] = id
+	if id == VoxelTypes.WATER_ID:
+		has_water = true
 	data_modified = true
 	save_needed = true
 	edit_serial += 1
@@ -92,6 +99,8 @@ func set_block(local: Vector3i, id: int) -> bool:
 ## 调用方（TerrainGenerator）保证局部坐标合法。
 func set_block_raw(local: Vector3i, id: int) -> void:
 	block_ids[local_index(local)] = id
+	if id == VoxelTypes.WATER_ID:
+		has_water = true
 
 
 # ---- 体素光照读写（0-15；数组 1 字节/格：高 4bit 天光、低 4bit 方块光） ----

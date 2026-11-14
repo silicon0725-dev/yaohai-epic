@@ -14,6 +14,10 @@ func _initialize() -> void:
 		quit(1)
 		return
 	var suite: VoxelTestCase = load(args[0]).new()
+	if suite == null:
+		push_error("套件加载失败（路径不存在或 parse error）: %s" % args[0])
+		quit(3)
+		return
 	suite.tree_root = root
 	await suite.run()
 	var status := "FAIL" if not suite.failures.is_empty() \

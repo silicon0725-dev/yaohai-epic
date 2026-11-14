@@ -158,7 +158,46 @@ func _process(_delta: float) -> void:
 		_autosave_accumulator += _delta
 		if _autosave_accumulator >= autosave_interval:
 			_autosave_accumulator = 0.0
-			save_all(_current_player_state())
+			_begin_autosave()
+		if not _save_queue.is_empty():
+			_pump_save_queue()
+
+
+## 自动保存改分帧队列（审查 1-F3）：到点只收集待写块入队，每帧
+## 4ms 预算逐块消化（serialize+zstd+写盘 1-3ms/块，曾一次 50 脏块
+## =50-150ms 单帧尖刺）；队列清空才写元数据。退出保存仍走 save_all
+## 同步全量（数据安全优先）。
+var _save_queue: Array[Vector3i] = []
+var _save_meta_pending := false
+
+
+func _begin_autosave() -> void:
+	for coord in world.chunks:
+		var chunk: ChunkData = world.chunks[coord]
+		if chunk.save_needed and not _save_queue.has(coord):
+			_save_queue.append(coord)
+	if _save_meta_pending == false and _save_queue.is_empty():
+		# 没有脏块：直接写元数据（玩家位置等）
+		save_system.save_meta(world, _current_player_state(),
+				_current_extra_state())
+	elif not _save_queue.is_empty():
+		_save_meta_pending = true
+
+
+func _pump_save_queue() -> void:
+	var t0 := Time.get_ticks_usec()
+	while not _save_queue.is_empty():
+		var coord: Vector3i = _save_queue.pop_front()
+		var chunk: ChunkData = world.get_chunk(coord)
+		if chunk != null and chunk.save_needed:
+			save_system.save_chunk(chunk)
+		if Time.get_ticks_usec() - t0 > 4000:
+			return  # 余量下帧续（队列/标记跨帧保持）
+	if _save_meta_pending:
+		save_system.save_meta(world, _current_player_state(),
+				_current_extra_state())
+		_save_meta_pending = false
+	_flush_dormant()
 
 
 ## 立即保存所有待写区块与世界元数据（自动保存/退出保存/手动共用）。

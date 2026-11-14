@@ -141,6 +141,8 @@ static func deserialize(
 			push_warning("区块存档槽位越离（损坏）")
 			return null
 		chunk.block_ids[i] = palette_ids[slot]
+		if chunk.block_ids[i] == VoxelTypes.WATER_ID:
+			chunk.has_water = true
 
 	# v2：读取稀疏状态段（v1 旧档无此段，跳过）
 	if format_version >= 2:

@@ -29,7 +29,7 @@ static func build_mesh_arrays(
 	var native := NativeMeshBridge.build(true, registry, chunk, neighbors,
 			null, grass_detail, states_snap)
 	if not native.is_empty():
-		if chunk.block_ids.has(VoxelTypes.WATER_ID):
+		if chunk.has_water:
 			var water := NativeMeshBridge.build_water(chunk, neighbors, water_levels)
 			if water.is_empty():
 				return _build_gd(registry, chunk, neighbors,

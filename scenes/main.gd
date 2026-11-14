@@ -237,6 +237,19 @@ func _ready() -> void:
 	else:
 		# 新世界：起始装备（旧档迁移在 apply_save_state 内处理）
 		player.inventory.apply_starting_kit(ItemTypes.STARTING_KIT)
+	# 调试注入（实机验收用）：--give <物品名> <数量>（user args，与
+	# --greedy 同机制传参）——例：-- --give core:torch 64。新档旧档
+	# 都生效，无参数零副作用
+	for i in OS.get_cmdline_user_args().size():
+		if OS.get_cmdline_user_args()[i] == "--give" \
+				and i + 2 < OS.get_cmdline_user_args().size():
+			var args := OS.get_cmdline_user_args()
+			var give_id := item_registry.id_for_name(args[i + 1])
+			var give_n := int(args[i + 2])
+			if give_id >= 0 and give_n > 0:
+				var leftover: int = player.inventory.add(give_id, give_n)
+				print("[give] %s ×%d 入包（背包满剩 %d）" % [
+					args[i + 1], give_n, leftover])
 	chunk_manager.player_state_provider = player.get_save_state
 	chunk_manager.focus = player
 	# 远景山壳（Voxy LOD 金字塔思想）：把有效视距推到 4096 格——

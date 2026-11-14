@@ -78,6 +78,10 @@ var _tree_async := {}
 ## 信号扇出）12-22ms（实机"快速放方块卡"）。现只查编辑格附近
 ## 列的树
 var _trees_by_col := {}
+## 树 AABB 覆盖块 → [tree_id]（光照标脏的块级二级索引，B6）
+var _trees_by_block := {}
+## .get 默认空数组共享常量（曾每次查询新建，B6）
+static var _EMPTY_TREE_LIST: Array = []
 ## 树 AABB 水平最大半径（列索引扫描半径用，保守值）
 const TREE_MAX_RADIUS := 8
 var _light_dirty_wait := 0.0
@@ -87,9 +91,10 @@ var _build_pending_wait := 0.0
 ## 每帧重烘上限（初次加载后全量标脏一次，限量防单帧长卡）
 ## 每帧重烘棵数上限：单棵全量重建（几何+逐面光照采样+冠影+上传）
 ## 5-15ms——曾 4 棵/帧=20-60ms 硬卡（实机"放/挖方块卡一下"：挖放
-## 把 3 格内树标脏，合并窗后一次烘）。1 棵/帧把峰值摊成毫秒级毛刺，
-## 多棵依次更新 2-3 帧完成，火把点亮感知仍即时
-const REBUILD_BUDGET_PER_FRAME := 1
+## 把 3 格内树标脏，合并窗后一次烘）。预算 ms 制（审查二轮 B5/B6：
+## 按棵数限量时单棵 5-24.5ms 仍独占一帧），小树可多烘/大树独占
+## 一帧；多棵依次更新 2-3 帧完成，火把点亮感知仍即时
+const REBUILD_BUDGET_USEC := 3000
 ## 单树重烘冷却（毫秒）：连续放拆合并成末态一次
 const BAKE_COOLDOWN_MSEC := 400
 ## 异步首建：每帧入队/提交上限（入队=快照 ~0.2ms，提交 ~1ms）
@@ -152,12 +157,19 @@ func _mark_light_dirty(pos: Vector3i, old_id: int, new_id: int) -> void:
 	var margin := 16.0 if (_light_emission(old_id) > 0
 			or _light_emission(new_id) > 0) else 3.0
 	var p := Vector3(pos)
-	# 列索引扫描：编辑格 (margin+TREE_MAX_RADIUS) 范围内的列才可能
-	# 有 AABB 够得着的树——曾 O(全部树) AABB 扫（2000+ 棵 12-22ms）
+	# 块级索引扫描（审查二轮 B6）：AABB 覆盖块按编辑格 (margin+
+	# TREE_MAX_RADIUS) 换算块半径查询——曾列级 (2r+1)² 扫（margin=3
+	# 即 529 次/格，水流逐格触发），AABB 距离过滤保留精确性
 	var r := int(ceil(margin)) + TREE_MAX_RADIUS
-	for cx in range(pos.x - r, pos.x + r + 1):
-		for cz in range(pos.z - r, pos.z + r + 1):
-			var tids: Array = _trees_by_col.get(Vector2i(cx, cz), [])
+	# world 可为 null（测试伪树直插 _trees 不经 setup）——默认块 16
+	var cs := world.config.chunk_size if world != null else 16
+	var br := VoxelCoords.floordiv(r + cs - 1, cs)
+	var base := Vector2i(VoxelCoords.floordiv(pos.x, cs),
+			VoxelCoords.floordiv(pos.z, cs))
+	for bx in range(-br, br + 1):
+		for bz in range(-br, br + 1):
+			var tids: Array = _trees_by_block.get(
+					base + Vector2i(bx, bz), _EMPTY_TREE_LIST)
 			for tid in tids:
 				if not _trees.has(tid):
 					continue
@@ -290,6 +302,23 @@ func _ref_tree(col: Vector2i) -> void:
 	if not _trees_by_col.has(ocol):
 		_trees_by_col[ocol] = []
 	(_trees_by_col[ocol] as Array).append(tree_id)
+	# 块级二级索引（审查二轮 B6）：AABB xz 覆盖块登记——光照标脏
+	# 查询从 (2r+1)² 列扫（margin=3 时 529 次/格，水流逐格触发）
+	# 降为最多 3×3~5×5 块字典查
+	var cs := world.config.chunk_size
+	var blocks: Array = []
+	var bmn := Vector2i(VoxelCoords.floordiv(mn.x, cs),
+			VoxelCoords.floordiv(mn.z, cs))
+	var bmx := Vector2i(VoxelCoords.floordiv(mx.x, cs),
+			VoxelCoords.floordiv(mx.z, cs))
+	for bx in range(bmn.x, bmx.x + 1):
+		for bz in range(bmn.y, bmx.y + 1):
+			var bkey := Vector2i(bx, bz)
+			if not _trees_by_block.has(bkey):
+				_trees_by_block[bkey] = []
+			(_trees_by_block[bkey] as Array).append(tree_id)
+			blocks.append(bkey)
+	entry["blocks"] = blocks
 	for cell in tree.cell_to_branch:
 		_cell_lookup[cell] = tree_id
 	_apply_cuts(tree, tree_id)
@@ -568,6 +597,11 @@ func _destroy_tree(tree_id: int) -> void:
 	arr.erase(tree_id)
 	if arr.is_empty():
 		_trees_by_col.erase(Vector2i(o.x, o.z))
+	for bkey in entry.get("blocks", []):
+		var barr: Array = _trees_by_block.get(bkey, [])
+		barr.erase(tree_id)
+		if barr.is_empty():
+			_trees_by_block.erase(bkey)
 	for cell in entry["instance"].cell_to_branch:
 		_cell_lookup.erase(cell)
 	_trees.erase(tree_id)
@@ -1084,10 +1118,13 @@ func _process(delta: float) -> void:
 	if not _light_dirty.is_empty():
 		_light_dirty_wait += delta
 		if _light_dirty_wait >= 0.15:
-			var built := 0
+			# 预算 ms 制（审查二轮 B5/B6）：曾按棵数限量——单棵重建
+			# 实测 5-24.5ms，"1 棵/帧"是伪预算（水流期连续 20-40 帧
+			# 5-24ms 卡顿）；3ms 时间预算下小树可多烘、大树独占一帧
+			var t0 := Time.get_ticks_usec()
 			var now_msec := Time.get_ticks_msec()
 			for tid in _light_dirty.keys():
-				if built >= REBUILD_BUDGET_PER_FRAME:
+				if Time.get_ticks_usec() - t0 > REBUILD_BUDGET_USEC:
 					break
 				# 单树冷却（BAKE_COOLDOWN_MSEC）：树旁连续放拆每块都
 				# 标脏 → 曾逐块全量重建（实机 23 次/棵）。冷却期内留
@@ -1098,7 +1135,6 @@ func _process(delta: float) -> void:
 				if _trees.has(tid):
 					_build_visual(tid, true)
 					_bake_last[tid] = now_msec
-					built += 1
 		if _light_dirty.is_empty():
 			_light_dirty_wait = 0.0
 	# 慢通道（首建）：根列 chunk 激活瞬间邻块常未就绪，等管线空闲

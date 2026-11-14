@@ -78,24 +78,65 @@ static func _tile_tables(registry: VoxelRegistry) -> Dictionary:
 ## 拼装 27 邻域扁平数组（build / build_water 共用）。
 ## append_array 批拷——曾逐元素 27×4096 次循环写，110k 次/任务的
 ## 纯 GDScript 桥接开销，A/B 里全算在 C# 头上。
+## 27 邻域外壳打包（审查二轮 A2）：面剔除真正读到的只有各邻块朝
+## 本块的外壳格——6 面 ×s² + 12 棱 ×s + 8 角（s=16 时 1736 格，
+## 1/63）——曾整块 append_array 27×4096×4B=442KB/任务 + C#
+## AsInt32Array 再拷一份进 LOH（流式期 20-90MB/s 托管垃圾主源）。
+## 段布局：按 slot 0..26 顺序，段长=自由轴（offset 分量为 0 的轴）
+## 组合数；slot 13（本块自身）永不被边界读、段长 0。C# ReadNb 按
+## 同构规则索引（自由轴 x<y<z、stride 递增——等价红线）
 static func _pack_neighbors(chunk: ChunkData, neighbors: Array) -> Dictionary:
 	var s := chunk.dimensions.x
-	var volume := s * s * s
-	var neighbor_ids := PackedInt32Array()
+	var shell := PackedInt32Array()
+	shell.resize(6 * s * s + 12 * s + 8)
 	var neighbor_exists := PackedByteArray()
 	neighbor_exists.resize(27)
-	for i in 27:
-		var nb: ChunkData = neighbors[i]
-		if nb != null:
-			neighbor_exists[i] = 1
-			neighbor_ids.append_array(nb.block_ids)
-		else:
-			neighbor_ids.resize(neighbor_ids.size() + volume)
+	var w := 0
+	for slot in 27:
+		var dx: int = slot % 3 - 1
+		var dy: int = (slot / 3) % 3 - 1
+		var dz: int = slot / 9 - 1
+		if dx == 0 and dy == 0 and dz == 0:
+			continue  # slot 13 = 本块：边界读永不落到它
+		var nb: ChunkData = neighbors[slot]
+		var seg := _shell_seg_len(dx, dy, dz, s)
+		if nb == null:
+			w += seg  # 段留零（exists=0 时 C# 不读该 slot）
+			continue
+		neighbor_exists[slot] = 1
+		var ids := nb.block_ids
+		# 非零轴固定：正方向取邻块 0 层、负方向取 s-1 层
+		var fa := s if dx == 0 else 1
+		var fb := s if dy == 0 else 1
+		var fc := s if dz == 0 else 1
+		for a in fa:
+			for b in fb:
+				for c in fc:
+					var la := a if dx == 0 else (0 if dx > 0 else s - 1)
+					var lb := b if dy == 0 else (0 if dy > 0 else s - 1)
+					var lc := c if dz == 0 else (0 if dz > 0 else s - 1)
+					shell[w] = ids[la + s * lb + s * s * lc]
+					w += 1
 	return {
-		"ids": neighbor_ids,
+		"ids": shell,
 		"exists": neighbor_exists,
-		"volume": volume,
+		"volume": 6 * s * s + 12 * s + 8,
 	}
+
+
+static func _shell_seg_len(dx: int, dy: int, dz: int, s: int) -> int:
+	var free_axes := 0
+	if dx == 0:
+		free_axes += 1
+	if dy == 0:
+		free_axes += 1
+	if dz == 0:
+		free_axes += 1
+	if free_axes == 2:
+		return s * s
+	if free_axes == 1:
+		return s
+	return 1
 
 
 ## 拼装并调用 C# 原生网格器。返回空字典 = 原生不可用或失败。

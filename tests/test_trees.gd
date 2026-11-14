@@ -52,9 +52,11 @@ func _test_light_dirty_rebuild() -> void:
 		"instance": null, "mesh_node": null, "body": null, "refs": 1,
 		"aabb": AABB(Vector3(0, 3, 0), Vector3(3, 8, 3)),
 	}
-	# 列空间索引注册（_mark_light_dirty 只扫邻近列——伪树直插
-	# _trees 不注册则永远不标脏）
+	# 索引注册（_mark_light_dirty 按块级二级索引扫——伪树直插
+	# _trees 不注册则永远不标脏；AABB 0..3 落 (0,0) 块。审查二轮
+	# B6 前为列索引 _trees_by_col，现块索引 _trees_by_block）
 	mgr._trees_by_col[Vector2i(1, 1)] = [123]
+	mgr._trees_by_block[Vector2i(0, 0)] = [123]
 	# 火把放置干旁 5 格：16 格光源影响半径内 → 标脏
 	mgr._on_block_changed(Vector3i(5, 5, 0), VoxelTypes.AIR_ID,
 			VoxelTypes.TORCH_ID)

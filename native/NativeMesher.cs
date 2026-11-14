@@ -525,11 +525,24 @@ public partial class NativeMesher : RefCounted
         int[] blockIds, int[] neighborIds, byte[] neighborExists)
     {
         int ps = s + 2;
-        int volume = s * s * s;
         int[] padded = RentPadded(ps * ps * ps);
-        // 边界直接读扁平 neighborIds（审查 2-F1：曾拆 int[27][] 二次
-        // 拷贝 26×16KB/任务——扁平布局本来就是 slot*volume+局部偏移，
-        // nb[][] 完全多余）。全索引覆盖写入，复用缓冲无残留旧数据
+        // 外壳段偏移表（按本任务 s 算，布局与 GD _pack_neighbors
+        // 同构——slot 13 段长 0 永不被读；审查二轮 A2 替代曾 27 整块
+        // 扁平传输 442KB/任务）
+        int[] shellOff = new int[27];
+        {
+            int w0 = 0;
+            for (int slot = 0; slot < 27; slot++)
+            {
+                int sdx = slot % 3 - 1, sdy = slot / 3 % 3 - 1,
+                    sdz = slot / 9 - 1;
+                if (sdx == 0 && sdy == 0 && sdz == 0) continue;
+                shellOff[slot] = w0;
+                int freeAxes = (sdx == 0 ? 1 : 0) + (sdy == 0 ? 1 : 0)
+                    + (sdz == 0 ? 1 : 0);
+                w0 += freeAxes == 2 ? s * s : freeAxes == 1 ? s : 1;
+            }
+        }
 
         for (int z = 0; z < s; z++)
         for (int y = 0; y < s; y++)
@@ -555,8 +568,16 @@ public partial class NativeMesher : RefCounted
                 int slot = (dz + 1) * 9 + (dy + 1) * 3 + (dx + 1);
                 int borderId = 0;
                 if (neighborExists[slot] != 0)
-                    borderId = neighborIds[
-                        slot * volume + la + s * lb + s * s * lc];
+                {
+                    // 外壳布局读（审查二轮 A2）：段偏移按 slot 累计、
+                    // 自由轴 stride 序 z→y→x（与 GD _pack_neighbors
+                    // 的 z 内层展开对偶——等价红线）
+                    int si = shellOff[slot], stride = 1;
+                    if (dz == 0) { si += lc * stride; stride *= s; }
+                    if (dy == 0) { si += lb * stride; stride *= s; }
+                    if (dx == 0) { si += la * stride; stride *= s; }
+                    borderId = neighborIds[si];
+                }
                 else if (worldBelow + b < 0)
                     borderId = 4;
                 padded[px + py * ps + pz * ps * ps] = borderId;

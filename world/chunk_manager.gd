@@ -107,6 +107,8 @@ var _gen_by_coord := {}    # coord -> task_id（防重复提交）
 var _mesh_by_coord := {}   # coord -> task_id（防重复提交）
 var _camera: Camera3D
 var _autosave_accumulator := 0.0
+## 脏块全表扫描分频计数（审查二轮 A1）
+var _scan_tick := 0
 # 调度缓存（避免每帧重算）：焦点列未变时跳过卸载扫描；列排序
 # 仅在焦点列变化或视线偏转 >~30° 时重建；已完整列由游标永久跳过
 #（曾每帧 desired_columns 全量生成 + O(n log n) 排序，800 列视距
@@ -564,14 +566,19 @@ func _poll_jobs() -> void:
 		_enqueue_mesh(coord)
 	# 脏区块网格任务（首次网格化与修改重建共用该路径）；
 	# collision_dirty 单独触发（玩家进入碰撞圈的补建路径——重网格
-	# 产出同 arrays，提交时按圈半径决定建碰撞）
-	for coord in world.chunks:
-		if in_flight_count() >= max_in_flight:
-			break
-		var chunk: ChunkData = world.chunks[coord]
-		if (chunk.mesh_dirty or chunk.collision_dirty) \
-				and not _mesh_by_coord.has(coord):
-			_enqueue_mesh(coord)
+	# 产出同 arrays，提交时按圈半径决定建碰撞）。
+	# 全表扫描降频（审查二轮 A1）：每 4 帧一扫（0.6-1.5ms/帧的
+	# 常驻开销 → 均摊 1/4；任务回收/提交仍每帧在上文跑）。玩家编辑
+	# 有 _edit_dirty 插队不依赖此扫描；新置脏最多晚 3 帧入队
+	_scan_tick += 1
+	if _scan_tick % 4 == 0 or not _edit_dirty.is_empty():
+		for coord in world.chunks:
+			if in_flight_count() >= max_in_flight:
+				break
+			var chunk: ChunkData = world.chunks[coord]
+			if (chunk.mesh_dirty or chunk.collision_dirty) \
+					and not _mesh_by_coord.has(coord):
+				_enqueue_mesh(coord)
 
 
 ## 玩家编辑（voxel_world.edit_dirty_cb 注入）：该区块优先重网格

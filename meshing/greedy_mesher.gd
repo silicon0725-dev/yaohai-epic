@@ -295,7 +295,8 @@ static func _face_tile(
 		states: Dictionary
 ) -> int:
 	if not states.is_empty():
-		var state: Dictionary = states.get(local, {})
+		# 共享空字典（每格默认 {} 曾新建分配——审查二轮 A7）
+		var state: Dictionary = states.get(local, ChunkData.EMPTY_STATE)
 		if not state.is_empty():
 			var normal := Vector3i.ZERO
 			normal[face_axis] = 1 if positive else -1

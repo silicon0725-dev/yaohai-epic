@@ -130,11 +130,15 @@ func set_block_light(local: Vector3i, value: int) -> void:
 
 # ---- 方块状态（朝向、开关等；稀疏存储，随存档持久化） ----
 
+## 无状态共享空字典（网格热路径每格 get_state 曾新建——审查二轮
+## A7；调用方只读承诺，同返回内部引用语义）
+const EMPTY_STATE := {}
+
 ## 读取某格状态（无状态返回空字典）。返回内部引用，调用方只读。
 func get_state(local: Vector3i) -> Dictionary:
 	if not is_valid_local(local):
-		return {}
-	return sparse_block_states.get(local, {})
+		return EMPTY_STATE
+	return sparse_block_states.get(local, EMPTY_STATE)
 
 
 ## 写入状态键值。推进 edit_serial 并标记待存档（§4.4 过期任务检查）。

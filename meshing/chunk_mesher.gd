@@ -20,6 +20,8 @@ extends RefCounted
 ## 27 元素邻域快照中 6 向直接邻居的下标（FACES 序：+X,-X,+Y,-Y,+Z,-Z），
 ## 索引公式见 build_padded_cache：(dz+1)*9 + (dy+1)*3 + (dx+1)。
 const LOADED_DIR_INDEX := [14, 12, 16, 10, 22, 4]
+## splitmix hash01（与 C# NativeTerrain.Hash01 逐位一致——对拍红线）
+const TreeScatter := preload("res://systems/trees/tree_scatter.gd")
 
 ## 每个面 4 个角点沿外轮廓排列（几何参考：cross(v1-v0, v2-v1) = 外法线），
 ## corner_uvs 中 v=0 对应贴图上方（草侧贴图的草皮条带在方块顶部）。
@@ -71,7 +73,9 @@ const FACES := [
 const RENDER_SKIP := 0     # 空气/水/枝干：走专用通道或不渲染
 const RENDER_OPAQUE := 1   # 不透明桶
 const RENDER_CUTOUT := 2   # 镂空桶（树叶；进碰撞）
-const RENDER_CROSS := 3    # 十字面片（火把；不进碰撞，cutout 材质）
+const RENDER_CROSS := 3    # 排除桶（火把/提灯：实体渲染器呈现，网格不出几何）
+const RENDER_PLANT := 4   # 植物（高草/花）：X 十字面片 + 草顶密叶
+						  # （cutout 材质双绕序；不进碰撞）
 
 static func build_lookup_tables(registry: VoxelRegistry) -> Dictionary:
 	var block_count := registry.block_count()
@@ -98,6 +102,8 @@ static func build_lookup_tables(registry: VoxelRegistry) -> Dictionary:
 				# cross=十字面片（火把）；model=盒件模型（提灯）——
 				# 同桶：区块网格跳过，实体渲染（Torch/LanternRenderer）
 				kind = RENDER_CROSS
+			"plant":
+				kind = RENDER_PLANT
 		render_kind[id] = kind
 		textures_by_id[id] = registry.definition_for_id(id).get("textures", {})
 	return {
@@ -233,9 +239,6 @@ static func build_light_padded(
 	return padded
 
 
-## 亮度 gamma（深黑取向）：>1 让暗部更黑，露天仍 1.0 不影响
-const LIGHT_GAMMA := 1.5
-
 ## 面角点颜色（MC 平滑光照）：以角点为公共角的 2x2 四格光照平均
 ##（实心格光照 0，天然形成角部 AO 变暗，不另叠显式 AO——双重暗化
 ## 过头）。
@@ -321,17 +324,22 @@ static func build_mesh_arrays(
 		registry: VoxelRegistry,
 		chunk: ChunkData,
 		neighbors: Array,
-		water_levels: Variant = null
+		water_levels: Variant = null,
+		grass_detail: int = 2,
+		states_snap: Variant = null
 ) -> Dictionary:
-	var native := NativeMeshBridge.build(false, registry, chunk, neighbors)
+	var native := NativeMeshBridge.build(false, registry, chunk, neighbors,
+			null, grass_detail, states_snap)
 	if not native.is_empty():
 		if chunk.block_ids.has(VoxelTypes.WATER_ID):
 			var water := NativeMeshBridge.build_water(chunk, neighbors, water_levels)
 			if water.is_empty():
-				return _build_gd(registry, chunk, neighbors, water_levels)
+				return _build_gd(registry, chunk, neighbors,
+						water_levels, grass_detail, states_snap)
 			native.merge(water)
 		return native
-	return _build_gd(registry, chunk, neighbors, water_levels)
+	return _build_gd(registry, chunk, neighbors, water_levels,
+			grass_detail, states_snap)
 
 
 ## 共享只读空状态（热循环 per-block 曾构造 {} 4096 次/区块——
@@ -343,8 +351,13 @@ static func _build_gd(
 		registry: VoxelRegistry,
 		chunk: ChunkData,
 		neighbors: Array,
-		water_levels: Variant = null
+		water_levels: Variant = null,
+		grass_detail: int = 2,
+		states_snap: Variant = null
 ) -> Dictionary:
+	# states_snap：worker 传入的 states 深拷贝（P1-5 并发修复）；
+	# null（主线程/测试直调）时用 chunk.sparse_block_states 本体
+	var states: Dictionary = states_snap if states_snap is Dictionary 			else chunk.sparse_block_states
 	assert(chunk.dimensions.x == chunk.dimensions.y
 			and chunk.dimensions.y == chunk.dimensions.z, "Stage A 仅支持立方体区块")
 	var s := chunk.dimensions.x
@@ -367,7 +380,7 @@ static func _build_gd(
 	# 1. 每个 (block_id, face) 的图集 tile 与 UV 矩形按需缓存：
 	#    热循环内不再做字符串查找与除法
 	# 2. FACES 常量字典预展开为数组，消除逐面字典键查找
-	var has_states := not chunk.sparse_block_states.is_empty()
+	var has_states := not states.is_empty()
 	var cached_tiles := {}   # "block_id:kind" -> [tile_x_norm, tile_y_norm, inv_cols, inv_rows]
 	var inv_cols := 1.0 / TextureAtlasLoader.COLS
 	var inv_rows := 1.0 / TextureAtlasLoader.ROWS
@@ -408,9 +421,10 @@ static func _build_gd(
 	# 树叶面单独成桶（cutout 表面：alpha 裁切镂空材质）；顶点/UV
 	# 与不透明网格共享，仅索引分流——碰撞构建合并两桶
 	var cutout_indices := PackedInt32Array()
-	# cross 桶（火把）：循环只收集格位，循环后统一发射（独立数组/
-	# 独立表面——不进碰撞，UV 图集空间与主数组解耦）
-	var cross_cells: Array = []
+	# 植物/草叶桶：循环只收集格位，循环后统一发射（独立数组/独立
+	# cross 表面——不进碰撞，UV 图集空间与主数组解耦）
+	var plant_cells: Array = []
+	var grass_top_cells: Array = []
 
 	for z in s:
 		for y in s:
@@ -420,17 +434,31 @@ static func _build_gd(
 				# dispatch 表分发（曾硬编码 AIR/WATER/BRANCH ID 判断）：
 				# skip = 专用通道（水/枝干）或不渲染；cross = 十字面片
 				var kind: int = render_kind[block_id]
-				if kind == RENDER_SKIP or solid_by_id[block_id] == 0:
-					if kind != RENDER_CROSS:
-						continue
+				if kind == RENDER_PLANT:
+					# 植物（高草/花）：循环后统一发射 X 十字面片
+					plant_cells.append([x, y, z, pidx])
+					continue
 				if kind == RENDER_CROSS:
 					# cross 桶方块（火把）由实体渲染器呈现（TorchRenderer），
 					# 网格不出几何——chunk cross 路径曾用户实机不可见（绕行）
 					continue
+				if kind == RENDER_SKIP or solid_by_id[block_id] == 0:
+					continue
+				if block_id == VoxelTypes.GRASS_ID:
+					var up_id := padded[pidx + neighbor_offsets[2]]
+					# 草顶露天空或顶上是植物（地毯全覆盖，高草株从叶间
+					# 钻出——GG 观感；hash 世界坐标驱动跨区块稳定）
+					# 树冠/枝占位下方也发地毯叶（B9d：树下秃一片被用户
+					# 误读为"渲染剔除扇形"——世界固定+脚下即有的真身）
+					if up_id == VoxelTypes.AIR_ID \
+							or render_kind[up_id] == RENDER_PLANT \
+							or up_id == VoxelTypes.BRANCH_ID \
+							or up_id == VoxelTypes.LEAVES_ID:
+						grass_top_cells.append([x, y, z, pidx])
 				var textures: Dictionary = textures_by_id[block_id]
 				var state: Dictionary = EMPTY_STATE
 				if has_states:
-					state = chunk.get_state(Vector3i(x, y, z))
+					state = states.get(Vector3i(x, y, z), {})
 				for f in FACES.size():
 					if occludes_by_id[padded[pidx + neighbor_offsets[f]]] == 1:
 						continue
@@ -441,12 +469,50 @@ static func _build_gd(
 					# tile 原点：无状态走缓存（键 "block:face"，免字符串查找/除法）
 					var tile_origin := Vector2.ZERO
 					if state.is_empty():
-						var cache_key := block_id * 8 + f
+						# BetterGrassify 草坡融合（FANCY 语义，canFullyConnect
+						# = relative(face).below()）：草方块暴露水平侧面，
+						# 斜下格（面朝向邻格的正下方）也是草 → 整面用顶面
+						# 贴图——草坡台阶侧壁涂绿与下阶顶面连片。邻格不遮
+						# 挡已由面暴露保证。
+						# 交界过渡：本面是土面时，切向邻格的同朝向面 blend →
+						# 贴图对应侧加草垂带（variant bit0=u0 侧 bit1=u1 侧；
+						# 切向正向→u 减侧的面：+X/-Z，flip 表）。blend/variant
+						# 编进 cache_key（+512/+1024×variant）
+						var blend := false
+						var variant := 0
+						if block_id == VoxelTypes.GRASS_ID and f != 2 and f != 3:
+							if padded[pidx + neighbor_offsets[f]
+									+ neighbor_offsets[3]] \
+									== VoxelTypes.GRASS_ID:
+								blend = true
+							else:
+								var t_off: int = neighbor_offsets[4] \
+										if f < 4 else neighbor_offsets[0]
+								var flip := f == 0 or f == 5
+								for sgn in [-1, 1]:
+									var nb2: int = pidx + sgn * t_off
+									if padded[nb2] == VoxelTypes.GRASS_ID \
+											and padded[nb2
+											+ neighbor_offsets[f]
+											+ neighbor_offsets[3]] \
+											== VoxelTypes.GRASS_ID:
+										if (sgn > 0) == flip:
+											variant |= 1
+										else:
+											variant |= 2
+						var cache_key := block_id * 8 + f \
+								+ (512 if blend else 0) + 1024 * variant
 						if tile_cache.has(cache_key):
 							tile_origin = tile_cache[cache_key]
 						else:
 							var tile_name := String(textures.get(
 									face_kinds[f], textures.get("side", "")))
+							if blend:
+								tile_name = String(textures.get("top", tile_name))
+							elif variant != 0:
+								tile_name = String(textures.get(
+										["side_u0", "side_u1",
+										"side_u01"][variant - 1], tile_name))
 							var tile := TextureAtlasLoader.tile_grid(tile_name)
 							tile_origin = Vector2(
 									float(tile.x) * inv_cols, float(tile.y) * inv_rows)
@@ -502,12 +568,28 @@ static func _build_gd(
 		"indices": indices,
 		"cutout_indices": cutout_indices,
 	}
-	for cell in cross_cells:
-		append_torch_faces(result, cell[0], cell[1], cell[2],
-				textures_by_id[padded[cell[3]]], light_padded, ps,
-				cell[3], inv_cols, inv_rows, cell[4])
 	var c := chunk.chunk_coord
 	var d := chunk.dimensions
+	var world_origin := Vector3i(c.x * d.x, c.y * d.y, c.z * d.z)
+	for cell in plant_cells:
+		if padded[cell[3]] == VoxelTypes.TALL_GRASS_ID:
+			# 高草株：×3 高叶簇（GG TALL_PLANT_HEIGHT_MULTIPLIER，
+			# 弃 X 十字 billboard——18 片成束，根贴地 0.02）
+			append_grass_blades(result, cell[0], cell[1], cell[2],
+					light_padded, ps, cell[3], inv_cols, inv_rows,
+					world_origin.x + cell[0], world_origin.z + cell[2],
+					TALL_N_BY_DETAIL[grass_detail], TALL_PLANT_MULT,
+					TALL_PLANT_Y0, TALL_W_MULT, grass_detail)
+		else:
+			append_plant_faces(result, cell[0], cell[1], cell[2],
+					textures_by_id[padded[cell[3]]], light_padded, ps,
+					cell[3], inv_cols, inv_rows,
+					world_origin.x + cell[0], world_origin.z + cell[2])
+	for cell in grass_top_cells:
+		append_grass_blades(result, cell[0], cell[1], cell[2],
+				light_padded, ps, cell[3], inv_cols, inv_rows,
+				world_origin.x + cell[0], world_origin.z + cell[2],
+				0, 1.0, 1.0, 1.0, grass_detail)
 	append_water_faces(padded, ps, result,
 			water_levels if water_levels != null
 					else collect_water_levels_world(chunk, neighbors),
@@ -529,39 +611,53 @@ static func loaded_dirs(neighbors: Array) -> PackedByteArray:
 	return dirs
 
 
-## ---- 细柱小盒（dispatch 表 cross 桶：火把等无碰撞薄方块）----
-## MC 式火把模型：2x2x12 像素竖柱（非十字面片——整格高的面片近看
-## 是"一大面墙"，用户实机"模型不对"）。侧面采样 tile 中柱条带
-## u∈[7,9]/16（焰头在条带顶），顶面采焰核，底面采木色。共享 cutout
-## 顶点数组（材质同树叶），索引走独立 cross_indices 桶——碰撞构建
-## 不读，天然无碰撞。光照取本格平光。**等价红线：C# 逐位复刻**。
-const TORCH_X0 := 7.0 / 16.0
-const TORCH_X1 := 9.0 / 16.0
-const TORCH_Y1 := 12.0 / 16.0
+## ---- 植物（dispatch 表 plant 桶：高草/花 X 十字 + 草顶密叶）----
+## GrassierGrass 思想自研：全部几何一次性烘焙进区块网格（零逐帧
+## CPU/GPU compute），风摆由顶点着色器承担（Phase B）。**等价
+## 红线：C# NativeMesher 逐位复刻**（顶点顺序/常数一致）。
+## X 十字内缩量（MC 式：面片不贴格边）
+const PLANT_INSET := 0.15
+## 单片草叶几何常量（GrassierGrass 观感对齐：细叶密植+区域草浪+
+## 簇姿态连贯——独立随机会显"毛躁"，区域相关才成"草浪"）
+# —— GG 默认起步、按用户观感逐轮上调（B7：整体加高+高低差拉大+
+# 高草超玩家；swell 0.47-1.17 的 32 格大区草浪承担"整片起伏"）——
+const BLADE_HALF_W := 0.04    # BAKED_BASE_WIDTH 0.040（宽 0.08）
 
-## attach：墙挂法线（"1,0,0" 语义，落地火把为 ZERO）——盒体贴墙
-## 偏移 -attach*6/16（水平）。等价红线：C# 同步。
-static func torch_attach_offset(attach: Vector3i) -> Vector3:
-	return Vector3(
-			-float(attach.x) * (6.0 / 16.0), 0.0,
-			-float(attach.z) * (6.0 / 16.0))
+const BLADE_H_BASE := 0.75    # GG 默认 0.5075 → B7 加高一档
+const BLADE_H_PER := 0.30     # 叶内 0.80-1.10（默认 0.88+0.13——拉大株内高低差）
+const BLADE_LEAN := 0.16      # 梢歪更活（默认 0.12）
+## 高草株（tall_grass 方块）：叶簇替代 X 十字；×3.6 后峰值 2.0+ 超玩家
+const TALL_PLANT_MULT := 3.6  # GG TALL_PLANT_HEIGHT_MULTIPLIER 3.0 → B7
+const TALL_W_MULT := 1.35     # 高草叶整体加宽（粗细随机之外的基宽抬升）
+const TALL_PLANT_N := 18
+## 高草株片数按距离分级（近 18 / 中 14 / 远 10——B9c 回补）
+const TALL_N_BY_DETAIL := [10, 14, 18]
+const TALL_PLANT_Y0 := 0.02   # 根部抬升防贴地 z-fight
+## 区域草浪：SWELL_CELL 大区双线性低频高度（GG 32 格瓦片——
+## 6 格太碎显"噪"，32 格才出"整片起伏"的草浪观感）
+const SWELL_CELL := 32
+const SWELL_SALT := 951
+## 草簇：CLUSTER_CELL 粗格共享叶向（GG Voronoi 团簇思想）
+const CLUSTER_CELL := 3
+const CLUSTER_SALT := 961
+## 风摆相位盐（UV2 携带；shader 读）
+const BLADE_SALT_PH := 971
+const PLANT_SALT_PH := 981
+## 草叶 hash 盐（C# 同步）
+const BLADE_SALT_N := 911
+const BLADE_SALT_OX := 912
+const BLADE_SALT_OZ := 921
+const BLADE_SALT_H := 931
+const BLADE_SALT_D := 941
 
 
-static func parse_attach(state: Dictionary) -> Vector3i:
-	var raw := String(state.get("attach", ""))
-	if raw.is_empty():
-		return Vector3i.ZERO
-	var parts := raw.split(",")
-	if parts.size() != 3:
-		return Vector3i.ZERO
-	return Vector3i(int(parts[0]), int(parts[1]), int(parts[2]))
-
-
-static func append_torch_faces(
+## 植物 X 十字面片（全 tile UV；两对角 quad 各单片、单绕序单对角线
+## ——cross 材质 cull_disabled 双面，B9；曾双绕序=单面材质时代设计）
+static func append_plant_faces(
 		out: Dictionary, x: int, y: int, z: int,
 		textures: Dictionary, light_padded: PackedByteArray,
 		ps: int, pidx: int, inv_cols: float, inv_rows: float,
-		attach: Vector3i = Vector3i.ZERO
+		wx: int = 0, wz: int = 0
 ) -> void:
 	var vertices: PackedVector3Array = out.get(
 			"cross_vertices", PackedVector3Array())
@@ -569,59 +665,214 @@ static func append_torch_faces(
 			"cross_normals", PackedVector3Array())
 	var uvs: PackedVector2Array = out.get(
 			"cross_uvs", PackedVector2Array())
+	var uv2s: PackedVector2Array = out.get(
+			"cross_uv2s", PackedVector2Array())
 	var colors: PackedColorArray = out.get(
 			"cross_colors", PackedColorArray())
 	var cross_indices: PackedInt32Array = out.get(
 			"cross_indices", PackedInt32Array())
-	var tile_name := String(textures.get("side", ""))
-	var tile := TextureAtlasLoader.tile_grid(tile_name)
+	var tile := TextureAtlasLoader.tile_grid(
+			String(textures.get("side", "grass_tuft")))
 	var o_x := float(tile.x) * inv_cols
 	var o_y := float(tile.y) * inv_rows
 	var light := vertex_light_color(light_padded, ps, pidx, 1, 1, 1, 1)
-	# 各面 UV 矩形 [u0,v0,u1,v1]（图集空间）：四侧 = 中柱条带全高；
-	# 顶 = 焰核；底面贴地省略。角点 UV 走 FACES corner_uvs 表矩形
-	# 插值（与整方块同映射，防镜像/倒置——cube_mesh_for 同法）
-	var side_u0 := o_x + TORCH_X0 * inv_cols
-	var side_u1 := o_x + TORCH_X1 * inv_cols
-	var side_v0 := o_y
-	var side_v1 := o_y + TORCH_Y1 * inv_rows
-	var top_v0 := o_y + (11.0 / 16.0) * inv_rows
-	var face_rect := {
-		0: [side_u0, side_v0, side_u1, side_v1],  # +x
-		1: [side_u0, side_v0, side_u1, side_v1],  # -x
-		2: [side_u0, top_v0, side_u1, side_v1],   # +y（焰核）
-		4: [side_u0, side_v0, side_u1, side_v1],  # +z
-		5: [side_u0, side_v0, side_u1, side_v1],  # -z
-	}
-	var off := torch_attach_offset(attach)
-	# FACES 角点 0/1 分量映射进小盒范围；跳过 -y（底面不可见）
-	for f in [0, 1, 2, 4, 5]:
-		var corners: Array = FACES[f]["corners"]
-		var corner_uvs: Array = FACES[f]["corner_uvs"]
-		var normal_vec: Vector3 = FACES[f]["normal"]
-		var rect: Array = face_rect[f]
+	var i0 := PLANT_INSET
+	var i1 := 1.0 - PLANT_INSET
+	# 两个对角面片：(i0,i0)-(i1,i1) 与 (i0,i1)-(i1,i0)
+	var quads := [
+		[Vector3(x + i0, y, z + i0), Vector3(x + i1, y, z + i1)],
+		[Vector3(x + i0, y, z + i1), Vector3(x + i1, y, z + i0)],
+	]
+	for q in quads:
+		var a: Vector3 = q[0]
+		var b: Vector3 = q[1]
 		var base := vertices.size()
-		for c in 4:
-			var corner: Vector3 = corners[c]
-			vertices.append(Vector3(
-					x + TORCH_X0 + corner.x * (TORCH_X1 - TORCH_X0) + off.x,
-					y + corner.y * TORCH_Y1,
-					z + TORCH_X0 + corner.z * (TORCH_X1 - TORCH_X0) + off.z))
-			normals.append(normal_vec)
-			var cuv: Vector2 = corner_uvs[c]
-			uvs.append(Vector2(
-					rect[0] + cuv.x * (rect[2] - rect[0]),
-					rect[1] + cuv.y * (rect[3] - rect[1])))
+		vertices.append(a)
+		vertices.append(b)
+		vertices.append(a + Vector3.UP)
+		vertices.append(b + Vector3.UP)
+		for k in 4:
+			normals.append(Vector3.UP)
 			colors.append(light)
-		cross_indices.append(base)
-		cross_indices.append(base + 2)
-		cross_indices.append(base + 1)
-		cross_indices.append(base)
-		cross_indices.append(base + 3)
-		cross_indices.append(base + 2)
+		uvs.append(Vector2(o_x, o_y + inv_rows))
+		uvs.append(Vector2(o_x + inv_cols, o_y + inv_rows))
+		uvs.append(Vector2(o_x, o_y))
+		uvs.append(Vector2(o_x + inv_cols, o_y))
+		# UV2 风摆（同草叶语义：底 0 顶 1；每株一个相位）
+		var pph: float = TreeScatter.hash01(wx, wz, PLANT_SALT_PH)
+		uv2s.append(Vector2(0.0, pph))
+		uv2s.append(Vector2(0.0, pph))
+		uv2s.append(Vector2(1.0, pph))
+		uv2s.append(Vector2(1.0, pph))
+		# 单绕序（cross 材质 cull_disabled 双面——性能 B9；曾双绕序）。
+		# **单对角线配对**（1-2）：正组两三角共享对角线才互补全覆盖
+		#（旧双对角线写法 quad 中央留三角洞——B8b 修复）
+		cross_indices.append_array(PackedInt32Array([
+			base, base + 2, base + 1,
+			base + 1, base + 2, base + 3,
+		]))
 	out["cross_vertices"] = vertices
 	out["cross_normals"] = normals
 	out["cross_uvs"] = uvs
+	out["cross_uv2s"] = uv2s
+	out["cross_colors"] = colors
+	out["cross_indices"] = cross_indices
+
+
+## 草顶密叶：每格 hash 定 2-3 片窄叶（位置/高度/斜向），世界坐标
+## 驱动跨区块稳定。叶面沿对角线朝向，梢部顺叶向微倾。
+static func append_grass_blades(
+		out: Dictionary, x: int, y: int, z: int,
+		light_padded: PackedByteArray, ps: int, pidx: int,
+		inv_cols: float, inv_rows: float, wx: int, wz: int,
+		n_override: int = 0, h_mult: float = 1.0, y0_off: float = 1.0,
+		w_mult: float = 1.0, detail: int = 2
+) -> void:
+	var vertices: PackedVector3Array = out.get(
+			"cross_vertices", PackedVector3Array())
+	var normals: PackedVector3Array = out.get(
+			"cross_normals", PackedVector3Array())
+	var uvs: PackedVector2Array = out.get(
+			"cross_uvs", PackedVector2Array())
+	var uv2s: PackedVector2Array = out.get(
+			"cross_uv2s", PackedVector2Array())
+	var colors: PackedColorArray = out.get(
+			"cross_colors", PackedColorArray())
+	var cross_indices: PackedInt32Array = out.get(
+			"cross_indices", PackedInt32Array())
+	var tile := TextureAtlasLoader.tile_grid("grass_blade")
+	var o_x := float(tile.x) * inv_cols
+	var o_y := float(tile.y) * inv_rows
+	# 光照取草块上方格（叶身所在格；+Y 偏移 = ps——与主循环
+	# neighbor_offsets[2] 同源，发射器独立重算）
+	var light := vertex_light_color(light_padded, ps,
+			pidx + ps, 1, 1, 1, 1)
+	# 区域草浪：SWELL_CELL 粗格四角 hash 双线性（大片共享高度特征）
+	var gx := float(wx) / float(SWELL_CELL)
+	var gz := float(wz) / float(SWELL_CELL)
+	var sx := floori(gx)
+	var sz := floori(gz)
+	var fx := gx - float(sx)
+	var fz := gz - float(sz)
+	var h00: float = TreeScatter.hash01(sx, sz, SWELL_SALT)
+	var h10: float = TreeScatter.hash01(sx + 1, sz, SWELL_SALT)
+	var h01: float = TreeScatter.hash01(sx, sz + 1, SWELL_SALT)
+	var h11: float = TreeScatter.hash01(sx + 1, sz + 1, SWELL_SALT)
+	# GG HEIGHT_NOISE：contrast 1.35/bias 0.5 整形到 0.1(短)-1.28(高)，
+	# REGIONAL_LENGTH_FRACTION 0.59 混合（短斑与高草丛并存=成片感）
+	var hn := pow(lerpf(lerpf(h00, h10, fx), lerpf(h01, h11, fx), fz),
+			1.35)
+	var swell := 1.0 + 0.59 * (lerpf(0.1, 1.28, hn) - 1.0)
+	# 叶向基准角（每格一个）：格内叶向相近（近看成束），格间全随机
+	# ——任何视角下每格都有近正对的叶面。曾锁死 ±45° 对角（B5-B9e
+	# 前）→ 侧对视角全图压线；B9e 簇级基准（3×3 格同向）侧对簇仍
+	# 整簇显薄（用户"部分地方还是朝一个方向"）——降到格级+±60° 扰动
+	var cell_angle := TAU * TreeScatter.hash01(wx, wz, CLUSTER_SALT)
+	# 密度档：近距三档 56/64/72（GG DEFAULT_BLADES_PER_BLOCK 64 茂密
+	# 主源）；距离分级（性能 B9/B9c）：中 48/远 32（曾 40/24 断崖太陡
+	# 显"辐射缺失"；C# 同步——曾 GD 侧替换静默失败教训）
+	var rn: float = TreeScatter.hash01(wx, wz, BLADE_SALT_N)
+	var n := n_override if n_override > 0 \
+			else ((56 if rn < 0.40 else (64 if rn < 0.80 else 72)) \
+			if detail >= 2 else (48 if detail == 1 else 32))
+	for i in n:
+		var r_ox := TreeScatter.hash01(wx * 4 + i, wz * 3 - i,
+				BLADE_SALT_OX + i)
+		var r_oz := TreeScatter.hash01(wx * 7 - i, wz * 5 + i,
+				BLADE_SALT_OZ + i)
+		var r_h := TreeScatter.hash01(wx * 2 + i, wz * 9 + i,
+				BLADE_SALT_H + i)
+		var r_d := TreeScatter.hash01(wx * 6 + i, wz + i,
+				BLADE_SALT_D + i)
+		var ph := TreeScatter.hash01(wx * 13 + i, wz * 17 - i,
+				BLADE_SALT_PH + i)
+		# 贴边撒布（-0.04~1.04）：叶身跨过格线互搭，消除格间 0.16
+		# 空带断层（曾 0.08~0.92 内缩=每格四周裸土缝）
+		var cx := x - 0.04 + 1.08 * r_ox
+		var cz := z - 0.04 + 1.08 * r_oz
+		# 叶长 = 基准 ×（高草株 ×3.6）× 区域草浪 × 叶内变化（0.80-1.10）
+		var h := maxf(BLADE_H_BASE * h_mult * swell
+				* (0.80 + BLADE_H_PER * r_h), 0.02)
+		# 叶朝向 = 格基准角 + 叶内 ±60° 扰动（同格多样——侧对方向
+		# 也有大量近正对叶面；r_d 复用为扰动源）
+		var ang := cell_angle + (r_d - 0.5) * 2.1
+		var diag := Vector2(cos(ang), sin(ang))
+		# 叶宽：随机 0.75-1.25 ×（高草株加宽）——高草曾是"等宽棍"
+		#（18 片同宽+等宽到顶），叶尖再收窄破棍感（GG 叶形 base 0.04
+		# → tip 0.013）。w double 算完显式截 float32 再进 Vector2 组件
+		# 乘——与 C# 三段路径逐位对齐（对拍坑沉淀）
+		var w := BLADE_HALF_W * (0.75 + 0.5 * r_h) * w_mult
+		var lean := diag * BLADE_LEAN
+		# 叶身曲线（GodotGrass/对马岛 GDC）：近距 4 关键 8 顶点，水平
+		# 偏移 ∝ t²（悬臂抛物线）+宽度沿 t 平滑收窄（3 关键 2 段折角
+		# 生硬——用户反馈）。中/远距降 2 关键 4 顶点（直线锥叶——
+		# 远观感知不到折角，顶点 -50%，性能 B9）
+		const CURVE_T := [0.0, 0.30, 0.62, 1.0]
+		const CURVE_W := [1.0, 0.90, 0.72, 0.35]
+		const CURVE_T2 := [0.0, 1.0]
+		const CURVE_W2 := [1.0, 0.35]
+		var ckeys: int = 4 if detail >= 2 else 2
+		var curve_t: Array = CURVE_T if ckeys == 4 else CURVE_T2
+		var curve_w: Array = CURVE_W if ckeys == 4 else CURVE_W2
+		var base := vertices.size()
+		var sway_w: float = 0.6 + 0.4 * h
+		# 十字双面（用户"加一点厚度"）：diag 主面 + 垂直副面——侧对
+		# 一个面必正对另一个，任何视角都有可见叶带（等效厚度，比真
+		# 厚度盒便宜一半）。**性能 B10：十字只在近距**——中/远距单面
+		#（格级全角度叶向 B9f 已保证外圈方向多样性，透视缩小的远景
+		# 感知不到单面侧对；外圈占视距面积大头，砍半收益最大）
+		var faces: int = 2 if detail >= 2 else 1
+		var perp := Vector2(-diag.y, diag.x)
+		for ci in ckeys:
+			var t: float = curve_t[ci]
+			var wt32: float = w * curve_w[ci]
+			var half_a := diag * wt32
+			var half_b := perp * wt32
+			var t2 := t * t
+			var xoff := lean.x * t2
+			var zoff := lean.y * t2
+			var hy := y + y0_off + h * t
+			vertices.append(Vector3(cx - half_a.x + xoff, hy,
+					cz - half_a.y + zoff))
+			vertices.append(Vector3(cx + half_a.x + xoff, hy,
+					cz + half_a.y + zoff))
+			if faces == 2:
+				vertices.append(Vector3(cx - half_b.x + xoff, hy,
+						cz - half_b.y + zoff))
+				vertices.append(Vector3(cx + half_b.x + xoff, hy,
+						cz + half_b.y + zoff))
+			for k in faces * 2:
+				normals.append(Vector3.UP)
+				colors.append(light)
+			var v_row: float = o_y + inv_rows * (1.0 - t)
+			uvs.append(Vector2(o_x, v_row))
+			uvs.append(Vector2(o_x + inv_cols, v_row))
+			if faces == 2:
+				uvs.append(Vector2(o_x, v_row))
+				uvs.append(Vector2(o_x + inv_cols, v_row))
+			# UV2 = (风摆权重, 相位)：t ×(0.6+0.4h)——实际叶高烘进
+			# 权重，shader 平方衰减下端点摆幅 ∝ h²（高草受风更大）
+			for k in faces:
+				uv2s.append(Vector2(sway_w * t, ph))
+				uv2s.append(Vector2(sway_w * t, ph))
+		# (ckeys-1) 段 × faces 面 quad，单绕序（cull_disabled 双面——
+		# B9）。关键 stride 2×faces：A 面 (0,1,+stride)、B 面 (2,3,+stride)
+		# 单对角线配对（B8b 教训）
+		var stride: int = faces * 2
+		for s2 in ckeys - 1:
+			var v0 := base + s2 * stride
+			for f in faces:
+				var q := v0 + f * 2
+				cross_indices.append(q)
+				cross_indices.append(q + stride)
+				cross_indices.append(q + 1)
+				cross_indices.append(q + 1)
+				cross_indices.append(q + stride)
+				cross_indices.append(q + stride + 1)
+	out["cross_vertices"] = vertices
+	out["cross_normals"] = normals
+	out["cross_uvs"] = uvs
+	out["cross_uv2s"] = uv2s
 	out["cross_colors"] = colors
 	out["cross_indices"] = cross_indices
 

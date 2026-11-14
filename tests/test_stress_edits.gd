@@ -89,5 +89,15 @@ func run() -> void:
 		var a := ChunkMesher.build_mesh_arrays(registry, chunk, nb)
 		var b := ChunkMesher.build_mesh_arrays(registry, chunk, nb)
 		check(a.hash() == b.hash(), "终态确定性：两次构建一致")
+	# 等在途网格 worker 退出再 free（正被调用/发射的对象不能立即
+	# free——曾间歇报 "Attempted to free a locked object"；多一帧
+	# 缓冲让分发中的信号落地）。process_frame 是 SceneTree 信号，
+	# RefCounted 用例须经注入的 tree_root 取树——裸 await 会 parse error
+	var tree := tree_root.get_tree()
+	var guard := 0
+	while manager.in_flight_count() > 0 and guard < 200:
+		await tree.process_frame
+		guard += 1
+	await tree.process_frame
 	manager.free()
 	renderer.free()

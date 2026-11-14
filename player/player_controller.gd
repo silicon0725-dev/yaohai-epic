@@ -340,6 +340,11 @@ func _physics_process(delta: float) -> void:
 		if Input.is_physical_key_pressed(KEY_SPACE):
 			velocity.y = move_toward(velocity.y, SWIM_UP_SPEED, 24.0 * delta)
 		_coyote = 0.0
+		# 游泳中每帧同步按键记忆并丢弃跳缓冲：Space 在水里语义是上浮，
+		# 否则入水前的 _space_prev 冻结到出水瞬间——stale 边沿会误触发
+		# 短跳 cut（削掉出水上浮速度）或跳缓冲（审查修复 P2）
+		_jump_buf = 0.0
+		_space_prev = Input.is_physical_key_pressed(KEY_SPACE)
 	else:
 		var space := Input.is_physical_key_pressed(KEY_SPACE)
 		if space and not _space_prev:

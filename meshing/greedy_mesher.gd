@@ -22,33 +22,43 @@ static func build_mesh_arrays(
 		registry: VoxelRegistry,
 		chunk: ChunkData,
 		neighbors: Array,
-		water_levels: Variant = null
+		water_levels: Variant = null,
+		grass_detail: int = 2,
+		states_snap: Variant = null
 ) -> Dictionary:
-	var native := NativeMeshBridge.build(true, registry, chunk, neighbors)
+	var native := NativeMeshBridge.build(true, registry, chunk, neighbors,
+			null, grass_detail, states_snap)
 	if not native.is_empty():
 		if chunk.block_ids.has(VoxelTypes.WATER_ID):
 			var water := NativeMeshBridge.build_water(chunk, neighbors, water_levels)
 			if water.is_empty():
-				return _build_gd(registry, chunk, neighbors, water_levels)
+				return _build_gd(registry, chunk, neighbors,
+						water_levels, grass_detail, states_snap)
 			native.merge(water)
 		return native
 	# C# 原生路径（阶段 E）：含水区块也由 C# 水通道补齐（上方已处理），
 	# 走到这里的只剩 C# 不可用——GDScript 回退
-	return _build_gd(registry, chunk, neighbors)
+	return _build_gd(registry, chunk, neighbors, water_levels,
+			grass_detail, states_snap)
 
 
 static func _build_gd(
 		registry: VoxelRegistry,
 		chunk: ChunkData,
 		neighbors: Array,
-		water_levels: Variant = null
+		water_levels: Variant = null,
+		grass_detail: int = 2,
+		states_snap: Variant = null
 ) -> Dictionary:
+	# states_snap：worker 的 states 深拷贝（P1-5）；null=用 chunk 本体
+	var states: Dictionary = states_snap if states_snap is Dictionary 			else chunk.sparse_block_states
 	assert(chunk.dimensions.x == chunk.dimensions.y
 			and chunk.dimensions.y == chunk.dimensions.z, "仅支持立方体区块")
 	var s := chunk.dimensions.x
 	var tables := ChunkMesher.build_lookup_tables(registry)
 	var solid_by_id: PackedByteArray = tables["solid"]
 	var occludes_by_id: PackedByteArray = tables["occludes"]
+	var render_kind: PackedByteArray = tables["render_kind"]
 	var textures_by_id: Array = tables["textures"]
 	var padded := ChunkMesher.build_padded_cache(chunk, neighbors)
 
@@ -69,7 +79,7 @@ static func _build_gd(
 	var light_padded := ChunkMesher.build_light_padded(chunk, neighbors)
 	# 无状态区块走纯查表快路径（_face_tile 内的 get_state 分支与
 	# is_empty 查询在 4096 格 × 6 面主循环里是纯开销）
-	var has_states := not chunk.sparse_block_states.is_empty()
+	var has_states := not states.is_empty()
 
 	# 轴循环：U/V 取循环序（x: u=y,v=z；y: u=z,v=x；z: u=x,v=y），
 	# 保证 cross(U, V) 恒指向 +axis（绕序规则见 _emit_quad）
@@ -112,7 +122,8 @@ static func _build_gd(
 					# 面剔除同语义；占位对邻居透明由 occludes 表承担）。
 					# 曾缺此判定：贪心模式下 BRANCH 占位被渲染成实心块
 					if a_real and a != VoxelTypes.BRANCH_ID \
-							and solid_by_id[a] == 1 and occludes_by_id[b] == 0:
+							and solid_by_id[a] == 1 and occludes_by_id[b] == 0 \
+							and render_kind[a] != ChunkMesher.RENDER_PLANT:
 						# a 的 +axis 面（状态感知贴图，§4.3）
 						if has_states:
 							var local_a := Vector3i.ZERO
@@ -120,20 +131,64 @@ static func _build_gd(
 							local_a[u_axis] = u
 							local_a[v_axis] = v
 							encoded = _face_tile(chunk, textures_by_id,
-									tile_rows, a, local_a, axis, true) + 1
+									tile_rows, a, local_a, axis, true,
+									states) + 1
 						else:
 							encoded = int(tile_rows[a][axis * 2]) + 1
 					elif b_real and b != VoxelTypes.BRANCH_ID \
-							and solid_by_id[b] == 1 and occludes_by_id[a] == 0:
+							and solid_by_id[b] == 1 and occludes_by_id[a] == 0 \
+							and render_kind[b] != ChunkMesher.RENDER_PLANT:
 						if has_states:
 							var local_b := Vector3i.ZERO
 							local_b[axis] = boundary
 							local_b[u_axis] = u
 							local_b[v_axis] = v
 							encoded = -(_face_tile(chunk, textures_by_id,
-									tile_rows, b, local_b, axis, false) + 1)
+									tile_rows, b, local_b, axis, false,
+									states) + 1)
 						else:
 							encoded = -(int(tile_rows[b][axis * 2 + 1]) + 1)
+					# BetterGrassify 草坡融合 + 交界过渡变体（canFullyConnect
+					# = relative(face).below()）：发射方草的暴露水平面，
+					# 斜下格是草 → 顶面 tile；否则切向邻面 blend → 贴图对应
+					# 侧草垂带变体（encoded=tile 下标，换值后不同条件天然
+					# 不合并；flip：positive 面 axis0=true/axis2=false，
+					# negative 反之——与面剔除主循环同映射）
+					if axis != 1 and encoded != 0:
+						var owner: int = a if encoded > 0 else b
+						if owner == VoxelTypes.GRASS_ID:
+							var sign := 1 if encoded > 0 else -1
+							var nb_idx: int = idx_b if encoded > 0 else idx_a
+							if padded[nb_idx - ps] == VoxelTypes.GRASS_ID:
+								encoded = sign * (int(
+										tile_rows[VoxelTypes.GRASS_ID][2]) + 1)
+							else:
+								var owner_idx: int = idx_a \
+										if encoded > 0 else idx_b
+								var out_off: int = stride_axis \
+										if encoded > 0 else -stride_axis
+								var t_stride: int = ps * ps \
+										if axis == 0 else 1
+								var flip: bool = (encoded > 0) == (axis == 0)
+								var variant := 0
+								for sgn in [-1, 1]:
+									var nb2: int = owner_idx + sgn * t_stride
+									if padded[nb2] == VoxelTypes.GRASS_ID \
+											and padded[nb2 + out_off - ps] \
+											== VoxelTypes.GRASS_ID:
+										if (sgn > 0) == flip:
+											variant |= 1
+										else:
+											variant |= 2
+								if variant != 0:
+									var vname: String = String(
+											textures_by_id[
+											VoxelTypes.GRASS_ID].get(
+											["side_u0", "side_u1",
+											"side_u01"][variant - 1], ""))
+									var vt := TextureAtlasLoader.tile_grid(vname)
+									encoded = sign * (vt.x + vt.y
+											* TextureAtlasLoader.COLS + 1)
 					mask[row + u] = encoded
 					if encoded != 0:
 						has_any = true
@@ -191,6 +246,38 @@ static func _build_gd(
 	# 水走独立半透明表面（与面剔除同一条水通道，不参与贪心合并）
 	var wc := chunk.chunk_coord
 	var wd := chunk.dimensions
+	# 植物+草顶密叶（与 ChunkMesher 面剔除同源发射器：渲染表现
+	# 与面剔除模式一致——贪心只合并不透明地形面）
+	for z in s:
+		for y in s:
+			for x in s:
+				var pidx := (z + 1) * ps * ps + (y + 1) * ps + (x + 1)
+				var bid: int = padded[pidx]
+				if render_kind[bid] == ChunkMesher.RENDER_PLANT:
+					if bid == VoxelTypes.TALL_GRASS_ID:
+						# 高草株：×3 高叶簇（与 ChunkMesher 面剔除同源）
+						ChunkMesher.append_grass_blades(result, x, y, z,
+								light_padded, ps, pidx, inv_cols, inv_rows,
+								wc.x * wd.x + x, wc.z * wd.z + z,
+								ChunkMesher.TALL_PLANT_N,
+								ChunkMesher.TALL_PLANT_MULT,
+								ChunkMesher.TALL_PLANT_Y0,
+								ChunkMesher.TALL_W_MULT)
+					else:
+						ChunkMesher.append_plant_faces(result, x, y, z,
+								textures_by_id[bid], light_padded, ps, pidx,
+								inv_cols, inv_rows,
+								wc.x * wd.x + x, wc.z * wd.z + z)
+				elif bid == VoxelTypes.GRASS_ID:
+					var up_id: int = padded[pidx + ps]
+					# 树冠/枝占位下方也发地毯叶（B9d——naive 同步）
+					if up_id == VoxelTypes.AIR_ID \
+							or render_kind[up_id] == ChunkMesher.RENDER_PLANT \
+							or up_id == VoxelTypes.BRANCH_ID \
+							or up_id == VoxelTypes.LEAVES_ID:
+						ChunkMesher.append_grass_blades(result, x, y, z,
+								light_padded, ps, pidx, inv_cols, inv_rows,
+								wc.x * wd.x + x, wc.z * wd.z + z)
 	ChunkMesher.append_water_faces(padded, ps, result,
 			water_levels if water_levels != null
 					else ChunkMesher.collect_water_levels_world(chunk, neighbors),
@@ -204,10 +291,11 @@ static func _build_gd(
 ##（与面剔除实现共用规则）。
 static func _face_tile(
 		chunk: ChunkData, textures_by_id: Array, tile_lookup: Array,
-		block_id: int, local: Vector3i, face_axis: int, positive: bool
+		block_id: int, local: Vector3i, face_axis: int, positive: bool,
+		states: Dictionary
 ) -> int:
-	if not chunk.sparse_block_states.is_empty():
-		var state: Dictionary = chunk.get_state(local)
+	if not states.is_empty():
+		var state: Dictionary = states.get(local, {})
 		if not state.is_empty():
 			var normal := Vector3i.ZERO
 			normal[face_axis] = 1 if positive else -1

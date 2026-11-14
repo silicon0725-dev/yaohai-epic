@@ -84,6 +84,12 @@ static func _remove_tree(path: String) -> void:
 	if not path.begins_with("user://"):
 		push_error("拒绝删除 user:// 之外的路径: %s" % path)
 		return
+	# 防御共享目录（审查修复 P2）：user:// 根与存档父目录 user://saves
+	# 之下还有其他存档/用户文件，递归删除会波及——只允许删具体存档目录
+	var relative := path.trim_prefix("user://").strip_edges().trim_suffix("/")
+	if relative.is_empty() or relative == "saves":
+		push_error("拒绝删除共享目录: %s" % path)
+		return
 	var dir := DirAccess.open(path)
 	if dir == null:
 		return
@@ -170,6 +176,10 @@ func save_chunk(chunk: ChunkData) -> bool:
 	if not ensure_dirs():
 		return false
 	var payload := ChunkSerializer.serialize(registry, chunk)
+	if payload.is_empty():
+		# 序列化失败（如调色板超 255 种）：返回 false 保留旧文件，
+		# 不写 size=0 的容器（读档端会当损坏块丢弃）
+		return false
 	var compressed := payload.compress(FileAccess.COMPRESSION_ZSTD)
 	var container := StreamPeerBuffer.new()
 	container.big_endian = false

@@ -18,6 +18,13 @@ const TILE_NAMES := [
 	"sand", "sandstone", "gravel", "coal_ore", "iron_ore", "leaves",
 	"torch",
 	"lantern",
+	"grass_blade",
+	"grass_tuft",
+	"flower_poppy",
+	"flower_dandelion",
+	"grass_side_u0",
+	"grass_side_u1",
+	"grass_side_u01"
 ]
 
 
@@ -100,8 +107,14 @@ static func build(
 		greedy: bool,
 		registry: VoxelRegistry,
 		chunk: ChunkData,
-		neighbors: Array
+		neighbors: Array,
+		water_levels: Variant = null,
+		grass_detail: int = 2,
+		states_snap: Variant = null
 ) -> Dictionary:
+	# water_levels 占位（水走 build_water 专用通道，调用方签名对齐用）；
+	# grass_detail：草叶距离分级（性能 B9——近 2/中 1/远 0）；
+	# states_snap：worker 的 states 深拷贝（P1-5 并发修复），null=本体
 	if not available():
 		return {}
 	var packed := _pack_neighbors(chunk, neighbors)
@@ -117,6 +130,7 @@ static func build(
 	# 双语言共享同一份输入避免两套 padded 组装逻辑漂移）
 	var light_padded := ChunkMesher.build_light_padded(chunk, neighbors)
 
+	var states_v: Variant = states_snap if states_snap is Dictionary 			else chunk.sparse_block_states
 	var result: Variant
 	if greedy:
 		result = _native.BuildGreedy(
@@ -124,20 +138,20 @@ static func build(
 			chunk.block_ids, neighbor_ids, neighbor_exists,
 			solid, occl,
 			tables["top"], tables["side"], tables["bottom"],
-			chunk.sparse_block_states,
+			states_v,
 			TextureAtlasLoader.COLS, TextureAtlasLoader.ROWS,
 			render_kind,
-			light_padded)
+			light_padded, grass_detail)
 	else:
 		result = _native.BuildNaive(
 			chunk.chunk_coord, chunk.dimensions.x,
 			chunk.block_ids, neighbor_ids, neighbor_exists,
 			solid, occl,
 			tables["top"], tables["side"], tables["bottom"],
-			chunk.sparse_block_states,
+			states_v,
 			TextureAtlasLoader.COLS, TextureAtlasLoader.ROWS,
 			render_kind,
-			light_padded)
+			light_padded, grass_detail)
 	if result == null:
 		return {}
 	return result

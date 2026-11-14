@@ -38,7 +38,11 @@ static func serialize(registry: VoxelRegistry, chunk: ChunkData) -> PackedByteAr
 			slot = slot_of[block_id]
 		else:
 			slot = palette_names.size()
-			assert(slot < 256, "单区块方块种类超过 255，需扩展槽位宽度")
+			if slot >= 256:
+				# assert 在 release 构建被剥离后 slot 截断成错槽位静默写坏
+				# 数据；返回空载荷让调用方按"序列化失败"处理（审查修复 P2）
+				push_error("单区块方块种类超过 255，区块放弃序列化")
+				return PackedByteArray()
 			slot_of[block_id] = slot
 			palette_names.append(registry.name_for_id(block_id))
 		data[i] = slot

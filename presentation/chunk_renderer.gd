@@ -18,6 +18,9 @@ var water_material: Material
 var water_side_material: Material
 ## 树叶镂空材质（cutout 表面；为空时叶面不建独立表面）
 var cutout_material: Material
+## cross 表面材质（草/植物/火把；cull_disabled 双面变体——单绕序
+## 索引配套，性能 B9；为空时回退 cutout_material）
+var cross_material: Material = null
 
 var total_faces := 0
 
@@ -120,7 +123,8 @@ func _apply_mesh_impl(
 	var terrain_mesh: ArrayMesh = null
 	if opaque > 0 or cutout > 0 or cross > 0:
 		terrain_mesh = MeshBuilder.arrays_to_mesh(
-				mesh_arrays, material, null, null, cutout_material, false)
+				mesh_arrays, material, null, null, cutout_material,
+				cross_material, false)
 	var water_mesh: ArrayMesh = null
 	if water > 0 or water_side > 0:
 		water_mesh = MeshBuilder.water_mesh_from_arrays(

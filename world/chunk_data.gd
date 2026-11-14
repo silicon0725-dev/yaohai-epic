@@ -130,13 +130,19 @@ func get_state(local: Vector3i) -> Dictionary:
 
 ## 写入状态键值。推进 edit_serial 并标记待存档（§4.4 过期任务检查）。
 ## 是否使网格过期由调用方决定（朝向影响贴图，容器内容不影响）。
-func set_state(local: Vector3i, key: String, value) -> bool:
+## generated=true：生成期写入（树干 radius 等）——不标记玩家修改/
+## 待存档/serial（否则纯生成区块被持久化：存档膨胀 + 生成器升级后
+## 永不重建——审查修复 P1-4）
+func set_state(local: Vector3i, key: String, value,
+		generated := false) -> bool:
 	if not is_valid_local(local):
 		push_error("ChunkData.set_state 越界: %s in %s" % [local, chunk_coord])
 		return false
 	if not sparse_block_states.has(local):
 		sparse_block_states[local] = {}
 	sparse_block_states[local][key] = value
+	if generated:
+		return true
 	data_modified = true
 	save_needed = true
 	edit_serial += 1

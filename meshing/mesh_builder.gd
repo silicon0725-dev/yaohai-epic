@@ -18,6 +18,7 @@ static func arrays_to_mesh(
 		water_material: Material = null,
 		water_side_material: Material = null,
 		cutout_material: Material = null,
+		cross_material: Material = null,
 		# false 时跳过水/水侧表面（水面反射拆独立 instance 用：
 		# RS layer mask 是 instance 级，镜像相机要单独排除水）
 		include_water: bool = true
@@ -102,9 +103,13 @@ static func arrays_to_mesh(
 				"cutout_indices", PackedInt32Array())
 		mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, cutout_arrays)
 		mesh.surface_set_material(mesh.get_surface_count() - 1, cutout_material)
-	# cross 表面（火把等十字面片）：独立顶点数组（UV 图集空间）+
-	# cutout 材质（alpha 裁切成洞）；索引独立桶，碰撞构建不读
-	if cutout_material != null and mesh_arrays.get("cross_indices",
+	# cross 表面（草叶/植物十字面片）：独立顶点数组 + cutout 材质
+	#（cull_disabled 双面变体优先——网格器单绕序索引依赖双面渲染，
+	# 回退单面 cutout 时背面剔除，审查修复 P1-1：曾误挂 cutout_material
+	# 致草叶半侧不可见）；索引独立桶，碰撞构建不读
+	var cross_mat: Material = cross_material if cross_material != null \
+			else cutout_material
+	if cross_mat != null and mesh_arrays.get("cross_indices",
 			PackedInt32Array()).size() > 0:
 		var cross_arrays := []
 		cross_arrays.resize(Mesh.ARRAY_MAX)
@@ -116,10 +121,17 @@ static func arrays_to_mesh(
 				"cross_uvs", PackedVector2Array())
 		cross_arrays[Mesh.ARRAY_COLOR] = mesh_arrays.get(
 				"cross_colors", PackedColorArray())
+		# UV2 = (风摆权重, 相位)：植物/草叶专用（火把缺省 0=不摆；
+		# terrain_surface 顶点着色器消费）
+		var cuv2: PackedVector2Array = mesh_arrays.get("cross_uv2s",
+				PackedVector2Array())
+		if cuv2.size() == (mesh_arrays.get("cross_vertices",
+				PackedVector3Array()) as PackedVector3Array).size():
+			cross_arrays[Mesh.ARRAY_TEX_UV2] = cuv2
 		cross_arrays[Mesh.ARRAY_INDEX] = mesh_arrays.get(
 				"cross_indices", PackedInt32Array())
 		mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, cross_arrays)
-		mesh.surface_set_material(mesh.get_surface_count() - 1, cutout_material)
+		mesh.surface_set_material(mesh.get_surface_count() - 1, cross_mat)
 	return mesh
 
 

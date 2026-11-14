@@ -40,6 +40,12 @@ const NativeTerrainBridge := preload("res://meshing/native_terrain_bridge.gd")
 ## 玩家编辑的区块集合（插队重网格：入队绕过 max_in_flight+2、
 ## 提交最优先）——放置/挖掘的视觉响应曾排在流式任务后面=延迟
 var _edit_dirty := {}
+## 草叶距离分级（性能 B9/B10b）：coord → 构建时档位。跨列时对比
+## 新旧档位重排草区块（mesh_dirty 通用路径自动入队）
+var _chunk_grass_detail := {}
+## 降档重排待办（升档立即、降档静默 3s 合并——跑动不反复重建）
+var _detail_demote: Array = []
+var _detail_demote_at := 0
 const EDIT_BYPASS_IN_FLIGHT := 2
 ## 每帧最多提交的生成结果（提交成本低，可以放宽）。
 @export var gen_commit_budget := 8
@@ -134,6 +140,12 @@ func _exit_tree() -> void:
 
 
 func _process(_delta: float) -> void:
+	if _detail_demote.size() > 0 			and Time.get_ticks_msec() >= _detail_demote_at:
+		for coord in _detail_demote:
+			var dchunk: ChunkData = world.chunks.get(coord)
+			if dchunk != null and dchunk.state == ChunkState.State.ACTIVE:
+				dchunk.mesh_dirty = true
+		_detail_demote.clear()
 	_poll_jobs()
 	if focus != null:
 		_update_streaming()
@@ -232,12 +244,16 @@ func load_column_now(column: Vector2i) -> void:
 		if chunk == null or not chunk.mesh_dirty:
 			continue
 		var arrays := {}
+		var grass_detail := _grass_detail_for(coord, _focus_column())
+		_chunk_grass_detail[coord] = grass_detail
 		if use_greedy_meshing:
 			arrays = GreedyMesher.build_mesh_arrays(
-					registry, chunk, world.collect_neighbors(coord))
+					registry, chunk, world.collect_neighbors(coord),
+					null, grass_detail)
 		else:
 			arrays = ChunkMesher.build_mesh_arrays(
-					registry, chunk, world.collect_neighbors(coord))
+					registry, chunk, world.collect_neighbors(coord),
+					null, grass_detail)
 		renderer.apply_mesh(coord, arrays, chunk.collision_dirty)
 		chunk.mesh_dirty = false
 		chunk.collision_dirty = false
@@ -311,6 +327,7 @@ func _update_streaming() -> void:
 			_stream_center = center
 			_ensure_collision_ring(center)
 			_prune_band_cache(center)
+			_refresh_grass_detail(center)
 		_stream_layer = layer
 		_stream_cursor = 0  # 带变化：完整列可能重新缺层
 		# 带扩展新含入的 DATA_READY 缓冲层补网格（曾在 gate 中清了
@@ -562,14 +579,26 @@ func _enqueue_mesh(coord: Vector3i) -> void:
 	for i in 27:
 		var neighbor: ChunkData = neighbors[i]
 		serials[i] = neighbor.edit_serial if neighbor != null else -1
+	# 草叶距离分级（性能 B9/B9c/B10b）：构建时按与焦点的 chunk 距离
+	# 定档；跨列时 _refresh_grass_detail 重排档位变化的草区块（曾
+	# "移动不重分级"被用户实机打脸——走近的区块保持旧低档直到编辑
+	# 触发重建才更新）
+	var grass_detail := _grass_detail_for(coord, _focus_column())
+	_chunk_grass_detail[coord] = grass_detail
 	var job := {
 		"coord": coord,
 		"neighbors": neighbors,
 		"serials": serials,
+		"grass_detail": grass_detail,
 		# 主线程预收集水位表：worker 侧 collect 遍历 sparse_block_states
 		# Dictionary，与主线程水位 tick 的增删并发可致哈希表损坏
 		#（审查发现）；PackedArray 撕裂由 serial 比对自愈不需快照
 		"water_levels": ChunkMesher.collect_water_levels_world(chunk, neighbors),
+		# 状态字典快照（审查修复 P1-5）：worker 读活字典与主线程
+		# set_state 增删并发可致哈希损坏（水位表同类问题先例）；构建
+		# 期间 worker 换用快照，事后恢复（期间主线程写入走 live 引用
+		# + edit_serial 过期重排自愈——同 block_ids 语义）
+		"states": chunk.sparse_block_states.duplicate(true),
 		"result": null,
 		# 入队时是否已 ACTIVE（重网格）：激活回调只该首次触发
 		"was_active": chunk.state == ChunkState.State.ACTIVE,
@@ -586,12 +615,18 @@ func _enqueue_mesh(coord: Vector3i) -> void:
 
 
 func _mesh_job(job: Dictionary, chunk: ChunkData) -> void:
+	# 状态字典快照经参数传入（审查修复 P1-5：worker 读活字典与主线程
+	# set_state 增删并发可致哈希损坏；曾试"换入字段+恢复"方案——共享
+	# 字段切换存在并发窗口，stress 终态确定性测试抓获，弃之）
+	var states_snap: Variant = job.get("states")
 	if use_greedy_meshing:
 		job["result"] = GreedyMesher.build_mesh_arrays(
-				registry, chunk, job["neighbors"], job["water_levels"])
+				registry, chunk, job["neighbors"], job["water_levels"],
+				job.get("grass_detail", 2), states_snap)
 	else:
 		job["result"] = ChunkMesher.build_mesh_arrays(
-				registry, chunk, job["neighbors"], job["water_levels"])
+				registry, chunk, job["neighbors"], job["water_levels"],
+				job.get("grass_detail", 2), states_snap)
 
 
 ## 过期比对覆盖全部 26 邻（曾只查 6 面——水面角点高度/岸衰减与
@@ -676,6 +711,7 @@ func _restore_dormant(coord: Vector3i) -> ChunkData:
 func _unload_chunk(coord: Vector3i) -> void:
 	if on_chunk_unloaded_cb.is_valid():
 		on_chunk_unloaded_cb.call(coord)
+	_chunk_grass_detail.erase(coord)
 	# 在途任务的结果会在提交时因"不再需要/区块不存在"被丢弃
 	renderer.remove_chunk(coord)
 	var chunk: ChunkData = world.get_chunk(coord)
@@ -761,6 +797,47 @@ func _surface_band(col: Vector2i) -> Vector2i:
 	var band := Vector2i(VoxelCoords.floordiv(lo, s), VoxelCoords.floordiv(hi, s))
 	_surface_bands[col] = band
 	return band
+
+
+## 草叶距离分档（近 2 ≤1 chunk / 中 1 ≤5 / 远 0；B9c 阈值）
+func _grass_detail_for(coord: Vector3i, center: Vector2i) -> int:
+	var d := maxi(absi(coord.x - center.x), absi(coord.z - center.y))
+	return 2 if d <= 1 else (1 if d <= 5 else 0)
+
+
+## 玩家跨列：草分带跟随重排（B10b）。升档立即（走近变密是体验），
+## 降档静默 3s 合并刷（跑动路径不反复重建）；无草区块只改记不动网格
+func _refresh_grass_detail(center: Vector2i) -> void:
+	var demote: Array = []
+	for coord in world.chunks.keys():
+		var old_d: int = _chunk_grass_detail.get(coord, -1)
+		if old_d < 0:
+			continue
+		var d_new := _grass_detail_for(coord, center)
+		if d_new == old_d:
+			continue
+		var chunk: ChunkData = world.chunks[coord]
+		if chunk.state != ChunkState.State.ACTIVE:
+			continue
+		_chunk_grass_detail[coord] = d_new
+		if not chunk.block_ids.has(VoxelTypes.GRASS_ID):
+			continue
+		if d_new > old_d:
+			chunk.mesh_dirty = true
+			# 刚升档立即重烘，从降档队列摘除——否则 3s 后的 flush 把它
+			# 再标脏一次（档位已对齐，纯多余重建）
+			_detail_demote.erase(coord)
+		else:
+			demote.append(coord)
+	# 增量合并而非整体替换：本轮记忆值已更新，若整体替换会丢弃上轮仍在
+	# 3s 窗口内的 pending（且这些 chunk 记忆已等于新档，下轮扫描
+	# d_new == old_d 直接跳过，永远不会被重排——网格停留在旧档）
+	if demote.is_empty():
+		return
+	for coord in demote:
+		if not _detail_demote.has(coord):
+			_detail_demote.append(coord)
+	_detail_demote_at = Time.get_ticks_msec() + 3000
 
 
 func _focus_chunk_y() -> int:

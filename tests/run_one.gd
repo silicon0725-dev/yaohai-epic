@@ -4,14 +4,18 @@
 extends SceneTree
 
 
-func _init() -> void:
+func _initialize() -> void:
+	# 与 run_all_tests 同模式：跑一帧后再执行（_init 期 root 未就绪），
+	# await 兼容异步套件（同步 run() 返回立即值，await 直接继续）
+	await process_frame
 	var args := OS.get_cmdline_user_args()
 	if args.is_empty():
 		push_error("用法: -s tests/run_one.gd -- res://tests/test_xxx.gd")
 		quit(1)
 		return
 	var suite: VoxelTestCase = load(args[0]).new()
-	suite.run()
+	suite.tree_root = root
+	await suite.run()
 	var status := "PASS" if suite.failures.is_empty() else "FAIL"
 	print("[%s] %s — %s" % [status, args[0], suite.summary()])
 	quit(0 if suite.failures.is_empty() else 1)

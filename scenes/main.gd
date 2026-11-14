@@ -127,6 +127,7 @@ func _ready() -> void:
 	chunk_renderer.water_material = materials.create_water_material()
 	chunk_renderer.water_side_material = materials.create_water_side_material()
 	chunk_renderer.cutout_material = materials.material_for("cutout")
+	chunk_renderer.cross_material = materials.material_for("cutout_cross")
 
 	chunk_manager = ChunkManager.new()
 	add_child(chunk_manager)
@@ -357,6 +358,10 @@ const NIGHT_AMBIENT := Color(0.16, 0.19, 0.30)
 const DAY_FOG := Color(0.62, 0.74, 0.90)
 var _time_of_day := 0.1  # 起始上午
 var _sun: DirectionalLight3D
+## u_day / u_wind_time 下发材质表（_update_day_night 首帧惰性收集——
+## renderer 材质 registry 就绪后不再变）
+var _u_day_mats: Array = []
+var _wind_mats: Array = []
 
 
 func _update_day_night(delta: float) -> void:
@@ -396,13 +401,27 @@ func _update_day_night(delta: float) -> void:
 	sky_mat.ground_horizon_color = sky_mat.sky_horizon_color
 	_environment.ambient_light_color = DAY_AMBIENT.lerp(
 			NIGHT_AMBIENT, 1.0 - day01)
-	# u_day 下发（地形双 shader + 水双 shader + 树表面；脏检查省
-	# 自然达成——每帧都在变，过渡期外 day 稳定值重发成本可忽略）
-	for mat in [chunk_renderer.material, chunk_renderer.cutout_material,
-			chunk_renderer.water_material,
-			chunk_renderer.water_side_material]:
-		if mat is ShaderMaterial:
-			mat.set_shader_parameter("u_day", u_day)
+	# u_day 下发（地形双 shader + cross 双面变体 + 水双 shader + 树表面；
+	# 脏检查省自然达成——每帧都在变，过渡期外 day 稳定值重发成本可忽略）
+	# 材质表首帧惰性收集（每帧字面量数组分配曾是隐性 GC 压力）
+	if _u_day_mats.is_empty():
+		for m in [chunk_renderer.material, chunk_renderer.cutout_material,
+				chunk_renderer.cross_material,
+				chunk_renderer.water_material,
+				chunk_renderer.water_side_material]:
+			if m is ShaderMaterial:
+				_u_day_mats.append(m)
+	for mat in _u_day_mats:
+		mat.set_shader_parameter("u_day", u_day)
+	# 植被风摆时间（cutout + cross 双面变体：植物/草叶 UV2 权重驱动）
+	var wind_t := Time.get_ticks_msec() * 0.001
+	if _wind_mats.is_empty():
+		for m in [chunk_renderer.cutout_material,
+				chunk_renderer.cross_material]:
+			if m is ShaderMaterial:
+				_wind_mats.append(m)
+	for wmat in _wind_mats:
+		wmat.set_shader_parameter("u_wind_time", wind_t)
 	tree_manager.set_day_factor(u_day)
 	# 角色化身同通道（天光顶点色 × u_day）
 	if player != null and player.avatar != null:
@@ -466,13 +485,13 @@ func _update_hud() -> void:
 	var hint_line := ("[ " + _hint_text + " ]") if not _hint_text.is_empty() else ""
 	_hud_label.text = "\n".join([
 		hint_line,
-		"BUILD 2026-11-14.移动v2手感 — 若无此行=旧程序未重启",
+		"BUILD 2026-11-14.审查修复1 — 若无此行=旧程序未重启",
 		"Voxel Terrain MVP - Items Layer (inventory + tools + ground drops)",
 		"chunks: %d    faces: %d    in-flight: %d    saved: %d    drops: %d" % [
 			world.chunk_count(), chunk_renderer.total_faces,
 			chunk_manager.in_flight_count(),
 			save_system.saved_chunk_count(), drop_manager.drop_count()],
-		"seed: %d    view: %d chunks (r)    world: infinite horizontal" % [
+		"seed: %d    view: %d chunks    world: infinite horizontal" % [
 			config.world_seed, chunk_manager.view_distance],
 		"Hold LMB mine (drops to ground) | walk over to auto-pickup | RMB place",
 		"Q drop held | Ctrl+Q drop stack | 1-8/wheel select | E inventory | R rotate while dragging",
@@ -672,7 +691,8 @@ func _setup_water_reflection() -> void:
 	# 曾两处各写常量低 1 格——倒影断层三轮实机反馈的根因）
 	water_reflection.setup(
 			[chunk_renderer.water_material, chunk_renderer.water_side_material],
-			[chunk_renderer.material, chunk_renderer.cutout_material],
+			[chunk_renderer.material, chunk_renderer.cutout_material,
+					chunk_renderer.cross_material],
 			_environment,
 			float(generator.sea_level)
 					+ ChunkMesher.water_surface_height(0))

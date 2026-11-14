@@ -94,7 +94,7 @@ public partial class NativeMesher : RefCounted
         Variant statesV,
         int atlasCols, int atlasRows,
         Variant renderKindV,
-        Variant lightPaddedV)
+        Variant lightPaddedV, int grassDetail = 2)
     {
         int[] blockIds = blockIdsV.AsInt32Array();
         int[] neighborIds = neighborIdsV.AsInt32Array();
@@ -118,7 +118,8 @@ public partial class NativeMesher : RefCounted
         List<int> indices = new();
         List<int> cutIndices = new();
         List<Color> colors = new();
-        List<int[]> crossCells = new();
+        List<int[]> plantCells = new();
+        List<int[]> grassTopCells = new();
         int ps = s + 2;
         float invCols = 1f / atlasCols;
         float invRows = 1f / atlasRows;
@@ -134,12 +135,25 @@ public partial class NativeMesher : RefCounted
             // dispatch 表分发（曾硬编码 AIR/WATER/BRANCH/LEAVES ID）：
             // cross = 十字面片（火把），循环后统一发射
             byte kind = renderKind[blockId];
+            // 植物（kind=4）：循环后统一发射 X 十字面片（GD 同序）
+            if (kind == 4)
+            {
+                plantCells.Add(new[] { x, y, z, pidx });
+                continue;
+            }
             // cross 桶（火把）由实体渲染器呈现，网格不出几何（用户实机
             // chunk cross 路径不可见——绕行）
             if (kind == 3)
                 continue;
             if (kind == 0 || solid[blockId] == 0)
                 continue;
+            // 草方块顶露天空/植物/树冠枝占位（地毯全覆盖；B9d：树冠
+            // 遮挡下曾不发叶=树下秃片被误读"渲染剔除扇形"）
+            if (blockId == 1 && (padded[pidx + ps] == 0
+                || renderKind[padded[pidx + ps]] == 4
+                || padded[pidx + ps] == BranchId
+                || padded[pidx + ps] == LeavesId))
+                grassTopCells.Add(new[] { x, y, z, pidx });
             string axisState = hasStates
                 ? GetAxisState(states, new Vector3I(x, y, z))
                 : null;
@@ -151,6 +165,36 @@ public partial class NativeMesher : RefCounted
                     continue;
                 int tile = ResolveTile(blockId, axisState, f,
                     topTile, sideTile, bottomTile);
+                // BetterGrassify 草坡融合 + 交界过渡（canFullyConnect =
+                // relative(face).below()）：草暴露水平面，斜下格是草 →
+                // 顶面 tile；否则切向邻面 blend → 对应侧草垂带变体
+                //（GrassId=1；flip=切向正向走 u 减：+X/-Z 面；GD 同步）
+                if (blockId == 1 && f != 2 && f != 3)
+                {
+                    int outward = FaceNormalSign[f] > 0 ? step : -step;
+                    int diagBelow = pidx + outward - ps;
+                    if (padded[diagBelow] == 1)
+                        tile = topTile[1];
+                    else
+                    {
+                        int tOff = f < 4 ? ps * ps : 1;  // ±X 面切向 z / ±Z 面 x
+                        bool flip = f == 0 || f == 5;
+                        int variant = 0;
+                        for (int sgn = -1; sgn <= 1; sgn += 2)
+                        {
+                            int nb2 = pidx + sgn * tOff;
+                            if (padded[nb2] == 1
+                                && padded[nb2 + outward - ps] == 1)
+                            {
+                                if ((sgn > 0) == flip) variant |= 1;
+                                else variant |= 2;
+                            }
+                        }
+                        if (variant == 1) tile = GrassSideU0;
+                        else if (variant == 2) tile = GrassSideU1;
+                        else if (variant == 3) tile = GrassSideU01;
+                    }
+                }
                 float rx = (tile % atlasCols) * invCols;
                 float ry = (tile / atlasCols) * invRows;
                 Vector3 normal = NormalFor(nAxis, FaceNormalSign[f]);
@@ -177,84 +221,49 @@ public partial class NativeMesher : RefCounted
                 bucket.Add(baze); bucket.Add(baze + 3); bucket.Add(baze + 2);
             }
         }
-        // cross 桶循环后统一发射（与 GDScript 同序：主循环收集）
-        if (crossCells.Count > 0)
+        // cross 桶循环后统一发射（与 GDScript 同序：植物 → 草叶；
+        // 火把由实体渲染器呈现，网格不出几何——torch 发射已删）
+        bool hasCross = plantCells.Count > 0 || grassTopCells.Count > 0;
+        if (hasCross)
         {
             var cVerts = new List<Vector3>();
             var cNorms = new List<Vector3>();
             var cUvs = new List<Vector2>();
+            var cUv2s = new List<Vector2>();
             var cColors = new List<Color>();
             var cIdx = new List<int>();
-            foreach (var cell in crossCells)
-                AppendTorchFaces(cVerts, cNorms, cUvs, cColors, cIdx,
-                    cell[0], cell[1], cell[2], sideTile[padded[cell[3]]],
-                    lightPadded, cell[3], ps, invCols, invRows, atlasCols,
-                    new Vector3I(cell[4], cell[5], cell[6]));
+            int wxBase0 = chunkCoord.X * s;
+            int wzBase0 = chunkCoord.Z * s;
+            foreach (var cell in plantCells)
+                if (padded[cell[3]] == TallGrassId)
+                    // 高草株：×3.6 高叶簇+加宽（GD 同序同参——等价红线）
+                    AppendGrassBlades(cVerts, cNorms, cUvs, cUv2s, cColors,
+                        cIdx, cell[0], cell[1], cell[2], lightPadded,
+                        cell[3], ps, invCols, invRows, atlasCols, atlasRows,
+                        wxBase0 + cell[0], wzBase0 + cell[2],
+                        TallNByDetail[grassDetail], TallPlantMult,
+                        TallPlantY0, TallWMult, grassDetail);
+                else
+                    AppendPlantFaces(cVerts, cNorms, cUvs, cUv2s, cColors, cIdx,
+                        cell[0], cell[1], cell[2], sideTile[padded[cell[3]]],
+                        lightPadded, cell[3], ps, invCols, invRows, atlasCols,
+                        atlasRows, wxBase0 + cell[0], wzBase0 + cell[2]);
+            foreach (var cell in grassTopCells)
+                AppendGrassBlades(cVerts, cNorms, cUvs, cUv2s, cColors, cIdx,
+                    cell[0], cell[1], cell[2], lightPadded, cell[3], ps,
+                    invCols, invRows, atlasCols, atlasRows,
+                    wxBase0 + cell[0], wzBase0 + cell[2],
+                    0, 1.0, 1.0, 1.0, grassDetail);
             return PackResult(verts, norms, uvs, null, indices, -1,
-                cutIndices, colors, cVerts, cNorms, cUvs, cIdx, cColors);
+                cutIndices, colors, cVerts, cNorms, cUvs, cIdx, cColors,
+                cUv2s);
         }
         return PackResult(verts, norms, uvs, null, indices, -1, cutIndices, colors);
     }
 
-    // ---- 细柱小盒（cross 桶；与 GDScript ChunkMesher.append_torch_faces
-    // 逐位一致：2x2x12px 竖柱、FACES 角点表映射、条带 UV、平光取本格） ----
-    private const double TorchX0 = 7.0 / 16.0;
-    private const double TorchX1 = 9.0 / 16.0;
-    private const double TorchY1 = 12.0 / 16.0;
-
-    private static void AppendTorchFaces(
-        List<Vector3> cVerts, List<Vector3> cNorms, List<Vector2> cUvs,
-        List<Color> cColors, List<int> cIdx,
-        int x, int y, int z, int tile,
-        byte[] lightPadded, int pidx, int ps,
-        float invCols, float invRows, int atlasCols,
-        Vector3I attach)
-    {
-        double ox = (tile % atlasCols) * (double)invCols;
-        double oy = (tile / atlasCols) * (double)invRows;
-        Color light = VertexLightColor(lightPadded, pidx, 1, 1, 1, 1);
-        double sideU0 = ox + TorchX0 * (double)invCols;
-        double sideU1 = ox + TorchX1 * (double)invCols;
-        double sideV0 = oy;
-        double sideV1 = oy + TorchY1 * (double)invRows;
-        double topV0 = oy + (11.0 / 16.0) * (double)invRows;
-        // 各面 UV 矩形 [u0,v0,u1,v1]（+y 顶面采焰核；底面省略）
-        double[][] rects = {
-            new[] { sideU0, sideV0, sideU1, sideV1 },  // +x
-            new[] { sideU0, sideV0, sideU1, sideV1 },  // -x
-            new[] { sideU0, topV0, sideU1, sideV1 },   // +y
-            null,                                      // -y（省略）
-            new[] { sideU0, sideV0, sideU1, sideV1 },  // +z
-            new[] { sideU0, sideV0, sideU1, sideV1 },  // -z
-        };
-        // 墙挂偏移（GD torch_attach_offset 同式：-attach*6/16 水平）
-        double offX = -(double)attach.X * (6.0 / 16.0);
-        double offZ = -(double)attach.Z * (6.0 / 16.0);
-        int[] faces = { 0, 1, 2, 4, 5 };
-        foreach (int f in faces)
-        {
-            double[] rect = rects[f];
-            Vector3 normal = NormalFor(FaceNormalAxis[f], FaceNormalSign[f]);
-            int baze = cVerts.Count;
-            for (int c = 0; c < 4; c++)
-            {
-                Vector3 corner = FaceCorners[f][c];
-                // f64 插值后单次 f32 舍入（GD 同路径）
-                cVerts.Add(new Vector3(
-                    (float)(x + TorchX0 + (double)corner.X * (TorchX1 - TorchX0) + offX),
-                    (float)(y + (double)corner.Y * TorchY1),
-                    (float)(z + TorchX0 + (double)corner.Z * (TorchX1 - TorchX0) + offZ)));
-                cNorms.Add(normal);
-                Vector2 cu = FaceCornerUvs[f][c];
-                cUvs.Add(new Vector2(
-                    (float)(rect[0] + (double)cu.X * (rect[2] - rect[0])),
-                    (float)(rect[1] + (double)cu.Y * (rect[3] - rect[1]))));
-                cColors.Add(light);
-            }
-            cIdx.Add(baze); cIdx.Add(baze + 2); cIdx.Add(baze + 1);
-            cIdx.Add(baze); cIdx.Add(baze + 3); cIdx.Add(baze + 2);
-        }
-    }
+    // ---- 植被几何（植物 X 十字 + 草叶簇）已拆至 NativeMesher.Grass.cs
+    //（审查修复第 4 批——partial class 纯移动）；体素光照初始化拆至
+    // NativeMesher.Lighting.cs ----
 
     // ---- Greedy ----
     public Variant BuildGreedy(
@@ -265,7 +274,7 @@ public partial class NativeMesher : RefCounted
         Variant statesV,
         int atlasCols, int atlasRows,
         Variant renderKindV,
-        Variant lightPaddedV)
+        Variant lightPaddedV, int grassDetail = 2)
     {
         byte[] renderKind = (byte[])renderKindV;
         int[] blockIds = blockIdsV.AsInt32Array();
@@ -322,19 +331,62 @@ public partial class NativeMesher : RefCounted
                     }
                     // branchId：动态树占位不作发射方（区块无枝几何）；
                     // 作遮挡方时由 occl 表承担（占位 = 0 透明，不挡邻居面）
-                    if (aReal && renderKind[a] != 0 && solid[a] != 0 && occl[b] == 0)
+                    if (aReal && renderKind[a] != 0 && solid[a] != 0 && occl[b] == 0
+                        && renderKind[a] != 4)
                     {
                         Vector3I local = ComposeLocal(axis, boundary - 1, uAxis, u, vAxis, v);
                         encoded = FaceTile(a, hasStates
                                 ? GetAxisState(states, local) : null, axis, true,
                                 topTile, sideTile, bottomTile) + 1;
                     }
-                    else if (bReal && renderKind[b] != 0 && solid[b] != 0 && occl[a] == 0)
+                    else if (bReal && renderKind[b] != 0 && solid[b] != 0 && occl[a] == 0
+                        && renderKind[b] != 4)
                     {
                         Vector3I local = ComposeLocal(axis, boundary, uAxis, u, vAxis, v);
                         encoded = -(FaceTile(b, hasStates
-                                ? GetAxisState(states, local) : null, axis, false,
-                                topTile, sideTile, bottomTile) + 1);
+                            ? GetAxisState(states, local) : null, axis, false,
+                            topTile, sideTile, bottomTile) + 1);
+                    }
+                    // BetterGrassify 草坡融合 + 交界过渡变体（GD 同步）：
+                    // 斜下格草 → 顶面 tile；否则切向邻面 blend → 垂带变体
+                    //（flip：positive 面 axis0/axis2 = true/false，negative 反之）
+                    if (axis != 1 && encoded != 0)
+                    {
+                        int owner = encoded > 0 ? a : b;
+                        if (owner == 1)
+                        {
+                            int sign = encoded > 0 ? 1 : -1;
+                            int nbIdx = encoded > 0 ? idxB : idxA;
+                            if (padded[nbIdx - ps] == 1)
+                            {
+                                encoded = sign * (topTile[1] + 1);
+                            }
+                            else
+                            {
+                                int ownerIdx = encoded > 0 ? idxA : idxB;
+                                int outOff = encoded > 0
+                                    ? axisStride[axis] : -axisStride[axis];
+                                int tStride = axis == 0 ? ps * ps : 1;
+                                bool flip = (encoded > 0) == (axis == 0);
+                                int variant = 0;
+                                for (int sgn = -1; sgn <= 1; sgn += 2)
+                                {
+                                    int nb2 = ownerIdx + sgn * tStride;
+                                    if (padded[nb2] == 1
+                                        && padded[nb2 + outOff - ps] == 1)
+                                    {
+                                        if ((sgn > 0) == flip) variant |= 1;
+                                        else variant |= 2;
+                                    }
+                                }
+                                if (variant == 1)
+                                    encoded = sign * (GrassSideU0 + 1);
+                                else if (variant == 2)
+                                    encoded = sign * (GrassSideU1 + 1);
+                                else if (variant == 3)
+                                    encoded = sign * (GrassSideU01 + 1);
+                            }
+                        }
                     }
                     mask[u + v * s] = encoded;
                     if (encoded != 0) any = true;
@@ -399,7 +451,51 @@ public partial class NativeMesher : RefCounted
                 }
             }
         }
-        // cross 桶（火把）走实体渲染（TorchRenderer），网格不出几何
+        // cross 桶（火把）走实体渲染（TorchRenderer），网格不出几何。
+        // 植物+草顶密叶（与 GDScript 贪心同序：掩码排除后循环补发）
+        {
+            var cVerts = new List<Vector3>();
+            var cNorms = new List<Vector3>();
+            var cUvs = new List<Vector2>();
+            var cUv2s = new List<Vector2>();
+            var cColors = new List<Color>();
+            var cIdx = new List<int>();
+            int ps2 = s + 2;
+            for (int z = 0; z < s; z++)
+            for (int y = 0; y < s; y++)
+            for (int x = 0; x < s; x++)
+            {
+                int pidx = (z + 1) * ps2 * ps2 + (y + 1) * ps2 + (x + 1);
+                int bid = padded[pidx];
+                if (renderKind[bid] == 4)
+                    if (bid == TallGrassId)
+                        // 高草株 ×3.6 叶簇+加宽（与 GD 贪心/面剔除同源）
+                        AppendGrassBlades(cVerts, cNorms, cUvs, cUv2s, cColors,
+                            cIdx, x, y, z, lightPadded, pidx, ps2,
+                            invCols, invRows, atlasCols, atlasRows,
+                            chunkCoord.X * s + x, chunkCoord.Z * s + z,
+                            TallNByDetail[grassDetail], TallPlantMult,
+                            TallPlantY0, TallWMult, grassDetail);
+                    else
+                        AppendPlantFaces(cVerts, cNorms, cUvs, cUv2s, cColors, cIdx,
+                            x, y, z, sideTile[bid], lightPadded, pidx, ps2,
+                            invCols, invRows, atlasCols, atlasRows,
+                            chunkCoord.X * s + x, chunkCoord.Z * s + z);
+                else if (bid == 1 && (padded[pidx + ps2] == 0
+                    || renderKind[padded[pidx + ps2]] == 4
+                    || padded[pidx + ps2] == BranchId
+                    || padded[pidx + ps2] == LeavesId))
+                    AppendGrassBlades(cVerts, cNorms, cUvs, cUv2s, cColors, cIdx,
+                        x, y, z, lightPadded, pidx, ps2,
+                        invCols, invRows, atlasCols, atlasRows,
+                        chunkCoord.X * s + x, chunkCoord.Z * s + z,
+                        0, 1.0, 1.0, 1.0, grassDetail);
+            }
+            if (cIdx.Count > 0)
+                return PackResult(verts, norms, uvs, uv2s, indices, quads,
+                    null, colors, cVerts, cNorms, cUvs, cIdx, cColors,
+                    cUv2s);
+        }
         return PackResult(verts, norms, uvs, uv2s, indices, quads, null, colors);
     }
 
@@ -743,252 +839,13 @@ public partial class NativeMesher : RefCounted
         return Variant.CreateFrom(result);
     }
 
-    // ---- 体素光照初始化（GDScript VoxelLightSystem.init_chunk_light 等价）----
-
-    /// 全量重算一个区块的光照（1 字节/格：高 4bit 天光、低 4bit 方块光）。
-    /// 只算本块（列直射 + 光源 + 边界种子筛选 BFS + 6 面邻块光播入），
-    /// 返回新 light 数组；跨块播出由 GDScript 主线程路径负责。
-    /// neighborLights：6 面邻块 light（顺序 +x,-x,+y,-y,+z,-z），
-    /// exists=0 的项忽略。opacity/emission 表由桥注入（数值 ID 索引）。
-    /// skyAbove：本块正上方确为天空（世界顶层/垂直加载带顶）时才做
-    /// 列直射 15 起算；否则从 0 起算（下界估计），由上方邻块边界播入
-    /// 补齐——曾无条件 15 起算，深埋于区块顶层的洞穴格被灌满天光
-    ///（合成探针实锤：上方邻块全实心仍得 sky=15）。
-    public Variant InitChunkLight(
-        int s,
-        Variant blockIdsV, Variant opacityV, Variant emissionV,
-        Variant neighborLightsV, Variant neighborExistsV,
-        bool skyAbove)
-    {
-        int[] ids = blockIdsV.AsInt32Array();
-        byte[] opacity = (byte[])opacityV;
-        byte[] emission = (byte[])emissionV;
-        var neighborLights = neighborLightsV.AsGodotArray();
-        byte[] neighborExists = (byte[])neighborExistsV;
-        const int MaxLevel = 15;
-        byte[] light = new byte[s * s * s];
-
-        // 1) 列直射天光：每列自顶向下，opacity 0 保持、逐层衰减、实心断链
-        //    （仅 skyAbove；否则直射由上方邻块面播入 feedDown 规则延续）
-        if (skyAbove)
-        for (int z = 0; z < s; z++)
-        for (int x = 0; x < s; x++)
-        {
-            int level = MaxLevel;
-            for (int y = s - 1; y >= 0; y--)
-            {
-                int i = x + s * (y + s * z);
-                int op = opacity[ids[i]];
-                if (op >= MaxLevel) break;
-                if (op > 0) level = Math.Max(0, level - Math.Max(1, op));
-                if (level <= 1) break;
-                light[i] = (byte)((light[i] & 0x0F) | (level << 4));
-            }
-        }
-        // 2) 方块光光源（本轮表全 0，框架就位）
-        for (int i = 0; i < ids.Length; i++)
-        {
-            int em = emission[ids[i]];
-            if (em > 0)
-                light[i] = (byte)((light[i] & 0xF0) | em);
-        }
-        // 3) 种子筛选（光照不连续边界）+ 单块 BFS——天光通道
-        List<int> skySeeds = new();
-        for (int z = 0; z < s; z++)
-        for (int y = 0; y < s; y++)
-        for (int x = 0; x < s; x++)
-        {
-            int i = x + s * (y + s * z);
-            int v = light[i] >> 4;
-            if (v <= 1) continue;
-            if (IsSkyBorder(ids, opacity, light, s, x, y, z, i, v))
-                skySeeds.Add(i);
-        }
-        BfsSky(ids, opacity, light, s, skySeeds);
-        // 方块光通道种子（发光格）
-        List<int> blkSeeds = new();
-        for (int i = 0; i < ids.Length; i++)
-            if ((light[i] & 0x0F) > 1) blkSeeds.Add(i);
-        BfsBlock(ids, opacity, light, s, blkSeeds);
-        // 4) 6 面邻块边界光播入（邻亮我暗方向的输入；
-        //    feed_down = 邻块在本块上方（axis == +y，即 k=2））
-        for (int k = 0; k < 6; k++)
-        {
-            if (neighborExists[k] == 0) continue;
-            byte[] nbLight = (byte[])neighborLights[k];
-            bool feedDown = k == 2;
-            int ax = k / 2 == 0 ? (k == 0 ? 1 : -1) : 0;
-            int ay = k / 2 == 1 ? (k == 2 ? 1 : -1) : 0;
-            int az = k / 2 == 2 ? (k == 4 ? 1 : -1) : 0;
-            List<int> inSky = new();
-            List<int> inBlk = new();
-            for (int a = 0; a < s; a++)
-            for (int b = 0; b < s; b++)
-            {
-                (int mx, int my, int mz) = FaceCell(s, ax, ay, az, a, b);
-                int mi = mx + s * (my + s * mz);
-                (int nx, int ny, int nz) = MirrorCell(s, ax, ay, az, mx, my, mz);
-                int nbByte = nbLight[nx + s * (ny + s * nz)];
-                int op = opacity[ids[mi]];
-                if (op >= MaxLevel) continue;
-                int nlSky = StepLevel(nbByte >> 4, op, feedDown, true);
-                if (nlSky > (light[mi] >> 4))
-                {
-                    light[mi] = (byte)((light[mi] & 0x0F) | (nlSky << 4));
-                    inSky.Add(mi);
-                }
-                int nlBlk = StepLevel(nbByte & 0x0F, op, feedDown, false);
-                if (nlBlk > (light[mi] & 0x0F))
-                {
-                    light[mi] = (byte)((light[mi] & 0xF0) | nlBlk);
-                    inBlk.Add(mi);
-                }
-            }
-            if (inSky.Count > 0)
-                BfsSky(ids, opacity, light, s, inSky);
-            if (inBlk.Count > 0)
-                BfsBlock(ids, opacity, light, s, inBlk);
-        }
-        return Variant.CreateFrom(light);
-    }
-
-    private static int StepLevel(int lv, int op, bool down, bool sky)
-    {
-        if (sky && down && lv == 15 && op == 0)
-            return 15;
-        return lv - Math.Max(1, op);
-    }
-
-    /// axis 正向端面格（axis 单位分量 ax/ay/az；切向参数 a/b）。
-    private static (int, int, int) FaceCell(
-        int s, int ax, int ay, int az, int a, int b)
-    {
-        if (ax != 0)
-            return (ax > 0 ? s - 1 : 0, a, b);
-        if (ay != 0)
-            return (a, ay > 0 ? s - 1 : 0, b);
-        return (a, b, az > 0 ? s - 1 : 0);
-    }
-
-    /// 我方面格映射到邻块内一格（axis 分量翻面，切向不变）。
-    private static (int, int, int) MirrorCell(
-        int s, int ax, int ay, int az, int x, int y, int z)
-    {
-        if (ax != 0)
-            return (ax > 0 ? 0 : s - 1, y, z);
-        if (ay != 0)
-            return (x, ay > 0 ? 0 : s - 1, z);
-        return (x, y, az > 0 ? 0 : s - 1);
-    }
-
-    /// 天光种子判定：任一邻格满足"我能把它提升"（值差 >= 2，或其为
-    /// 半透明且 v - max(1,op) > 其现值）。
-    private static bool IsSkyBorder(
-        int[] ids, byte[] opacity, byte[] light, int s,
-        int x, int y, int z, int i, int v)
-    {
-        int sy = s;
-        int sz = s * s;
-        if (x > 0 && SeedPairAt(ids, opacity, light, i - 1, v)) return true;
-        if (x < s - 1 && SeedPairAt(ids, opacity, light, i + 1, v)) return true;
-        if (y > 0 && SeedPairAt(ids, opacity, light, i - sy, v)) return true;
-        if (y < s - 1 && SeedPairAt(ids, opacity, light, i + sy, v)) return true;
-        if (z > 0 && SeedPairAt(ids, opacity, light, i - sz, v)) return true;
-        if (z < s - 1 && SeedPairAt(ids, opacity, light, i + sz, v)) return true;
-        return false;
-    }
-
-    private static bool SeedPairAt(
-        int[] ids, byte[] opacity, byte[] light, int iNb, int v)
-    {
-        int nbV = light[iNb] >> 4;
-        if (v - nbV >= 2) return true;
-        int op = opacity[ids[iNb]];
-        return op < 15 && v - Math.Max(1, op) > nbV;
-    }
-
-    /// 单块天光 BFS（线性索引队列，内联步进；不越本块）。
-    private static void BfsSky(
-        int[] ids, byte[] opacity, byte[] light, int s, List<int> queue)
-    {
-        int head = 0;
-        while (head < queue.Count)
-        {
-            int i = queue[head];
-            head++;
-            int lv = light[i] >> 4;
-            if (lv <= 1) continue;
-            int x = i % s;
-            int t = i / s;
-            int y = t % s;
-            int z = t / s;
-            if (x + 1 < s) TrySky(ids, opacity, light, queue, i + 1, lv, false);
-            if (x > 0) TrySky(ids, opacity, light, queue, i - 1, lv, false);
-            if (y + 1 < s) TrySky(ids, opacity, light, queue, i + s, lv, false);
-            if (y > 0) TrySky(ids, opacity, light, queue, i - s, lv, true);
-            if (z + 1 < s) TrySky(ids, opacity, light, queue, i + s * s, lv, false);
-            if (z > 0) TrySky(ids, opacity, light, queue, i - s * s, lv, false);
-        }
-    }
-
-    private static void TrySky(
-        int[] ids, byte[] opacity, byte[] light, List<int> queue,
-        int ni, int lv, bool down)
-    {
-        int op = opacity[ids[ni]];
-        if (op >= 15) return;
-        int nl = lv - Math.Max(1, op);
-        if (down && lv == 15 && op == 0)
-            nl = 15;  // 天光垂直直射
-        if (nl <= 1) return;
-        int cur = light[ni] >> 4;
-        if (cur >= nl) return;
-        light[ni] = (byte)((light[ni] & 0x0F) | (nl << 4));
-        queue.Add(ni);
-    }
-
-    /// 单块方块光 BFS。
-    private static void BfsBlock(
-        int[] ids, byte[] opacity, byte[] light, int s, List<int> queue)
-    {
-        int head = 0;
-        while (head < queue.Count)
-        {
-            int i = queue[head];
-            head++;
-            int lv = light[i] & 0x0F;
-            if (lv <= 1) continue;
-            int x = i % s;
-            int t = i / s;
-            int y = t % s;
-            int z = t / s;
-            void Try(int ni)
-            {
-                int op = opacity[ids[ni]];
-                if (op >= 15) return;
-                int nl = lv - Math.Max(1, op);
-                if (nl <= 1) return;
-                int cur = light[ni] & 0x0F;
-                if (cur >= nl) return;
-                light[ni] = (byte)((light[ni] & 0xF0) | nl);
-                queue.Add(ni);
-            }
-            if (x + 1 < s) Try(i + 1);
-            if (x > 0) Try(i - 1);
-            if (y + 1 < s) Try(i + s);
-            if (y > 0) Try(i - s);
-            if (z + 1 < s) Try(i + s * s);
-            if (z > 0) Try(i - s * s);
-        }
-    }
-
     private static Variant PackResult(
         List<Vector3> verts, List<Vector3> norms, List<Vector2> uvs,
         List<Vector2> uv2s, List<int> indices, int quads,
         List<int> cutoutIndices, List<Color> colors = null,
         List<Vector3> crossVerts = null, List<Vector3> crossNorms = null,
         List<Vector2> crossUvs = null, List<int> crossIndices = null,
-        List<Color> crossColors = null)
+        List<Color> crossColors = null, List<Vector2> crossUv2s = null)
     {
         var result = new Godot.Collections.Dictionary
         {
@@ -1012,6 +869,8 @@ public partial class NativeMesher : RefCounted
             result["cross_normals"] = Variant.CreateFrom(crossNorms.ToArray());
             result["cross_uvs"] = Variant.CreateFrom(crossUvs.ToArray());
             result["cross_colors"] = Variant.CreateFrom(crossColors.ToArray());
+            if (crossUv2s != null && crossUv2s.Count == crossVerts.Count)
+                result["cross_uv2s"] = Variant.CreateFrom(crossUv2s.ToArray());
             result["cross_indices"] = Variant.CreateFrom(crossIndices.ToArray());
         }
         return Variant.CreateFrom(result);

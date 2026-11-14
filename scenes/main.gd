@@ -179,7 +179,7 @@ func _ready() -> void:
 	const TorchRendererScript := preload("res://presentation/torch_renderer.gd")
 	torch_renderer = TorchRendererScript.new()
 	add_child(torch_renderer)
-	torch_renderer.setup(world, VoxelTypes.TORCH_ID)
+	torch_renderer.setup(world, VoxelTypes.TORCH_ID, true)
 	lantern_renderer = preload(
 			"res://presentation/lantern_renderer.gd").new()
 	add_child(lantern_renderer)
@@ -384,6 +384,8 @@ var _sun: DirectionalLight3D
 ## renderer 材质 registry 就绪后不再变）
 var _u_day_mats: Array = []
 var _wind_mats: Array = []
+## 天空色上次写入的 day01（C5 脏检查；-1 = 首帧强制写）
+var _last_sky_day01 := -1.0
 
 
 func _update_day_night(delta: float) -> void:
@@ -414,15 +416,25 @@ func _update_day_night(delta: float) -> void:
 		_sun.light_energy = MOON_ENERGY * smoothstep(0.0, 0.25, melev)
 		_sun.light_color = MOON_SUN
 		_sun.light_volumetric_fog_energy = 0.0  # 夜里没有太阳光束
-	# 天空/环境：昼端取 BSL 白天色，夜端藏青
-	var sky_mat: ProceduralSkyMaterial = _sky.sky_material
-	sky_mat.sky_top_color = DAY_SKY_TOP.lerp(NIGHT_SKY_TOP, 1.0 - day01)
-	sky_mat.sky_horizon_color = DAY_SKY_HORIZON.lerp(
-			NIGHT_SKY_HORIZON, 1.0 - day01)
-	sky_mat.ground_bottom_color = sky_mat.sky_horizon_color
-	sky_mat.ground_horizon_color = sky_mat.sky_horizon_color
-	_environment.ambient_light_color = DAY_AMBIENT.lerp(
-			NIGHT_AMBIENT, 1.0 - day01)
+	# 天空/环境：昼端取 BSL 白天色，夜端藏青。
+	# 脏检查（审查二轮 C5）：这些写入触发 radiance cubemap 重烘
+	#（0.2-0.6ms GPU/次）——day01 变化 >0.002 才写（晨昏约 2-3 次/s，
+	# 白天/深夜稳态零写入；曾每帧重写 4 色全量重烘）
+	if absf(day01 - _last_sky_day01) > 0.002 or _last_sky_day01 < 0.0:
+		_last_sky_day01 = day01
+		var sky_mat: ProceduralSkyMaterial = _sky.sky_material
+		sky_mat.sky_top_color = DAY_SKY_TOP.lerp(NIGHT_SKY_TOP, 1.0 - day01)
+		sky_mat.sky_horizon_color = DAY_SKY_HORIZON.lerp(
+				NIGHT_SKY_HORIZON, 1.0 - day01)
+		sky_mat.ground_bottom_color = sky_mat.sky_horizon_color
+		sky_mat.ground_horizon_color = sky_mat.sky_horizon_color
+		_environment.ambient_light_color = DAY_AMBIENT.lerp(
+				NIGHT_AMBIENT, 1.0 - day01)
+		# 深度雾色=当前地平线天色（大气透视的物理本义：远景混向天色）。
+		# 曾用独立 DAY/NIGHT_FOG 常量 lerp day01——日落时天空已暗红而
+		# 雾还亮蓝白，雾把远山推得比天空亮 = "远处发光"（PIL 真值实测
+		# 山 25 > 天 19 抓到）；直接取 sky_horizon_color 全时段自动同步
+		_environment.fog_light_color = sky_mat.sky_horizon_color
 	# u_day 下发（地形双 shader + cross 双面变体 + 水双 shader + 树表面；
 	# 脏检查省自然达成——每帧都在变，过渡期外 day 稳定值重发成本可忽略）
 	# 材质表首帧惰性收集（每帧字面量数组分配曾是隐性 GC 压力）
@@ -448,12 +460,6 @@ func _update_day_night(delta: float) -> void:
 	# 角色化身同通道（天光顶点色 × u_day）
 	if player != null and player.avatar != null:
 		player.avatar.set_day_factor(u_day)
-	# 深度雾色=当前地平线天色（大气透视的物理本义：远景混向天色）。
-	# 曾用独立 DAY/NIGHT_FOG 常量 lerp day01——日落时天空已暗红而
-	# 雾还亮蓝白，雾把远山推得比天空亮 = "远处发光"（PIL 真值实测
-	# 山 25 > 天 19 抓到）；直接取 sky_horizon_color 全时段自动同步
-	if _environment != null:
-		_environment.fog_light_color = sky_mat.sky_horizon_color
 	if sound_manager != null:
 		sound_manager.set_day01(day01)
 	# 水面反射的太阳方向（day/night 方位不同，随光重发）
@@ -507,7 +513,7 @@ func _update_hud() -> void:
 	var hint_line := ("[ " + _hint_text + " ]") if not _hint_text.is_empty() else ""
 	_hud_label.text = "\n".join([
 		hint_line,
-		"BUILD 2026-11-14.审查修复2 — 若无此行=旧程序未重启",
+		"BUILD 2026-11-14.审查修复3 — 若无此行=旧程序未重启",
 		"Voxel Terrain MVP - Items Layer (inventory + tools + ground drops)",
 		"chunks: %d    faces: %d    in-flight: %d    saved: %d    drops: %d" % [
 			world.chunk_count(), chunk_renderer.total_faces,
@@ -700,7 +706,7 @@ func _setup_cave_fog() -> void:
 	const CaveFogScript := preload("res://systems/lighting/cave_fog.gd")
 	cave_fog = CaveFogScript.new()
 	add_child(cave_fog)
-	cave_fog.setup(world, player)
+	cave_fog.setup(world, player, _environment)
 
 
 ## 水面平面反射（真镜像相机）：实现拆至 presentation/water_reflection.gd

@@ -83,6 +83,9 @@ func _build_model() -> Mesh:
 
 func _spawn(cell: Vector3i, attach: Vector3i) -> void:
 	super._spawn(cell, attach)
-	var mi: MeshInstance3D = _by_cell.get(cell)
-	if mi != null:
-		mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	# MultiMesh 路径（审查二轮 C8）：cast_shadow 在 MultiMeshInstance3D
+	# 上整体关闭（基类 setup）；逐实例路径才需要逐实例设置
+	if not _use_multimesh:
+		var mi: MeshInstance3D = _by_cell.get(cell)
+		if mi != null:
+			mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF

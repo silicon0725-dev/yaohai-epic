@@ -384,8 +384,11 @@ func _physics_process(delta: float) -> void:
 	_update_underwater_tint()
 	if avatar != null:
 		avatar.visible = camera_mode != 0
-		avatar.update_locomotion(velocity, is_on_floor(), deep_water, delta)
-		avatar.set_mining(_mine_active and _mine_seconds != INF)
+		# 第一人称跳过动画驱动（审查二轮 C7：隐藏期间每物理帧全动画
+		# + 骨骼纹理上传 0.3-0.8ms/帧）；切回第三人称当帧立即恢复同步
+		if avatar.visible:
+			avatar.update_locomotion(velocity, is_on_floor(), deep_water, delta)
+			avatar.set_mining(_mine_active and _mine_seconds != INF)
 
 
 # ---- 挖掘（按住累积进度，§8.2 + 物品层规则）----

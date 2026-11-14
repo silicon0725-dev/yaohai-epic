@@ -22,6 +22,8 @@ const HALF_MAX := 6.0
 
 var world: VoxelWorld
 var _target: Node3D
+var _environment: Environment = null  # 体积雾总开关宿主（可为 null）
+var _fog_idle_time := 0.0  # 附近无 FogVolume 的累计时间（滞回关窗）
 var _volumes: Array = []
 var _materials: Array = []
 var _clock := 0.0
@@ -41,9 +43,11 @@ var _scan_active := false
 const SCAN_BUDGET_USEC := 2500
 
 
-func setup(p_world: VoxelWorld, follow: Node3D) -> void:
+func setup(p_world: VoxelWorld, follow: Node3D,
+		p_env: Environment = null) -> void:
 	world = p_world
 	_target = follow
+	_environment = p_env
 	world.block_changed.connect(func(_p, _o, _n): _dirty = true)
 	# 批量通道（树占位清理）同样标脏——挖空树干位置的洞口光要重扫
 	world.blocks_changed_batch.connect(func(_cells): _dirty = true)
@@ -66,6 +70,20 @@ func _process(delta: float) -> void:
 		mat.set_shader_parameter("u_time", _clock)
 	if _target == null or world == null:
 		return
+	# 体积雾滞回开关（审查二轮 C6）：全局 density=0 也在跑 froxel
+	# 积分（桌面 0.3-1.2ms/帧）——附近无 FogVolume（active_count=0
+	# 即玩家周围无洞口雾体积）整层关掉；active>0 立即开，3s 滞回防
+	# 洞口边界进出抖动
+	if _environment != null:
+		if active_count() > 0:
+			_fog_idle_time = 0.0
+			if not _environment.volumetric_fog_enabled:
+				_environment.volumetric_fog_enabled = true
+		else:
+			_fog_idle_time += delta
+			if _fog_idle_time > 3.0 \
+					and _environment.volumetric_fog_enabled:
+				_environment.volumetric_fog_enabled = false
 	_rescan_timer += delta
 	var center := Vector3i(
 			floori(_target.global_position.x),

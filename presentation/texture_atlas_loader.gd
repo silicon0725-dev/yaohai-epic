@@ -107,7 +107,34 @@ static func texture_from_image(image: Image) -> ImageTexture:
 	return ImageTexture.create_from_image(image)
 
 
+## packed 贴图解码缓存（审查二轮 C9：generate_atlas_image 每次
+## 25 次 ResourceLoader.load + get_image 解码；图集预览 dock 文件系统
+## 变化去抖刷新期重复解码全部 tile）。贴图文件/reimport 变化后由
+## dock 调 invalidate_packed_cache() 失效——运行时贴图包不变，命中
+## 即零解码。
+static var _packed_cache := {}
+
+
+## 使 packed 贴图缓存失效（贴图文件/reimport 变化后调用）。
+static func invalidate_packed_cache() -> void:
+	_packed_cache.clear()
+
+
 static func _packed_image(tile_name: String) -> Image:
+	if _packed_cache.has(tile_name):
+		return _packed_cache[tile_name]
+	var img := _load_packed_raw(tile_name)
+	if img != null:
+		# 入缓存前归一（尺寸/格式）——调用方的 resize/convert 变
+		# 幂等 no-op，共享 Image 不被原地变异出第二语义
+		if img.get_size() != Vector2i(TILE_SIZE, TILE_SIZE):
+			img.resize(TILE_SIZE, TILE_SIZE, Image.INTERPOLATE_NEAREST)
+		img.convert(Image.FORMAT_RGBA8)
+	_packed_cache[tile_name] = img
+	return img
+
+
+static func _load_packed_raw(tile_name: String) -> Image:
 	var path := TEXTURE_PACK_DIR + "/" + tile_name + ".png"
 	# 优先走 ResourceLoader：导出包中 png 已导入为 .ctex 资源，
 	# res://…png 不再是原始文件，Image.load_from_file 读不到——曾整包

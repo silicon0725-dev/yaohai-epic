@@ -109,6 +109,10 @@ func _refresh() -> void:
 			or not types_inst.has_method("build_default_registry"):
 		_show_fatal("脚本缺少 generate_atlas_image() / build_default_registry()——接口被改动？")
 		return
+	# 贴图可能已 reimport——失效 packed 解码缓存（审查二轮 C9：
+	# 缓存命中前主动失效，刷新结果反映文件系统最新变化）
+	if atlas_inst.has_method("invalidate_packed_cache"):
+		atlas_inst.invalidate_packed_cache()
 	var image: Image = atlas_inst.generate_atlas_image()
 	if image == null:
 		_show_fatal("generate_atlas_image() 返回空——检查 atlas 加载器。")

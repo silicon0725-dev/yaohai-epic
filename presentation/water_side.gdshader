@@ -56,7 +56,17 @@ varying float shore_fade;
 // Physics Mod 迭代言波（13 次循环，逐行对应 ocean_legacy.glsl 的
 // physics_waveHeight；factor 固定 1.0）。返回约 [-0.5, 0.5] 波高比，
 // 顶点位移 = 返回值 x wave_amplitude。
-float wave_field(vec2 p, float t) {
+// 审查二轮 C1（与 water_surface.gdshader 同步改）：方向常量表 + 解析
+// 梯度（链式雅可比含 drag 项），fragment 不再 3 次数值差分波场。
+const vec2 WAVE_DIRS[13] = vec2[](
+	vec2(0.00000000, 1.00000000), vec2(-0.53657292, 0.84385396),
+	vec2(-0.90557836, 0.42417901), vec2(-0.99177885, -0.12796369),
+	vec2(-0.76825466, -0.64014434), vec2(-0.30481062, -0.95241298),
+	vec2(0.25382336, -0.96725059), vec2(0.73319032, -0.68002350),
+	vec2(0.98358775, -0.18043045), vec2(0.92681851, 0.37550960),
+	vec2(0.58061118, 0.81418097), vec2(0.05308359, 0.99859007),
+	vec2(-0.49102159, 0.87114740));
+float wave_field_grad(vec2 p, float t, out vec2 grad) {
 	const int ITERATIONS = 13;
 	const float DRAG_MULT = 0.048;
 	const float XZ_SCALE = 0.10;  // 波长约 10.5 格（0.035 是 30 格，起伏不可见）
@@ -66,11 +76,11 @@ float wave_field(vec2 p, float t) {
 	const float WEIGHT = 0.8;
 	const float FREQUENCY_MULT = 1.18;
 	const float SPEED_MULT = 1.07;
-	const float ITER_INC = 12.0;
 	const float ADJUSTED = 1.0;
 
 	p = p * XZ_SCALE;
-	float iter = 0.0;
+	mat2 jac = mat2(1.0);  // dp/dp0（缩放坐标系内）
+	vec2 g = vec2(0.0);    // d(height)/dp0
 	float frequency = FREQUENCY;
 	float speed = SPEED;
 	float weight = 1.0;
@@ -79,19 +89,27 @@ float wave_field(vec2 p, float t) {
 	float modified_time = t * TIME_MULT;
 
 	for (int i = 0; i < ITERATIONS; i++) {
-		vec2 direction = vec2(sin(iter), cos(iter));
+		vec2 direction = WAVE_DIRS[i];
 		float x = dot(direction, p) * frequency + modified_time * speed;
 		float wave = exp(sin(x) - 1.0);
 		float result = wave * cos(x);
+		// d(result)/dx = wave*(cos^2 x - sin x)
+		float dres = wave * (cos(x) * cos(x) - sin(x));
 		vec2 force = result * weight * direction;
+		// dh/dp0 += weight * result * frequency * (dir^T · jac)
+		g += (weight * result * frequency) * (direction * jac);
+		// dp'/dp0 = (I - DRAG * weight * dres * freq * dir⊗dir) · jac
+		float drag_c = DRAG_MULT * weight * dres * frequency;
+		jac = (mat2(1.0) - drag_c * mat2(direction * direction.x,
+				direction * direction.y)) * jac;
 		p -= force * DRAG_MULT * ADJUSTED;
 		height += wave * weight;
-		iter += ITER_INC;
 		wave_sum += weight;
 		weight *= WEIGHT;
 		frequency *= FREQUENCY_MULT;
 		speed *= SPEED_MULT;
 	}
+	grad = g / wave_sum * XZ_SCALE;  // 链式补缩放：世界坐标梯度
 	return height / wave_sum - 0.5;
 }
 
@@ -110,8 +128,10 @@ void vertex() {
 	world_pos = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
 	shore_fade = COLOR.r;
 	// 位移钳制 [-0.16, +0.56]（与 water_surface 一致）：上涌为主的涌浪——波谷不深陷（防浅滩
-	// 露底），波峰受钳与岸衰减共同约束
-	float displacement = (wave_field(world_pos.xz, u_time * wave_speed)
+	// 露底），波峰受钳与岸衰减共同约束。梯度在此处弃用（vertex 只需波高）
+	vec2 wg;
+	float displacement = (wave_field_grad(world_pos.xz,
+			u_time * wave_speed, wg)
 			* wave_amplitude * storm_scale
 			+ ripple_height(world_pos.xz) * RIPPLE_VERTEX_DISPLACEMENT)
 			* shore_fade;
@@ -120,15 +140,15 @@ void vertex() {
 
 void fragment() {
 	float t = u_time * wave_speed;
-	// 法线：对波高场数值差分（连续坐标，保持平滑）
+	// 法线：波场解析梯度（wave_field_grad 单次调用；h0 复用给浪尖白沫）
+	// + 涟漪数值差分（纹理采样便宜，保持原观感）
 	float e = 0.09;
-	float h0 = wave_field(world_pos.xz, t);
-	float hx = wave_field(world_pos.xz + vec2(e, 0.0), t);
-	float hz = wave_field(world_pos.xz + vec2(0.0, e), t);
+	vec2 wgrad;
+	float h0 = wave_field_grad(world_pos.xz, t, wgrad);
 	vec3 normal = normalize(vec3(
-			-(hx - h0) * wave_amplitude / e * 6.0 * shore_fade,
+			-wgrad.x * wave_amplitude * 6.0 * shore_fade,
 			1.0,
-			-(hz - h0) * wave_amplitude / e * 6.0 * shore_fade));
+			-wgrad.y * wave_amplitude * 6.0 * shore_fade));
 	// 涟漪法线扰动（叠加到言波法线上，mod 语义：涟漪以法线表现为主）；
 	// 岸边按岸距衰减（位移衰减了，法线扰动同步衰减避免明暗与几何不符）
 	float r0 = ripple_height(world_pos.xz) * shore_fade;

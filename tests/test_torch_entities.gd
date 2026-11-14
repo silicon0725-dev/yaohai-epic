@@ -25,6 +25,7 @@ func run() -> void:
 	_test_attach_offset()
 	_test_chunk_active_scan()
 	_test_flame_surface()
+	_test_multimesh_lifecycle()
 
 
 ## 放置 -> 实体出现；拆除 -> 实体移除
@@ -86,4 +87,39 @@ func _test_flame_surface() -> void:
 	var arrays: Array = mesh.surface_get_arrays(2)
 	var verts: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
 	check_eq(verts.size(), 24, "火焰体盒网格 24 顶点")
+	r.free()
+
+
+## MultiMesh 路径（审查二轮 C8）：spawn/despawn 的末位交换保序、
+## 重定位不涨实例数、贴墙偏移进 transform。断言读本地镜像
+##（_xforms_by_index）——headless 下 MultiMesh 的 get_instance_transform
+## 是渲染服务器存根（读写全零），真机下镜像与 _mm 双写一致
+func _test_multimesh_lifecycle() -> void:
+	var world := _make_world()
+	var r: Node = TorchRendererScript.new()
+	if tree_root != null:
+		tree_root.add_child(r)
+	r.setup(world, VoxelTypes.TORCH_ID, true)
+	for x in 3:
+		world.set_block(Vector3i(x, 1, 0), VoxelTypes.TORCH_ID)
+		r._spawn_deferred(Vector3i(x, 1, 0))
+	check_eq(r.count(), 3, "三实例")
+	check_eq(r._mm.instance_count, 3, "实例缓冲 3")
+	# 拆中间那支：末位实例交换到空槽，缓冲收缩
+	world.set_block(Vector3i(1, 1, 0), VoxelTypes.AIR_ID)
+	check_eq(r.count(), 2, "拆除后 2 实例")
+	check_eq(r._mm.instance_count, 2, "实例缓冲收缩 2")
+	var t0: Transform3D = r._xforms_by_index[0]
+	check(absf(t0.origin.x) < 0.001 and absf(t0.origin.z) < 0.001,
+			"槽 0 位置保持")
+	check_eq(r._by_cell.get(Vector3i(2, 1, 0), -1), 1, "末位实例换到槽 1")
+	var t1: Transform3D = r._xforms_by_index[1]
+	check(absf(t1.origin.x - 2.0) < 0.001, "槽 1 是原末位位置")
+	# attach 后补的重定位：原地更新 transform，实例数不涨
+	world.set_block_state(Vector3i(2, 1, 0), "attach", "1,0,0", true)
+	r._spawn_deferred(Vector3i(2, 1, 0))
+	check_eq(r._mm.instance_count, 2, "重定位不涨实例数")
+	var t1b: Transform3D = r._xforms_by_index[1]
+	check(absf(t1b.origin.x - (2.0 - 6.0 / 16.0)) < 0.001,
+			"重定位带贴墙偏移（实际 %s）" % t1b.origin.x)
 	r.free()

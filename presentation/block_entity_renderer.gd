@@ -8,14 +8,36 @@ extends Node
 
 var world: VoxelWorld
 var _block_id := -1  # 子类 setup 注入（VoxelTypes 常量）
-var _by_cell := {}  # Vector3i -> MeshInstance3D
+## Vector3i -> MeshInstance3D（逐实例路径）或 int 实例下标
+##（MultiMesh 路径——审查二轮 C8：高密度方块实体 200 支 × 3 surface
+## = 600 draw call，MultiMesh 化后 3 个；_by_cell 语义不变，count()/
+## 区块卸载遍历两路径通用）
+var _by_cell := {}
 var _mesh: Mesh
+var _use_multimesh := false
+var _mm: MultiMesh
+var _cell_by_index: Array = []  # MultiMesh 实例下标 -> Vector3i（swap 用）
+## 实例 transform 本地镜像（与 _cell_by_index 平行）：headless 测试下
+## MultiMesh 的 set/get_instance_transform 是渲染服务器存根（读写全
+## 零），swap 只能靠本地数据；真机下与 _mm 双写保持一致
+var _xforms_by_index: Array = []
 
 
-func setup(p_world: VoxelWorld, p_block_id: int) -> void:
+func setup(p_world: VoxelWorld, p_block_id: int,
+		p_use_multimesh := false) -> void:
 	world = p_world
 	_block_id = p_block_id
 	_mesh = _build_model()
+	_use_multimesh = p_use_multimesh and _mesh != null
+	if _use_multimesh:
+		_mm = MultiMesh.new()
+		_mm.transform_format = MultiMesh.TRANSFORM_3D
+		_mm.mesh = _mesh
+		_mm.instance_count = 0
+		var mmi := MultiMeshInstance3D.new()
+		mmi.multimesh = _mm
+		mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		add_child(mmi)
 	world.block_changed.connect(_on_block_changed)
 	# 批量通道（树清理等）：cells 全部已 AIR 化——在册实体即幽灵
 	#（曾不订阅=未来批量删火把留幽灵实体，审查二轮 L1）
@@ -95,19 +117,55 @@ func parse_attach(state: Dictionary) -> Vector3i:
 func _spawn(cell: Vector3i, attach: Vector3i) -> void:
 	if _mesh == null:
 		return
+	var pos := Vector3(cell) + _cell_offset(attach)
+	if _use_multimesh:
+		var xf := Transform3D(Basis(), pos)
+		# 已存在 -> 重定位（延迟生成/状态后补时重入）
+		var idx: int = _by_cell.get(cell, -1)
+		if idx >= 0:
+			_mm.set_instance_transform(idx, xf)
+			_xforms_by_index[idx] = xf
+			return
+		var n := _mm.instance_count
+		_mm.instance_count = n + 1  # 增容保留既有数据（引擎语义）
+		_mm.set_instance_transform(n, xf)
+		_by_cell[cell] = n
+		_cell_by_index.append(cell)
+		_xforms_by_index.append(xf)
+		return
 	# 已存在 -> 重定位（延迟生成/状态后补时重入）
 	var exist: MeshInstance3D = _by_cell.get(cell)
 	if exist != null:
-		exist.position = Vector3(cell) + _cell_offset(attach)
+		exist.position = pos
 		return
 	var mi := MeshInstance3D.new()
 	mi.mesh = _mesh
-	mi.position = Vector3(cell) + _cell_offset(attach)
+	mi.position = pos
 	add_child(mi)
 	_by_cell[cell] = mi
 
 
 func _despawn(cell: Vector3i) -> void:
+	if _use_multimesh:
+		var idx: int = _by_cell.get(cell, -1)
+		if idx < 0:
+			return
+		# 与末位实例交换再截断（保持 0..count-1 连续活跃；比零缩放
+		# 隐藏省实例缓冲与顶点着色成本）。transform 用本地镜像取末位
+		#（headless 下 get_instance_transform 是存根读不回）
+		var last := _xforms_by_index.size() - 1
+		if idx < last:
+			var last_cell: Vector3i = _cell_by_index[last]
+			var last_xf: Transform3D = _xforms_by_index[last]
+			_mm.set_instance_transform(idx, last_xf)
+			_xforms_by_index[idx] = last_xf
+			_cell_by_index[idx] = last_cell
+			_by_cell[last_cell] = idx
+		_xforms_by_index.remove_at(last)
+		_cell_by_index.remove_at(last)
+		_mm.instance_count = last
+		_by_cell.erase(cell)
+		return
 	var mi: MeshInstance3D = _by_cell.get(cell)
 	if mi != null:
 		mi.queue_free()

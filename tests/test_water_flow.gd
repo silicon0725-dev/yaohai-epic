@@ -472,6 +472,11 @@ const WaterRipplesScript := preload("res://world/water_ripples.gd")
 
 func _test_ripple_simulation() -> void:
 	var ripples: Node = WaterRipplesScript.new()
+	# 覆盖休眠窗口：本用例的 230 步阻尼长跑（衰减语义守卫）在强制
+	# 休眠（默认 3s）之后——覆盖为超大值保持连续步进（休眠行为由
+	# 末尾的独立断言守卫）
+	ripples.force_sleep_steps = 100000
+	ripples.idle_sleep_steps = 100000
 	# 注入中心冲量，跑一步：中心应有高度，邻域尚未起波
 	ripples.add_impulse(Vector2.ZERO, 0.8, 0.6)
 	ripples.step()
@@ -503,6 +508,27 @@ func _test_ripple_simulation() -> void:
 		total += absf(v)
 	check(total < peak_total * 0.4,
 			"涟漪能量随阻尼衰减（%.1f -> %.1f）" % [peak_total, total])
+	# 休眠行为守卫（审查二轮 C2）：无冲量 3s 强制休眠——步进空转
+	# 不再推进波场（陆地走路零成本）
+	ripples.force_sleep_steps = 90
+	ripples.idle_sleep_steps = 15
+	var before: PackedFloat32Array = ripples._cur.duplicate()
+	for i in 200:
+		ripples.step()
+	check(ripples._cur == before, "休眠后步进空转（场冻结不耗 CPU）")
+	# 有效冲量唤醒 + 休眠中的弱冲量丢弃
+	ripples.add_impulse(Vector2.ZERO, 0.8, 0.6)
+	ripples.step()
+	check(ripples._idle_steps == 0 and ripples._awake_steps == 1,
+			"有效冲量唤醒（idle=%d awake=%d）" % [ripples._idle_steps,
+			ripples._awake_steps])
+	for i in 91:
+		ripples.step()
+	var frozen: PackedFloat32Array = ripples._cur.duplicate()
+	ripples.add_impulse(Vector2.ZERO, 0.01, 0.3)
+	ripples.step()
+	check(ripples._cur == frozen,
+			"休眠中的弱冲量（<0.05）丢弃不唤醒")
 
 
 ## 掉落物-波浪互动：浮物随波起伏（弹簧跟随贴住波形，不是贴平均

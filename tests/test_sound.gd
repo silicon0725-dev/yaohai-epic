@@ -32,10 +32,12 @@ func run() -> void:
 func _test_early_reflections() -> void:
 	var world: VoxelWorld = make_world(16, [Vector3i.ZERO], 7)
 	var chunk: ChunkData = world.get_chunk(Vector3i.ZERO)
-	# 石墙 x=8（跨整块）：源 (4.5,8.5,8.5) → 听者 (6.5,8.5,8.5)
+	# 石墙 x=8（跨整块）：源 (4.5,8.5,8.5) → 听者 (6.5,8.5,8.5)。
+	# 走 world.set_block（反射面缓存按 edit_generation 失效——chunk
+	# 直写绕过计数会命中旧缓存，审查二轮 B4）
 	for z in 16:
 		for y in 16:
-			chunk.set_block(Vector3i(8, y, z), VoxelTypes.STONE_ID)
+			world.set_block(Vector3i(8, y, z), VoxelTypes.STONE_ID)
 	var events: Array = ReflectionsScript.plan_reflections(world,
 			Vector3(4.5, 8.5, 8.5), Vector3(6.5, 8.5, 8.5))
 	check(events.size() == 1, "单面墙 1 条反射（%d）" % events.size())
@@ -54,7 +56,7 @@ func _test_early_reflections() -> void:
 	# 开放空间：移除墙 → 0 条
 	for z in 16:
 		for y in 16:
-			chunk.set_block(Vector3i(8, y, z), VoxelTypes.AIR_ID)
+			world.set_block(Vector3i(8, y, z), VoxelTypes.AIR_ID)
 	events = ReflectionsScript.plan_reflections(world,
 			Vector3(4.5, 8.5, 8.5), Vector3(6.5, 8.5, 8.5))
 	check(events.is_empty(), "开放空间无反射")

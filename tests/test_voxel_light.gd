@@ -24,10 +24,16 @@ func _make_world(coords: Array, filler: Callable = Callable()) -> VoxelWorld:
 	return world
 
 
+## 当前用例的光照实例（编辑→光照是帧预算异步语义，读断言前经
+## _sky/_blk 自动 flush 拿确定性同步终态——审查二轮 B2 适配）
+var _active_light: Node = null
+
+
 func _make_light(world: VoxelWorld) -> Node:
 	const VoxelLightScript := preload("res://systems/lighting/voxel_light.gd")
 	var light: Node = VoxelLightScript.new()
 	light.setup(world)
+	_active_light = light
 	return light
 
 
@@ -44,6 +50,8 @@ func _activate(world: VoxelWorld, light: Node, coord: Vector3i) -> void:
 
 
 func _sky(world: VoxelWorld, pos: Vector3i) -> int:
+	if _active_light != null:
+		_active_light.flush()
 	var chunk: ChunkData = world.get_chunk(
 			VoxelCoords.world_to_chunk(pos, CHUNK))
 	return chunk.get_sky_light(VoxelCoords.world_to_local(pos, CHUNK))
@@ -342,6 +350,7 @@ func _test_torch_emission() -> void:
 	light.init_chunk_light(chunk, nbs)
 	light.on_chunk_ready(chunk)
 	world.set_block(Vector3i(8, 2, 8), VoxelTypes.TORCH_ID)
+	light.flush()  # 编辑→光照为帧预算异步，断言前同步收敛
 	check(chunk.get_block_light(Vector3i(8, 2, 8)) >= 13,
 			"火把格本光 ~14（实际 %d）" % chunk.get_block_light(Vector3i(8, 2, 8)))
 	check(chunk.get_block_light(Vector3i(10, 2, 8)) >= 11,
@@ -349,6 +358,7 @@ func _test_torch_emission() -> void:
 	check(chunk.get_block_light(Vector3i(8, 2, 13)) <= 9,
 			"5 格外 <= 9 衰减正确（实际 %d）" % chunk.get_block_light(Vector3i(8, 2, 13)))
 	world.set_block(Vector3i(8, 2, 8), VoxelTypes.AIR_ID)
+	light.flush()
 	check(chunk.get_block_light(Vector3i(8, 2, 8)) == 0,
 			"拆除后本格归零（减光回收）")
 	check(chunk.get_block_light(Vector3i(10, 2, 8)) <= 2,

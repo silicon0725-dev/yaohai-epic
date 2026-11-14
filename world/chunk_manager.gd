@@ -336,7 +336,16 @@ func load_column_now(column: Vector2i) -> void:
 # ---- 调度策略（纯函数，可单元测试） ----
 
 ## 圆形视距内的所有水平列，按距中心升序。
+static var _columns_cache_key := Vector3i(1 << 30, 1 << 30, -1)
+static var _columns_cache: Array[Vector2i] = []
+
 static func desired_columns(center: Vector2i, radius: int) -> Array[Vector2i]:
+	# 单槽缓存（审查二轮 A3：1089 列生成+距离排序曾随视线偏转每
+	# 0.2-0.4s 重跑；集合只随 center/radius 变）。返回缓存本体——
+	# 调用方需要再排序时必须 duplicate（原地 sort 会污染缓存）
+	var key := Vector3i(center.x, center.y, radius)
+	if _columns_cache_key == key:
+		return _columns_cache
 	var result: Array[Vector2i] = []
 	for dz in range(-radius, radius + 1):
 		for dx in range(-radius, radius + 1):
@@ -345,6 +354,8 @@ static func desired_columns(center: Vector2i, radius: int) -> Array[Vector2i]:
 	var compare := func(a: Vector2i, b: Vector2i) -> bool:
 		return a.distance_squared_to(center) < b.distance_squared_to(center)
 	result.sort_custom(compare)
+	_columns_cache_key = key
+	_columns_cache = result
 	return result
 
 
@@ -403,12 +414,15 @@ func _update_streaming() -> void:
 			if bchunk.state == ChunkState.State.DATA_READY \
 					and _in_band(coord) and _is_wanted(coord):
 				bchunk.mesh_dirty = true
-	# 2) 列排序缓存：焦点列变化或视线偏转 >~30° 才重建（cos 阈值）
+	# 2) 列排序缓存：焦点列变化或视线偏转 >~60° 才重建（cos 阈值
+	# 0.5——曾 30° 正常转头即触发，1089 列×两次 sort_custom=
+	# 9-16ms 尖刺；desired_columns 生成已单槽缓存，此处只剩 priority
+	# 重排且降频 4×，审查二轮 A3）
 	var view_dir := _view_direction()
 	if center_moved or _sorted_columns.is_empty() \
 			or view_dir == Vector2.ZERO \
-			or _stream_dir.dot(view_dir) < 0.866:
-		var columns := desired_columns(center, view_distance)
+			or _stream_dir.dot(view_dir) < 0.5:
+		var columns := desired_columns(center, view_distance).duplicate()
 		var compare := func(a: Vector2i, b: Vector2i) -> bool:
 			return priority_score(a, center, view_dir, view_bias) \
 					< priority_score(b, center, view_dir, view_bias)

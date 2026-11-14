@@ -91,12 +91,37 @@ static func plan_reflections(world: VoxelWorld, source: Vector3,
 	return events.slice(0, MAX_REFLECTIONS)
 
 
-## 候选反射面收集：源↔听者包围盒（扩 SCAN_MARGIN）内所有
-## "实心格 × 朝空气邻面"。返回
+## 候选反射面收集（审查二轮 B4 重写）：源↔听者包围盒（扩
+## SCAN_MARGIN）内所有"实心格 × 朝空气邻面"——反射面可平行远离
+## 线段（侧墙反射=空间感主要来源），全盒是正确候选域（曾试 DDA
+## 线段带被"单面墙"用例抓到漏面）。性能走三层：①(编辑代,源格,
+## 听格)单槽缓存——挖掘同方块连续音效复用；②盒按 chunk 分桶，
+## 每桶一次字典查+block_ids 数组直读（替代每格 world.get_block 的
+## 坐标换算+字典查，曾盒体积×7 查询=8-30ms 主线程）；③空气侧邻
+## 格跨界才回退 world.get_block。返回
 ## [{cell: Vector3i(实心格), axis: int, plane_d: float(面平面坐标),
 ##   block: int}]
+static var _face_cache_key: Array = []
+static var _face_cache: Array = []
+
 static func _candidate_faces(world: VoxelWorld, source: Vector3,
 		ear: Vector3) -> Array:
+	# 含 world 实例 id：测试连续新建 world，代数+格位可能撞 key
+	var key := [world.get_instance_id(), world.edit_generation,
+			floori(source.x), floori(source.y), floori(source.z),
+			floori(ear.x), floori(ear.y), floori(ear.z)]
+	if _face_cache_key == key:
+		return _face_cache
+	var faces: Array = _scan_faces(world, source, ear)
+	_face_cache_key = key
+	_face_cache = faces
+	return faces
+
+
+static func _scan_faces(world: VoxelWorld, source: Vector3,
+		ear: Vector3) -> Array:
+	var faces := []
+	var cs: int = world.config.chunk_size
 	var mn := Vector3i(mini(floori(source.x), floori(ear.x)),
 			mini(floori(source.y), floori(ear.y)),
 			mini(floori(source.z), floori(ear.z))) 			- Vector3i(SCAN_MARGIN, SCAN_MARGIN, SCAN_MARGIN)
@@ -104,43 +129,74 @@ static func _candidate_faces(world: VoxelWorld, source: Vector3,
 			maxi(floori(source.y), floori(ear.y)),
 			maxi(floori(source.z), floori(ear.z))) 			+ Vector3i(SCAN_MARGIN + 1, SCAN_MARGIN + 1,
 				SCAN_MARGIN + 1)
-	# 走廊粗判（审查 6-F1）：有效 1 阶反射面必在源↔听者直线路径
-	# 走廊内（镜像路径长有界 ⇒ 面离线段不远）——离线段远的格在
-	# get_block 细查（每格 7 次体素查询）前用一次点到线段距离整格
-	# 跳过；曾全盒×6 邻查询=方块音主线程 10-40ms 尖刺
-	var seg := ear - source
-	var seg_len2 := seg.length_squared()
-	var corridor: float = sqrt(seg_len2) * 0.5 + 3.0
-	var corridor2 := corridor * corridor
-	var faces := []
-	for x in range(mn.x, mx.x):
-		for y in range(mn.y, mx.y):
-			for z in range(mn.z, mx.z):
-				var cell := Vector3i(x, y, z)
-				var cc := Vector3(x + 0.5, y + 0.5, z + 0.5)
-				var rel := cc - source
-				var t := clampf(rel.dot(seg) / maxf(seg_len2, 1e-6),
-						0.0, 1.0)
-				var closest := source + seg * t
-				if cc.distance_squared_to(closest) > corridor2:
+	# 三轴按 chunk 分段，段组合=子盒（盒通常跨 1-8 块）
+	var xs := _axis_segments(mn.x, mx.x, cs)
+	var ys := _axis_segments(mn.y, mx.y, cs)
+	var zs := _axis_segments(mn.z, mx.z, cs)
+	for xseg in xs:
+		for yseg in ys:
+			for zseg in zs:
+				var chunk: ChunkData = world.chunks.get(Vector3i(
+						xseg[0], yseg[0], zseg[0]))
+				if chunk == null:
 					continue
-				var b := world.get_block(cell)
-				if not Acoustic.is_opaque_block(b):
-					continue
-				for k in 6:
-					var axis := k / 2
-					@warning_ignore("integer_division")
-					var sign_f := 1.0 if k % 2 == 0 else -1.0
-					var n := Vector3i.ZERO
-					n[axis] = int(sign_f)
-					var air_cell := cell + n
-					if Acoustic.is_opaque_block(
-							world.get_block(air_cell)):
-						continue
-					# 面平面坐标 = 实心格朝空气侧的边界
-					var plane_d: float = float(cell[axis]) + 0.5 							+ 0.5 * sign_f
-					faces.append({
-						"cell": cell, "axis": axis, "sign": sign_f,
-						"plane_d": plane_d, "block": b,
-					})
+				var ids := chunk.block_ids
+				for lz in range(zseg[1], zseg[2]):
+					var zrow: int = cs * cs * lz
+					for ly in range(yseg[1], yseg[2]):
+						var yrow: int = zrow + cs * ly
+						for lx in range(xseg[1], xseg[2]):
+							# 布局 = x + size.x*(y + size.y*z)（同
+							# ChunkData.local_index；曾把 lz 写成加项
+							# =不同格撞索引，探针抓到）
+							var b := ids[yrow + lx]
+							if not Acoustic.is_opaque_block(b):
+								continue
+							var cell := Vector3i(
+									xseg[0] * cs + lx,
+									yseg[0] * cs + ly,
+									zseg[0] * cs + lz)
+							for f in 6:
+								var axis := f / 2
+								@warning_ignore("integer_division")
+								var sign_f := 1.0 if f % 2 == 0 else -1.0
+								var nl := Vector3i(lx, ly, lz)
+								nl[axis] += int(sign_f)
+								var air_opaque := false
+								if nl.x >= 0 and nl.y >= 0 and nl.z >= 0 \
+										and nl.x < cs and nl.y < cs \
+										and nl.z < cs:
+									air_opaque = Acoustic.is_opaque_block(
+											ids[nl.x + cs * (nl.y + cs * nl.z)])
+								else:
+									# 跨块邻格回退全局查
+									air_opaque = Acoustic.is_opaque_block(
+											world.get_block(cell
+											+ Vector3i(
+													1 if axis == 0 else 0,
+													1 if axis == 1 else 0,
+													1 if axis == 2 else 0)
+											* int(sign_f)))
+								if air_opaque:
+									continue
+								# 面平面坐标 = 实心格朝空气侧的边界
+								var plane_d: float = float(cell[axis]) + 0.5 										+ 0.5 * sign_f
+								faces.append({
+									"cell": cell, "axis": axis,
+									"sign": sign_f, "plane_d": plane_d,
+									"block": b,
+								})
 	return faces
+
+
+## 轴区间按 chunk 分段：[(chunk_i, local_begin, local_end), ...]
+static func _axis_segments(beg: int, end: int, cs: int) -> Array:
+	var segs := []
+	var i := VoxelCoords.floordiv(beg, cs)
+	while i * cs < end:
+		var lb := maxi(beg - i * cs, 0)
+		var le := mini(end - i * cs, cs)
+		if le > lb:
+			segs.append([i, lb, le])
+		i += 1
+	return segs

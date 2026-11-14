@@ -40,37 +40,15 @@ func setup(p_world: VoxelWorld) -> void:
 	world.blocks_changed_batch.connect(_on_blocks_changed_batch)
 
 
-## 批量变更（树占位清理）：涉及块+贴边命中邻块做全量重算（精确
-## 终态；C# ~0.5ms/块）——逐格增量 BFS 曾是砍树卡顿主源（审查
-## 3-F3）。重算 diff 无变化则不标脏（树占位不遮光时零成本）
+## 批量变更（树占位清理）：cells 实际所在块去重标脏，重算由帧预算
+## drain 摊（曾同步对 cells 涉及的全部块立即重算——砍树一次 13.5ms，
+## 审查二轮 B5）。邻块影响由 _recalc_one 的变化传播闭环，不必预扩散
 func _on_blocks_changed_batch(cells: Array) -> void:
-	var to_recalc := {}
 	for pos_v in cells:
 		var pos: Vector3i = pos_v
-		var cc := VoxelCoords.world_to_chunk(pos, _chunk_size)
-		to_recalc[cc] = true
-		var local: Vector3i = _to_local(pos)
-		for d in DIRS:
-			var nl: Vector3i = local + d
-			if nl.x < 0 or nl.y < 0 or nl.z < 0 \
-					or nl.x >= _chunk_size or nl.y >= _chunk_size \
-					or nl.z >= _chunk_size:
-				to_recalc[cc + d] = true
-	for cc_v in to_recalc:
-		var coord: Vector3i = cc_v
-		var chunk := _chunk_at(coord)
-		if chunk == null:
-			continue
-		var six: Array = []
-		for d in DIRS:
-			six.append(_chunk_at(coord + d))
-		var before := chunk.light.duplicate()
-		if _init_chunk_light_native(chunk, six, six[2] == null):
-			if chunk.light != before:
-				chunk.mesh_dirty = true
-		else:
-			init_chunk_light(chunk, six)
-			chunk.mesh_dirty = true
+		_light_dirty[VoxelCoords.world_to_chunk(pos, _chunk_size)] = true
+	if not _light_dirty.is_empty():
+		_drain_light(LIGHT_DRAIN_BUDGET_USEC)
 
 
 # ============================================================
@@ -299,148 +277,80 @@ func on_chunk_ready(chunk: ChunkData) -> void:
 
 
 # ============================================================
-# block_changed 增量（主线程）
+# block_changed → 块级脏集合（审查二轮 B1/B2/B7 重构）
 # ============================================================
 
-## 编辑事件队列（帧预算摊销）：单格编辑（挖/放多数 <2ms）入队后
-## 立即 drain 当帧完成（即时手感与测试同步断言语义不变）；大 BFS
-##（火把大范围扩散/成片水）只做首 2ms、余量 _process 续摊——曾单格
-## 同步全量 70ms 尖刺、set_block 耗时 95% 在此（审查 L3/6-F2）。
-## 同格合并保留首事件 old + 最新 new：按序应用下与逐次处理终态
-## 等价（old 对应上一次处理后的光照状态）。
+## 编辑只标块脏（O(1)，含 6 邻扩散）；_process 按预算逐块封盖重算。
+## 演进史：①同步增量 BFS（单格 2-70ms 无界）→ ②格级队列"名义分帧
+## 实际同步"（水流逐格 ×7 块重算 = 溃坝 tick 实测 950ms、96% 在光照，
+## 审查二轮 B1）→ ③本版块级去重：512 格水流合并成 ≤27 块，tick 内
+## 光照开销 O(1)/格，重算摊帧（每帧 2ms 预算）。单次编辑保留同帧
+## 首拍（编辑块即时正确，跨块收敛随后帧）。重算 diff 有变化 →
+## 6 邻重新标脏（传播波迭代至不动点，顺序无关——B7 跨块光缝根除：
+## 先算块用过期邻值后会被邻块的变化再触发，值域 16 级有限必收敛）。
 const LIGHT_DRAIN_BUDGET_USEC := 2000
-var _edit_queue: Array = []  # [pos, ...] FIFO
-var _edit_pending := {}      # pos -> {"old": int, "new": int}
+var _light_dirty := {}  # chunk coord -> true
 
 func _on_block_changed(pos: Vector3i, old_id: int, new_id: int) -> void:
-	if _edit_pending.has(pos):
-		_edit_pending[pos]["new"] = new_id
-	else:
-		_edit_pending[pos] = {"old": old_id, "new": new_id}
-		_edit_queue.append(pos)
-	_drain_edits()
+	if VoxelTypes.light_opacity(old_id) == VoxelTypes.light_opacity(new_id) \
+			and VoxelTypes.light_emission(old_id) \
+					== VoxelTypes.light_emission(new_id):
+		return  # 光照无关替换（草→土等）——入口快判免标脏
+	var coord := VoxelCoords.world_to_chunk(pos, _chunk_size)
+	if _chunk_at(coord) == null:
+		return
+	var was_empty := _light_dirty.is_empty()
+	_light_dirty[coord] = true
+	for d in DIRS:
+		_light_dirty[coord + d] = true
+	if was_empty:
+		# 首拍同步（集合此前空=单次编辑/批量首格）：编辑块最先入
+		# 集合最先重算，视觉即时；后续条目纯标脏由 _process 摊
+		_drain_light(LIGHT_DRAIN_BUDGET_USEC)
 
 
 func _process(_delta: float) -> void:
-	if not _edit_queue.is_empty():
-		_drain_edits()
+	if not _light_dirty.is_empty():
+		_drain_light(LIGHT_DRAIN_BUDGET_USEC)
 
 
-func _drain_edits() -> void:
+## 测试辅助：无预算清空脏集合并完成全部重算（断言前调用——
+## 跨块收敛本是多帧异步语义，测试需确定性同步终态）
+func flush() -> void:
+	_drain_light(-1)
+
+
+func _drain_light(budget_usec: int) -> void:
 	var t0 := Time.get_ticks_usec()
-	while not _edit_queue.is_empty():
-		var pos: Vector3i = _edit_queue.pop_front()
-		var e: Dictionary = _edit_pending[pos]
-		_edit_pending.erase(pos)
-		var it0 := Time.get_ticks_usec()
-		_on_block_changed_impl(pos, int(e["old"]), int(e["new"]))
-		var idt := Time.get_ticks_usec() - it0
-		if idt > 5000:
-			print("[perf] light_edit %.1fms at %s (预算外首格)"
-					% [idt * 0.001, pos])
-		if Time.get_ticks_usec() - t0 > LIGHT_DRAIN_BUDGET_USEC:
-			break
+	while not _light_dirty.is_empty():
+		# 集合会在循环内被重插（收敛传播）——逐个取键而非快照遍历
+		var coord: Vector3i = _light_dirty.keys()[0]
+		_light_dirty.erase(coord)
+		_recalc_one(coord)
+		if budget_usec > 0 \
+				and Time.get_ticks_usec() - t0 > budget_usec:
+			return  # 剩余留在集合，下帧续
 
 
-## 编辑格光照封盖重算：本块+6 面邻逐块 C# 全量重算（每块以其现
-## 6 面邻为种子，按序重算两层收敛——编辑只改 1 格，光照跨界最多
-## 1 格深）。diff 有变化才标 mesh_dirty。任一块 C# 不可用即返回
-## false（已重算的块保持精确值，调用方增量算法在其上继续收敛——
-## 封盖兜底同语义，无害）。
-func _recalc_cover_native(chunk: ChunkData) -> bool:
-	var t0 := Time.get_ticks_usec()
-	var coords: Array[Vector3i] = [chunk.chunk_coord]
-	for d in DIRS:
-		coords.append(chunk.chunk_coord + d)
-	for coord in coords:
-		var c := _chunk_at(coord)
-		if c == null:
-			continue
-		var six: Array = []
-		for d in DIRS:
-			six.append(_chunk_at(coord + d))
-		var before := c.light.duplicate()
-		if not _init_chunk_light_native(c, six, six[2] == null):
-			return false
-		if c.light != before:
-			c.mesh_dirty = true
-	var dt := Time.get_ticks_usec() - t0
-	if dt > 5000:
-		print("[perf] light_cover_recalc %.1fms at %s"
-				% [dt * 0.001, chunk.chunk_coord])
-	return true
-
-
-func _on_block_changed_impl(pos: Vector3i, old_id: int, new_id: int) -> void:
-	var old_op := VoxelTypes.light_opacity(old_id)
-	var new_op := VoxelTypes.light_opacity(new_id)
-	var old_em := VoxelTypes.light_emission(old_id)
-	var new_em := VoxelTypes.light_emission(new_id)
-	if old_op == new_op and old_em == new_em:
-		return  # 光照无关的方块替换（如草→土）
-	_dirty_chunks.clear()
-	var local := _to_local(pos)
-	var chunk := _chunk_at(VoxelCoords.world_to_chunk(pos, _chunk_size))
+## 单块封盖重算（C# ~0.13ms p50；GD 回退全量 init 较慢但正确）。
+## diff 无变化不标脏；有变化标 mesh_dirty 并把 6 邻重新入集合
+##（其播种输入含本块新光——迭代至不动点）。
+func _recalc_one(coord: Vector3i) -> void:
+	var chunk := _chunk_at(coord)
 	if chunk == null:
 		return
-	# C# 封盖路径：本块+6 面邻全量重算（精确终态 ~0.5ms/块，7 块
-	# ~3.5ms 有界）。增量 _bfs_world 跨块 BFS 曾无界 2-70ms（火把
-	# 放置实测 70ms，set_block 尖刺 95% 在此——审查 L3）；编辑队列
-	# 的帧预算只在格间生效、拦不住单格大 BFS。GD 回退保留原增量
-	if _recalc_cover_native(chunk):
-		return
-	if new_op > old_op:
-		# 变遮挡（放置/水淹）：两通道回收该格并减光；
-		# 半透明（水/枝）残值由减光后的边界种子重扩散回来
-		var _td := Time.get_ticks_usec()
-		var old_sky := chunk.get_sky_light(local)
-		if old_sky > 0:
-			chunk.set_sky_light(local, 0)
-			_decrease(pos, old_sky, true)
-		var old_blk := chunk.get_block_light(local)
-		if old_blk > 0:
-			chunk.set_block_light(local, 0)
-			_decrease(pos, old_blk, false)
-		_td = Time.get_ticks_usec() - _td
-		if _td > 2000:
-			print("[perf] light_decrease %.1fms at %s" % [_td * 0.001, pos])
-		# 收敛兜底：宽区域逐格封盖时，回灌梯度网的减光波前会在
-		# 高值残留处断链（实测封 5x5 坑残留 sky=12）——对本块做
-		# C# 全量重算（~0.5ms）覆盖为精确值，diff 有变化才标脏
-		var before_light := chunk.light.duplicate()
-		var six := []
-		for d in DIRS:
-			six.append(_chunk_at(chunk.chunk_coord + d))
-		if _init_chunk_light_native(chunk, six, six[2] == null) \
-				and chunk.light != before_light:
-			chunk.mesh_dirty = true
+	var six: Array = []
+	for d in DIRS:
+		six.append(_chunk_at(coord + d))
+	var before := chunk.light.duplicate()
+	if _init_chunk_light_native(chunk, six, six[2] == null):
+		pass  # C# 已覆盖 chunk.light
 	else:
-		# 变通透（挖掘）：6 邻现值作种子重扩散（上方天光直列重灌
-		# 由垂直直射特例自然覆盖）
+		init_chunk_light(chunk, six)  # GD 回退（无 C# 降级形态）
+	if chunk.light != before:
+		chunk.mesh_dirty = true
 		for d in DIRS:
-			var n: Vector3i = pos + d
-			var sky_v := _light_at(n, true)
-			if sky_v > 1:
-				var sp: Array[Vector3i] = [n]
-				var sv: Array[int] = [sky_v]
-				_bfs_world(sp, sv, true)
-			var blk_v := _light_at(n, false)
-			if blk_v > 1:
-				var bp: Array[Vector3i] = [n]
-				var bv: Array[int] = [blk_v]
-				_bfs_world(bp, bv, false)
-	if new_em > old_em:
-		chunk.set_block_light(local, new_em)
-		_mark_dirty(pos)
-		var ep: Array[Vector3i] = [pos]
-		var ev: Array[int] = [new_em]
-		_bfs_world(ep, ev, false)
-	elif new_em < old_em:
-		var old_b := chunk.get_block_light(local)
-		if old_b > 0:
-			chunk.set_block_light(local, 0)
-			_decrease(pos, old_b, false)
-	_flush_dirty()
+			_light_dirty[coord + d] = true
 
 
 # ============================================================

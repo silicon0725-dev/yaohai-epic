@@ -18,6 +18,9 @@ signal block_changed(pos: Vector3i, old_id: int, new_id: int)
 ## 消费方按区域重算（voxel_light 块级全量、cave_fog 标脏），替代
 ## 每格一次的 block_changed（增量 BFS 曾每格 2-7ms——审查 3-F3）
 signal blocks_changed_batch(cells: Array)
+## 方块写入代数（任何写入 +1）——位置类缓存（音效反射面等）的
+## 单一失效来源（审查二轮 B4）
+var edit_generation := 0
 
 ## Vector3i（区块坐标） -> ChunkData
 var chunks := {}
@@ -133,6 +136,7 @@ func set_blocks_batch(cells: Array, id: int) -> bool:
 		_invalidate_affected_meshes(chunk_coord, local, false)
 		written.append(pos)
 	if not written.is_empty():
+		edit_generation += 1
 		blocks_changed_batch.emit(written)
 	return not written.is_empty()
 
@@ -152,6 +156,7 @@ func _set_block_impl(world_pos: Vector3i, id: int, affects_collision := true) ->
 	_invalidate_affected_meshes(chunk_coord, local, affects_collision)
 	if old_id != id:
 		var _te := Time.get_ticks_usec()
+		edit_generation += 1
 		block_changed.emit(world_pos, old_id, id)
 		_te = Time.get_ticks_usec() - _te
 		if _te > 4000:

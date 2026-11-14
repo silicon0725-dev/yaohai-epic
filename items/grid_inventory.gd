@@ -13,6 +13,26 @@ extends RefCounted
 
 signal changed
 
+## 批量事务（审查二轮 D7）：begin/end 之间的 changed 合并为末尾一次
+## ——合成（消耗 N 种材料+产出）曾发 3-5 次，消费者 _refresh_hud
+## 每次 8 轮 hotbar 全扫+背包面板全量重建
+var _batch_depth := 0
+
+
+func begin_batch() -> void:
+	_batch_depth += 1
+
+
+func end_batch() -> void:
+	_batch_depth = maxi(_batch_depth - 1, 0)
+	if _batch_depth == 0:
+		_emit_changed()
+
+
+func _emit_changed() -> void:
+	if _batch_depth == 0:
+		changed.emit()
+
 enum Zone { MAIN, HOTBAR, GEAR }
 
 ## 自动入包（add/can_fit）的寻位顺序：快捷栏 → 主网格（沿用旧槽位
@@ -177,7 +197,7 @@ func add(item_id: int, count: int) -> int:
 				int(spot["x"]), int(spot["y"]), bool(spot["rotated"]))
 		remaining -= put
 	if remaining < count:
-		changed.emit()
+		_emit_changed()
 	return remaining
 
 
@@ -247,7 +267,7 @@ func remove_at_entry(entry: Dictionary, count: int) -> int:
 		_remove_entry(entry)
 	else:
 		entry["count"] = left
-	changed.emit()
+	_emit_changed()
 	return took
 
 
@@ -263,7 +283,7 @@ func apply_starting_kit(kit: Array) -> void:
 
 func clear() -> void:
 	entries.clear()
-	changed.emit()
+	_emit_changed()
 
 
 # ---- 拖拽原语（背包 UI 用；zone 不限，GEAR 可手动放）----
@@ -274,7 +294,7 @@ func pickup(zone: int, x: int, y: int) -> Dictionary:
 	if e.is_empty():
 		return {}
 	_remove_entry(e)
-	changed.emit()
+	_emit_changed()
 	return e
 
 
@@ -308,7 +328,7 @@ func try_drop(entry: Dictionary, zone: int, x: int, y: int,
 		entry["y"] = y
 		entry["rotated"] = rotated
 		entries.append(entry)
-		changed.emit()
+		_emit_changed()
 		return DropResult.PLACED
 	if what == "merge":
 		var target := entry_at_cell(zone, x, y)
@@ -316,7 +336,7 @@ func try_drop(entry: Dictionary, zone: int, x: int, y: int,
 		var moved := mini(limit - int(target["count"]), int(entry["count"]))
 		target["count"] = int(target["count"]) + moved
 		entry["count"] = int(entry["count"]) - moved
-		changed.emit()
+		_emit_changed()
 		return DropResult.MERGED if int(entry["count"]) <= 0 else DropResult.PARTIAL
 	return DropResult.BLOCKED
 

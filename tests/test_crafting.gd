@@ -68,7 +68,12 @@ func _test_can_craft_and_craft(items: ItemRegistry) -> void:
 	inv.add(planks, 2)   # 共 5（拆跨两堆也没关系，计数跨堆）
 	inv.add(stick, 2)
 	check(CraftingRecipes.can_craft(pick_recipe, inv), "材料齐全可合成")
+	# D7 守护：批量事务内消耗+产出只发 1 次 changed（曾 3-5 次，
+	# 每次触发 HUD 全量重建）。lambda 按值捕获——计数走容器引用
+	var fired := [0]
+	inv.changed.connect(func() -> void: fired[0] += 1)
 	check(CraftingRecipes.craft(pick_recipe, inv), "合成成功")
+	check_eq(fired[0], 1, "合成只发 1 次 changed")
 	check_eq(inv.count_of(pick), 1, "产出木镐")
 	check_eq(inv.count_of(planks), 2, "木板剩 2（5-3；跨堆计数消耗正确）")
 	check_eq(inv.count_of(stick), 0, "木棍全消耗")

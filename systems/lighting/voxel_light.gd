@@ -335,6 +335,11 @@ func _drain_light(budget_usec: int) -> void:
 ## 单块封盖重算（C# ~0.13ms p50；GD 回退全量 init 较慢但正确）。
 ## diff 无变化不标脏；有变化标 mesh_dirty 并把 6 邻重新入集合
 ##（其播种输入含本块新光——迭代至不动点）。
+## diff 比较缓冲（单槽复用——重算串行，比较完成后才轮到下一块；
+## 曾每块 duplicate 4KB×2，审查二轮 B3）
+var _before_buf := PackedByteArray()
+
+
 func _recalc_one(coord: Vector3i) -> void:
 	var chunk := _chunk_at(coord)
 	if chunk == null:
@@ -342,12 +347,13 @@ func _recalc_one(coord: Vector3i) -> void:
 	var six: Array = []
 	for d in DIRS:
 		six.append(_chunk_at(coord + d))
-	var before := chunk.light.duplicate()
+	_before_buf.resize(0)
+	_before_buf.append_array(chunk.light)
 	if _init_chunk_light_native(chunk, six, six[2] == null):
-		pass  # C# 已覆盖 chunk.light
+		pass  # C# 已覆盖 chunk.light（新数组实例，与缓冲比较安全）
 	else:
 		init_chunk_light(chunk, six)  # GD 回退（无 C# 降级形态）
-	if chunk.light != before:
+	if chunk.light != _before_buf:
 		chunk.mesh_dirty = true
 		for d in DIRS:
 			_light_dirty[coord + d] = true

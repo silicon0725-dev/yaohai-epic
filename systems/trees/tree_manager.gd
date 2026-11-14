@@ -111,6 +111,7 @@ func setup(p_world: VoxelWorld, p_registry: VoxelRegistry,
 	# static var Callable 可靠（GDScript static var 在 static func 中
 	# 赋值的 Callable 偶发 is_valid()=false）
 	world.block_changed.connect(_on_block_changed)
+	world.blocks_changed_batch.connect(_on_blocks_batch)
 
 
 func _on_block_changed(pos: Vector3i, old_id: int, new_id: int) -> void:
@@ -118,6 +119,16 @@ func _on_block_changed(pos: Vector3i, old_id: int, new_id: int) -> void:
 		on_branch_broken(pos)
 		return
 	_mark_light_dirty(pos, old_id, new_id)
+
+
+## 批量变更（本系统自己的清占位通道）：BRANCH→AIR 不可能（清理前
+## 结构已剪、get_tree_at 为 null），只需光照标脏——树占位（枝/叶
+## opacity=1）AIR 化是遮挡变化，margin=3 档。曾不订阅=砍树清叶后
+## 邻树烘焙光照永不刷新（审查二轮 L1）
+func _on_blocks_batch(cells: Array) -> void:
+	for pos_v in cells:
+		var pos: Vector3i = pos_v
+		_mark_light_dirty(pos, VoxelTypes.LEAVES_ID, VoxelTypes.AIR_ID)
 
 
 ## 光照相关方块变化（放/挖光源、封挡/挖开遮挡）→ 标脏附近树。

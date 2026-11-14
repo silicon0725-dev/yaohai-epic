@@ -73,11 +73,15 @@ static func craft(recipe: Dictionary, inventory) -> bool:
 	if recipe.is_empty() or not can_craft(recipe, inventory):
 		return false
 	var items: ItemRegistry = inventory.item_registry()
+	# 批量事务：消耗 N 种材料+产出发 3-5 次 changed（消费者每次
+	# HUD 全量重建），合并为末尾一次（审查二轮 D7）
+	inventory.begin_batch()
 	for entry: Array in recipe["inputs"]:
 		inventory.remove_item(items.id_for_name(String(entry[0])), int(entry[1]))
 	var output: Array = recipe["output"]
 	var output_id := items.id_for_name(String(output[0]))
 	var leftover: int = inventory.add(output_id, int(output[1]))
+	inventory.end_batch()
 	if leftover > 0:
 		push_warning("背包已满，%d 个合成产物丢失" % leftover)
 	return true

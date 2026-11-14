@@ -17,6 +17,15 @@ func setup(p_world: VoxelWorld, p_block_id: int) -> void:
 	_block_id = p_block_id
 	_mesh = _build_model()
 	world.block_changed.connect(_on_block_changed)
+	# 批量通道（树清理等）：cells 全部已 AIR 化——在册实体即幽灵
+	#（曾不订阅=未来批量删火把留幽灵实体，审查二轮 L1）
+	world.blocks_changed_batch.connect(_on_blocks_batch)
+
+
+## 批量变更：格已全部 AIR 化——在册实体即幽灵，逐格 despawn
+func _on_blocks_batch(cells: Array) -> void:
+	for pos_v in cells:
+		_despawn(pos_v)
 
 
 ## 子类覆盖：构建本方块的实体模型（返回 null 则永不生成）

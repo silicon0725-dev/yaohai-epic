@@ -68,6 +68,7 @@ func run() -> void:
 	_test_vertical_direct_feed_down()
 	_test_activation_order_independent()
 	_test_torch_emission()
+	_test_batch_cross_chunk_consistency()
 	_test_water_attenuates()
 	_test_leaves_attenuate()
 	_test_recompute_idempotent()
@@ -335,6 +336,36 @@ func _test_wide_pit_seal_restores() -> void:
 	check(center <= 1, "封盖后密闭坑中心应全黑，实际 %d" % center)
 	var corner := _sky(world, Vector3i(6, 2, 6))
 	check(corner <= 2, "封盖后坑角落应近全黑，实际 %d" % corner)
+	light.free()
+
+
+## 跨块批量写入的光照一致性（审查二轮 B7 守护）：批量通道只发
+## blocks_changed_batch，块级脏集合+变化传播须迭代收敛到与全量
+## 重算完全一致——曾单遍顺序相关留下跨块 1-2 格永久错光带
+func _test_batch_cross_chunk_consistency() -> void:
+	var world := _make_world([Vector3i.ZERO, Vector3i(1, 0, 0)])
+	var light: Node = _make_light(world)
+	_activate(world, light, Vector3i.ZERO)
+	_activate(world, light, Vector3i(1, 0, 0))
+	# 跨界批量放两根火把（x=15 是 0 号块末列、x=16 是 1 号块首列）
+	world.set_blocks_batch(
+			[Vector3i(15, 8, 8), Vector3i(16, 8, 8)], VoxelTypes.TORCH_ID)
+	light.flush()
+	var got0: PackedByteArray = world.get_chunk(
+			Vector3i.ZERO).light.duplicate()
+	var got1: PackedByteArray = world.get_chunk(
+			Vector3i(1, 0, 0)).light.duplicate()
+	# 全量重算真值（含 emission 与 6 面播种，与增量路径独立）
+	for coord in [Vector3i.ZERO, Vector3i(1, 0, 0)]:
+		var chunk: ChunkData = world.get_chunk(coord)
+		var nbs := []
+		for d in NEIGHBOR_DIRS:
+			nbs.append(world.get_chunk(coord + d))
+		light.init_chunk_light(chunk, nbs)
+	check(world.get_chunk(Vector3i.ZERO).light == got0,
+			"批量跨块写收敛==全量重算（0 号块）")
+	check(world.get_chunk(Vector3i(1, 0, 0)).light == got1,
+			"批量跨块写收敛==全量重算（1 号块）")
 	light.free()
 
 

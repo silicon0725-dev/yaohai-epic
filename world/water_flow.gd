@@ -37,6 +37,9 @@ var _accumulator := 0.0
 func setup(voxel_world: VoxelWorld) -> void:
 	world = voxel_world
 	world.block_changed.connect(_on_block_changed)
+	# 批量通道（树清理等）：无条件扰动入队（评估非水格是廉价 no-op）
+	#——曾不订阅=未来批量写水不流动（审查二轮 L1）
+	world.blocks_changed_batch.connect(_on_blocks_batch)
 
 
 func _process(delta: float) -> void:
@@ -54,6 +57,13 @@ func _on_block_changed(pos: Vector3i, _old_id: int, _new_id: int) -> void:
 		_enqueue(pos + d)
 	_enqueue(pos + UP)
 	_enqueue(pos + DOWN)
+
+
+## 批量变更扰动：与单格同款（自身+6 邻入队）
+func _on_blocks_batch(cells: Array) -> void:
+	for pos_v in cells:
+		var pos: Vector3i = pos_v
+		_on_block_changed(pos, 0, 0)
 
 
 func _enqueue(pos: Vector3i) -> void:

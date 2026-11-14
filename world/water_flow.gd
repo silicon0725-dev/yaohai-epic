@@ -72,14 +72,22 @@ func _enqueue(pos: Vector3i) -> void:
 
 ## 跑一批模拟步（测试可直接调用，不依赖 _process 节拍）。
 ## 返回本 tick 实际发生变更的格数。
+## 双字典轮转（审查二轮 B9）：曾每 tick `_pending.keys()` 全量拷贝
+##（溃坝上万格 = 数万元素 Array 分配）——直接遍历当前字典、顺延格
+## 写入轮转字典，稳态零大分配（MAX_CELLS_PER_TICK 上限语义不变）
+var _pending_spare := {}  # 上一 tick 的字典（复用为下一个 tick 容器）
+
+
 func tick() -> int:
-	var positions: Array = _pending.keys()
-	_pending = {}
+	var cur: Dictionary = _pending
+	_pending = _pending_spare  # 复用（clear 后即空容器）
+	_pending.clear()
+	_pending_spare = cur  # tick 结束后成为新 spare
 	var changes := 0
 	var evaluated := 0
-	for pos in positions:
+	for pos in cur:
 		if evaluated >= MAX_CELLS_PER_TICK:
-			_pending[pos] = true  # 顺延下一 tick
+			_pending[pos] = true  # 顺延下一 tick（写入轮转字典）
 			continue
 		evaluated += 1
 		if _evaluate(pos):

@@ -109,6 +109,7 @@ var _camera: Camera3D
 var _autosave_accumulator := 0.0
 ## 脏块全表扫描分频计数（审查二轮 A1）
 var _scan_tick := 0
+var _unload_tick := 0  # 水平焦点变化计数（卸载/补网格分频，A4）
 # 调度缓存（避免每帧重算）：焦点列未变时跳过卸载扫描；列排序
 # 仅在焦点列变化或视线偏转 >~30° 时重建；已完整列由游标永久跳过
 #（曾每帧 desired_columns 全量生成 + O(n log n) 排序，800 列视距
@@ -394,13 +395,27 @@ func _update_streaming() -> void:
 	var center_moved := center != _stream_center
 	var layer_moved := layer != _stream_layer
 	if center_moved or layer_moved:
-		# 1) 卸载（.keys() 取副本，避免遍历中修改）：水平出视距 + 垂直
-		# 出活跃带（v9；带随玩家层伸缩，含滞回）。焦点未变时跳过——
-		# 新增区块全部来自带内任务提交，不会触发卸载
-		for coord in world.chunks.keys():
-			if should_unload_column(coord, center, view_distance, unload_padding) \
-					or _outside_band(coord):
-				_unload_chunk(coord)
+		# 清理性全表扫描分频（审查二轮 A4）：卸载 + 缓冲层补网格
+		# 两处全表扫（1089 块 × keys() 副本分配）只在水平焦点移动
+		# （走路每 6 格）触发——每 4 次一扫（卸载有 padding 余量、
+		# 补网格列在远处，滞后 18-24 格无感）；垂直层变（带成员
+		# 语义变化）立即扫
+		_unload_tick += 1
+		if layer_moved or _unload_tick % 4 == 0:
+			# 1) 卸载（.keys() 取副本，避免遍历中修改）：水平出视距 +
+			# 垂直出活跃带（v9；带随玩家层伸缩，含滞回）
+			for coord in world.chunks.keys():
+				if should_unload_column(coord, center, view_distance, unload_padding) \
+						or _outside_band(coord):
+					_unload_chunk(coord)
+			# 带扩展新含入的 DATA_READY 缓冲层补网格（曾在 gate 中清了
+			# 脏标记，无其他触发源）。水平过滤 _is_wanted：padding 环
+			# 区块永不需要网格，标脏只会喂活锁（审查 1-F1）
+			for coord in world.chunks:
+				var bchunk: ChunkData = world.chunks[coord]
+				if bchunk.state == ChunkState.State.DATA_READY \
+						and _in_band(coord) and _is_wanted(coord):
+					bchunk.mesh_dirty = true
 		if center_moved:
 			_stream_center = center
 			_ensure_collision_ring(center)
@@ -408,14 +423,6 @@ func _update_streaming() -> void:
 			_refresh_grass_detail(center)
 		_stream_layer = layer
 		_stream_cursor = 0  # 带变化：完整列可能重新缺层
-		# 带扩展新含入的 DATA_READY 缓冲层补网格（曾在 gate 中清了
-		# 脏标记，无其他触发源）。水平过滤 _is_wanted：padding 环
-		# 区块永不需要网格，标脏只会喂活锁（审查 1-F1）
-		for coord in world.chunks:
-			var bchunk: ChunkData = world.chunks[coord]
-			if bchunk.state == ChunkState.State.DATA_READY \
-					and _in_band(coord) and _is_wanted(coord):
-				bchunk.mesh_dirty = true
 	# 2) 列排序缓存：焦点列变化或视线偏转 >~60° 才重建（cos 阈值
 	# 0.5——曾 30° 正常转头即触发，1089 列×两次 sort_custom=
 	# 9-16ms 尖刺；desired_columns 生成已单槽缓存，此处只剩 priority
@@ -570,15 +577,20 @@ func _poll_jobs() -> void:
 	# 全表扫描降频（审查二轮 A1）：每 4 帧一扫（0.6-1.5ms/帧的
 	# 常驻开销 → 均摊 1/4；任务回收/提交仍每帧在上文跑）。玩家编辑
 	# 有 _edit_dirty 插队不依赖此扫描；新置脏最多晚 3 帧入队
+	# 入队限流（审查二轮 A5）：一次扫描曾连入 N 个（每入队 27 邻
+	# collect + states 深拷贝 = 3-10ms 主线程突发）；每帧最多 2 个
+	#（worker 吞吐是瓶颈，入队不减速流式；编辑插队在上文不受限）
 	_scan_tick += 1
 	if _scan_tick % 4 == 0 or not _edit_dirty.is_empty():
+		var enqueued := 0
 		for coord in world.chunks:
-			if in_flight_count() >= max_in_flight:
+			if in_flight_count() >= max_in_flight or enqueued >= 2:
 				break
 			var chunk: ChunkData = world.chunks[coord]
 			if (chunk.mesh_dirty or chunk.collision_dirty) \
 					and not _mesh_by_coord.has(coord):
 				_enqueue_mesh(coord)
+				enqueued += 1
 
 
 ## 玩家编辑（voxel_world.edit_dirty_cb 注入）：该区块优先重网格

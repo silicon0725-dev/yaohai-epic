@@ -66,6 +66,32 @@ var _rng := RandomNumberGenerator.new()
 func setup(p_world: VoxelWorld, p_registry: ItemRegistry) -> void:
 	world = p_world
 	item_registry = p_registry
+	# 休眠掉落的唤醒源（审查二轮 D4）：附近方块变化（支撑被挖/掩埋/
+	# 来水）统一广播——掉落自身不逐个订阅（高频创建/销毁，反复
+	# connect 开销大）
+	world.block_changed.connect(_on_world_edited)
+	world.blocks_changed_batch.connect(_on_world_batch_edited)
+
+
+## 方块变化：唤醒编辑格附近盒内的休眠掉落（xz ±2.5 / y -3.5..+2.5
+## ——覆盖脚下支撑被挖、自身格被放置掩埋、水位漫入）
+func _on_world_edited(pos: Vector3i, _old_id: int, _new_id: int) -> void:
+	_wake_near(pos)
+
+
+func _on_world_batch_edited(cells: Array) -> void:
+	for c in cells:
+		_wake_near(c)
+
+
+func _wake_near(pos: Vector3i) -> void:
+	for drop in _drops:
+		if drop.sleeping:
+			var d := drop.position
+			if absf(d.x - float(pos.x)) <= 2.5 \
+					and absf(d.y - float(pos.y)) <= 3.5 \
+					and absf(d.z - float(pos.z)) <= 2.5:
+				drop.wake_up()
 
 
 func _ready() -> void:
@@ -203,15 +229,28 @@ func _player_center():  # Variant：Vector3 或 null（无有效拾取目标）
 
 
 func _remove_at(index: int) -> void:
-	_drops.remove_at(index)
-	var visual := _visuals[index]
-	_visuals.remove_at(index)
-	_visual_counts.remove_at(index)
-	_was_grounded.remove_at(index)
-	_landing_t.remove_at(index)
-	_landing_theta_from.remove_at(index)
-	_landing_theta_target.remove_at(index)
-	_last_support.remove_at(index)
+	# 尾交换 + pop（审查二轮 D9）：7 平行数组 remove_at(中部) 是
+	# O(n) 移位 ×7；换尾后 remove_at(last) O(1)。调用方（消散/拾取/
+	# 合并）都不依赖数组顺序（遍历用下标、i 不前进语义在换尾后不变）
+	var last := _drops.size() - 1
+	var visual: Node3D = _visuals[index]
+	if index < last:
+		_drops[index] = _drops[last]
+		_visuals[index] = _visuals[last]
+		_visual_counts[index] = _visual_counts[last]
+		_was_grounded[index] = _was_grounded[last]
+		_landing_t[index] = _landing_t[last]
+		_landing_theta_from[index] = _landing_theta_from[last]
+		_landing_theta_target[index] = _landing_theta_target[last]
+		_last_support[index] = _last_support[last]
+	_drops.remove_at(last)
+	_visuals.remove_at(last)
+	_visual_counts.remove_at(last)
+	_was_grounded.remove_at(last)
+	_landing_t.remove_at(last)
+	_landing_theta_from.remove_at(last)
+	_landing_theta_target.remove_at(last)
+	_last_support.remove_at(last)
 	visual.queue_free()
 
 
@@ -265,9 +304,9 @@ func _sync_visuals(delta: float) -> void:
 				drop.position.y + support - ItemDrop.HALF_HEIGHT,
 				drop.position.z)
 		if _visual_counts[i] != drop.count:
-			# count 变化：重建副本并更新碰撞足迹（散布余量随之增减）
+			# count 变化：副本可见性更新 + 碰撞足迹（散布余量随之增减）
 			_apply_footprint(drop)
-			_rebuild_copies(drop, root)
+			_update_copies(drop, root)
 			_visual_counts[i] = drop.count
 
 
@@ -368,47 +407,60 @@ func _make_model(drop: ItemDrop) -> MeshInstance3D:
 ## 数量副本：散布模式（默认）或平面整齐堆叠（NEAT_STACKING）。
 ## 副本偏移以模型中心为基准（Mod 的偏移施加在已旋转的姿态系内），
 ## 用确定性随机（按掉落身份播种），帧间稳定、存档可复现。
-func _rebuild_copies(drop: ItemDrop, root: Node3D) -> void:
-	# 先脱离再释放：queue_free 要到帧末才真正移除，立即 remove_child
-	# 保证本轮重建的副本计数正确（无场景树的测试环境同理）
+## 数量副本：散布模式（默认）或平面整齐堆叠（NEAT_STACKING）。
+## 副本偏移以模型中心为基准（Mod 的偏移施加在已旋转的姿态系内），
+## 用确定性随机（按掉落身份播种），帧间稳定、存档可复现。
+## 幂等增量（审查二轮 D10）：副本只补建不重建，count 变化通常只
+## toggle visible——曾每次变化释放+重建 ≤4 个 MeshInstance3D 子树
+##（合并期每 0.5s 全场一遍；拾取减数同样全量重建）
+func _update_copies(drop: ItemDrop, root: Node3D) -> void:
+	var cube := cube_item(drop.item_id)
+	var neat := NEAT_STACKING and not cube
+	var max_n: int = MAX_STACK_LAYERS if neat else MAX_SCATTER_MODELS
+	var want: int = clampi(drop.count - 1, 0, max_n - 1)
+	var copies: Array = []
 	for child in root.get_children():
 		if child.name.begins_with("copy"):
-			root.remove_child(child)
-			child.queue_free()
-	var main: MeshInstance3D = root.get_child(0)
-	main.position = Vector3.ZERO
-	var cube := cube_item(drop.item_id)
+			copies.append(child)
+	if copies.size() < want:
+		# 确定性偏移序列（副本 k 的偏移 = 序列第 k 项；补建只追加
+		# 尾部，已有副本位置不变）
+		var offs := _copy_offsets(drop, max_n - 1, cube, neat)
+		while copies.size() < want:
+			var copy := _make_model(drop)
+			copy.name = "copy%d" % copies.size()
+			copy.position = offs[copies.size()]
+			copies.append(copy)
+			root.add_child(copy)
+	for k in copies.size():
+		copies[k].visible = k < want
+
+
+## 副本偏移序列（索引 0 起 = 第一个副本）。
+func _copy_offsets(drop: ItemDrop, n: int, cube: bool,
+		neat: bool) -> Array[Vector3]:
 	var rng := _copy_rng(drop)
-
-	if NEAT_STACKING and not cube:
-		# 竖直一摞向上生长：主模型在底（贴地），副本沿 local -z 逐层
-		# +3/32（平躺姿态下 local -z = 世界向上）
-		var layers := mini(drop.count, MAX_STACK_LAYERS)
-		for i in range(1, layers):
-			var layer := _make_model(drop)
-			layer.name = "copy%d" % i
-			layer.position.z = -i * STACK_LAYER
-			root.add_child(layer)
-		return
-
-	var models := mini(drop.count, MAX_SCATTER_MODELS)
-	for i in range(1, models):
-		var copy := _make_model(drop)
-		copy.name = "copy%d" % i
-		if cube:
+	var out: Array[Vector3] = []
+	out.resize(n)
+	for i in n:
+		if neat:
+			# 竖直一摞向上生长：主模型在底（贴地），副本沿 local -z
+			# 逐层 +3/32（平躺姿态下 local -z = 世界向上）
+			out[i] = Vector3(0.0, 0.0, -(i + 1) * STACK_LAYER)
+		elif cube:
 			# 3D 副本：水平 ±0.15 随机偏移，竖直只向上（向下会嵌地）
-			copy.position = Vector3(
+			out[i] = Vector3(
 					rng.randf_range(-SCATTER_3D, SCATTER_3D),
 					rng.randf_range(0.0, SCATTER_3D),
 					rng.randf_range(-SCATTER_3D, SCATTER_3D))
 		else:
 			# 2D 副本：平躺姿态下 local x/y 是水平面、local z 朝下——
 			# 水平随机散布，沿 -z 逐层抬升（世界向上）
-			copy.position = Vector3(
+			out[i] = Vector3(
 					rng.randf_range(-SCATTER_2D, SCATTER_2D),
 					rng.randf_range(-SCATTER_2D, SCATTER_2D),
-					-SCATTER_2D_RISE * i)
-		root.add_child(copy)
+					-SCATTER_2D_RISE * (i + 1))
+	return out
 
 
 ## 副本随机源：按掉落身份确定性播种（同掉落每帧/存档往返偏移一致）。

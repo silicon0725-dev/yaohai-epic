@@ -87,6 +87,24 @@ var spin_phase := 0.0
 ## 树干实心探针（physics_step 每帧由管理器注入；见其注释）。
 ## 不序列化——恢复后管理器重接线。
 var trunk_solid_probe: Callable = Callable()
+## 休眠态（审查二轮 D4）：grounded 且速度近零持续 SLEEP_SETTLE_FRAMES
+## 物理帧后跳过全部步进（每掉落每帧 13-25 次 get_block 归零；128 上限
+## 场景 1.7-3.2k 次/帧）。唤醒：附近方块变化（管理器统一订阅广播）、
+## 合并移动（管理器）。浮水物不睡（随波起伏需每帧跟随）。不序列化
+## ——读档后重新落地再判。
+var sleeping := false
+var _calm_frames := 0
+const SLEEP_SPEED_EPS := 0.06
+const SLEEP_SETTLE_FRAMES := 20
+## 岸距固体数/水柱表面顶缓存重算间隔（物理帧；审查二轮 D5——浮水物
+## 每帧 8 邻查 + O(水深) 水柱扫描，两者变化慢）
+const WATER_RECALC_INTERVAL := 20
+var _shore_count := -1
+var _shore_cd := 0
+var _surface_top := -1e9
+var _surface_cd := 0
+## 缓存对应的格列（流动水冲走浮物后跨列即失效——两缓存共用）
+var _cached_xz := Vector2i(1 << 30, 0)
 
 
 ## 推进一帧物理。age 不在此推进（冻结语义归管理器）。
@@ -96,6 +114,14 @@ var trunk_solid_probe: Callable = Callable()
 ## 撞得上树干。无树/测试场景缺省无效 Callable = 穿透）。
 func physics_step(world: VoxelWorld, delta: float,
 		trunk_probe: Callable = Callable()) -> void:
+	if sleeping:
+		# 外部直接施加了速度（测试弹起/未来推挤源）：自动醒
+		if velocity.length_squared() \
+				> SLEEP_SPEED_EPS * SLEEP_SPEED_EPS:
+			sleeping = false
+			_calm_frames = 0
+		else:
+			return  # 休眠：附近方块变化由管理器唤醒（wake_up）
 	trunk_solid_probe = trunk_probe
 	var wet := world.get_block(_cell(position)) == VoxelTypes.WATER_ID
 	if wet and not in_water and velocity.y < -1.5:
@@ -123,6 +149,20 @@ func physics_step(world: VoxelWorld, delta: float,
 	# 空中自旋推进；触地（或保持触地）即冻结——落地姿态保留
 	if not grounded and not was_grounded:
 		spin_angle += SPIN_SPEED * delta
+	# 休眠判定（D4）：地面静止持续累计——落稳（摩擦衰减后）即睡
+	if grounded and Vector2(velocity.x, velocity.z).length() <= SLEEP_SPEED_EPS:
+		_calm_frames += 1
+		if _calm_frames >= SLEEP_SETTLE_FRAMES:
+			sleeping = true
+	else:
+		_calm_frames = 0
+
+
+## 唤醒休眠掉落（方块变化/合并移动时由管理器调用）
+func wake_up() -> void:
+	if sleeping:
+		sleeping = false
+	_calm_frames = 0
 
 
 ## 水中步进：
@@ -144,26 +184,41 @@ func _step_in_water(world: VoxelWorld, delta: float) -> void:
 		# 速度刹停稳定贴面（修冒出水面被拉回造成的快速上下震荡）
 		# 波高采样带岸距衰减：与网格器角点同拓扑（2x2 XZ × 上下
 		# 2 层的固体数）+ 同公式（shore_fade_value）——两处各写曾
-		# 漂移出 /3.0 vs ×0.5，贴岸浮物与视觉水面起伏不一致（审查发现）
-		var solid_neighbors := 0
-		for dx in 2:
-			for dz in 2:
-				for dy in 2:
-					var nid := world.get_block(cell
-							+ Vector3i(dx - 1, dy, dz - 1))
-					if nid != VoxelTypes.AIR_ID and nid != VoxelTypes.WATER_ID:
-						solid_neighbors += 1
-		var shore_fade := ChunkMesher.shore_fade_value(solid_neighbors)
+		# 漂移出 /3.0 vs ×0.5，贴岸浮物与视觉水面起伏不一致（审查发现）。
+		# 岸距缓存（D5）：8 邻查每帧 8 次 get_block，岸貌变化慢——
+		# WATER_RECALC_INTERVAL 帧重算一次
+		_shore_cd -= 1
+		var cell_moved := _cached_xz != Vector2i(cell.x, cell.z)
+		if cell_moved:
+			_cached_xz = Vector2i(cell.x, cell.z)
+			_shore_cd = 0
+			_surface_cd = 0
+		if _shore_cd <= 0 or _shore_count < 0:
+			_shore_count = 0
+			for dx in 2:
+				for dz in 2:
+					for dy in 2:
+						var nid := world.get_block(cell
+								+ Vector3i(dx - 1, dy, dz - 1))
+						if nid != VoxelTypes.AIR_ID and nid != VoxelTypes.WATER_ID:
+							_shore_count += 1
+			_shore_cd = WATER_RECALC_INTERVAL
+		var shore_fade := ChunkMesher.shore_fade_value(_shore_count)
 		var target := WaterFlow.water_surface_at(world, cell) 				+ OceanWavesScript.wave_offset(
 						position.x, position.z,
 						OceanWavesScript.global_time) * shore_fade 				- FLOAT_IMMERSE
 		# 波峰钳制：目标不超过**表面格**顶（否则中心被顶进上方空气格，
 		# 切普通物理掉回再上浮，形成新的震荡）。注意钳到当前格会把
-		# 中间格当表面，物品卡在中层格顶不上浮
-		var surface_cell := cell
-		while world.get_block(surface_cell + Vector3i(0, 1, 0)) 				== VoxelTypes.WATER_ID:
-			surface_cell += Vector3i(0, 1, 0)
-		target = minf(target, float(surface_cell.y) + 0.98)
+		# 中间格当表面，物品卡在中层格顶不上浮。水柱扫描缓存（D5：
+		# O(水深) 无上限的向上扫，每帧一次——水位变化慢，缓存重算）
+		_surface_cd -= 1
+		if _surface_cd <= 0 or _surface_top < -1e8 or cell_moved:
+			var surface_cell := cell
+			while world.get_block(surface_cell + Vector3i(0, 1, 0)) 					== VoxelTypes.WATER_ID:
+				surface_cell += Vector3i(0, 1, 0)
+			_surface_top = float(surface_cell.y) + 0.98
+			_surface_cd = WATER_RECALC_INTERVAL
+		target = minf(target, _surface_top)
 		# 直接限速跟随（无惯性）：弹簧方案实测过冲达波形 2 倍
 		#（浮物轻质，无惯性跟随视觉可信且零过冲）；velocity 清零
 		# 防止函数尾部的积分双重位移
@@ -344,7 +399,9 @@ func _solid_at(world: VoxelWorld, cell: Vector3i) -> bool:
 	if cell.y >= world.config.world_height_blocks():
 		return false
 	var id := world.get_block(cell)
-	if world.registry.definition_for_id(id).get("collision", false):
+	# 预计算表（审查二轮 D8：每掉落每物理帧 13-25 次，曾逐次
+	# definition_for_id 字典查）
+	if world.registry.collides(id):
 		return true
 	if id != VoxelTypes.BRANCH_ID:
 		return false

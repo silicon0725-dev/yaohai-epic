@@ -106,7 +106,7 @@ func set_block(world_pos: Vector3i, id: int, affects_collision := true) -> bool:
 	var _t0 := Time.get_ticks_usec()
 	var _ok := _set_block_impl(world_pos, id, affects_collision)
 	var _dt := Time.get_ticks_usec() - _t0
-	if _ok and _dt > 2000:
+	if _ok and _dt > 8000:
 		print("[perf] set_block %.1fms at %s (id %d)" % [_dt * 0.001, world_pos, id])
 	return _ok
 
@@ -159,7 +159,7 @@ func _set_block_impl(world_pos: Vector3i, id: int, affects_collision := true) ->
 		edit_generation += 1
 		block_changed.emit(world_pos, old_id, id)
 		_te = Time.get_ticks_usec() - _te
-		if _te > 4000:
+		if _te > 8000:
 			print("[perf] signal_fanout %.1fms at %s" % [_te * 0.001, world_pos])
 		# 玩家编辑（affects_collision=true；水/树清占位传 false）→
 		# 区块管理器优先重网格该块所在区块（插队：绕过在途上限+

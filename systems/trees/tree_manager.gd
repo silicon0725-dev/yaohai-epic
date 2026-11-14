@@ -369,7 +369,7 @@ func _build_visual(tree_id: int, light_only := false) -> void:
 	var _t0 := Time.get_ticks_usec()
 	var _bd := _build_visual_impl(tree_id, light_only)
 	var _dt := Time.get_ticks_usec() - _t0
-	if _dt > 2000:
+	if _dt > 8000:
 		print("[perf] tree_rebuild %.1fms tid=%d%s (mesh %.1f crown %.1f shadow %.1f)"
 				% [_dt * 0.001, tree_id,
 						" light-only" if light_only else "",

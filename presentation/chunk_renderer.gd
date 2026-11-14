@@ -99,7 +99,7 @@ func apply_mesh(
 	var _t0 := Time.get_ticks_usec()
 	_apply_mesh_impl(coord, mesh_arrays, rebuild_collision)
 	var _dt := Time.get_ticks_usec() - _t0
-	if _dt > 2000:
+	if _dt > 8000:
 		print("[perf] apply_mesh %.1fms chunk=%s" % [_dt * 0.001, coord])
 
 
@@ -156,7 +156,7 @@ func _apply_mesh_impl(
 		var _tc := Time.get_ticks_usec()
 		var shape := ChunkCollisionBuilder.build_collision_shape(mesh_arrays)
 		var _tcd := Time.get_ticks_usec() - _tc
-		if _tcd > 2000:
+		if _tcd > 8000:
 			print("[perf] collision_build %.1fms chunk=%s" % [_tcd * 0.001, coord])
 		PhysicsServer3D.body_clear_shapes(entry.body)
 		PhysicsServer3D.body_add_shape(entry.body, shape.get_rid())

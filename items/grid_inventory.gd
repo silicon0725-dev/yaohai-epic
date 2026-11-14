@@ -17,6 +17,11 @@ signal changed
 ## ——合成（消耗 N 种材料+产出）曾发 3-5 次，消费者 _refresh_hud
 ## 每次 8 轮 hotbar 全扫+背包面板全量重建
 var _batch_depth := 0
+## can_fit 结果缓存（审查二轮 D6）：拾取判定每帧每掉落一次，背包
+## 静止时仍全量 entries 遍历 + 影子占用网格重建（100-250 次分配/帧）。
+## 失效源 = _emit_changed（全部布局写路径都过它，batch 中间变化同样
+## 递增版本——缓存在 batch 内不脏读）
+var _canfit_cache := {}
 
 
 func begin_batch() -> void:
@@ -30,6 +35,7 @@ func end_batch() -> void:
 
 
 func _emit_changed() -> void:
+	_canfit_cache = {}  # 无条件失效（含 batch 门控下的中间变化）
 	if _batch_depth == 0:
 		changed.emit()
 
@@ -202,9 +208,20 @@ func add(item_id: int, count: int) -> int:
 
 
 ## AUTO 区是否还装得下 count 个（已有非满同类堆空隙 + 影子模拟空位容量）。
+## count=1（拾取热路径）结果缓存——背包变化即失效（D6）
 func can_fit(item_id: int, count := 1) -> bool:
 	if item_id < 0 or count <= 0:
 		return false
+	if count == 1:
+		if _canfit_cache.has(item_id):
+			return _canfit_cache[item_id]
+		var fit1 := _can_fit_uncached(item_id, 1)
+		_canfit_cache[item_id] = fit1
+		return fit1
+	return _can_fit_uncached(item_id, count)
+
+
+func _can_fit_uncached(item_id: int, count: int) -> bool:
 	var limit := _stack_limit(item_id)
 	var space := 0
 	for e in entries:

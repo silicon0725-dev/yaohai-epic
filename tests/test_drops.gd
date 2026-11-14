@@ -376,10 +376,14 @@ func _test_visuals(ctx: Dictionary) -> void:
 					"平面副本沿 -z 抬升（平躺后世界向上，不嵌地）")
 	pile.count = 2
 	manager.process_drops(0.016)
-	check_eq(pile_root.get_child_count(), 2, "count 变化重建副本数")
+	# 审查二轮 D10：副本幂等增量——count 回落只隐藏不释放（子节点
+	# 数不随 count 缩，重建子树的分配/释放消失）
+	check_eq(_visible_copy_count(pile_root), 1, "count 变化副本可见数")
+	check_eq(pile_root.get_child_count(), DropManager.MAX_SCATTER_MODELS,
+			"副本保留只隐藏（节点数不减）")
 	pile.count = 1
 	manager.process_drops(0.016)
-	check_eq(pile_root.get_child_count(), 1, "回落单模型")
+	check_eq(_visible_copy_count(pile_root), 0, "回落单模型（副本全隐）")
 
 	# 贴地：模型中心即旋转原点；落地端正站立（仅偏航、底面完全贴地），
 	# 空中翻滚才用支撑半径公式定高
@@ -747,6 +751,15 @@ func _test_manager_persistence(ctx: Dictionary) -> void:
 	tolerant.setup(world, items)
 	check_eq(tolerant.apply_save_state(mixed), 2, "坏数据跳过好数据恢复")
 	check_eq(tolerant.drop_count(), 2, "坏数据不计入实体")
+
+
+## 可见副本计数（D10 visible 方案的断言辅助）
+func _visible_copy_count(root: Node3D) -> int:
+	var n := 0
+	for child in root.get_children():
+		if child.name.begins_with("copy") and child.visible:
+			n += 1
+	return n
 
 
 # ---- world.json 扩展键 ----

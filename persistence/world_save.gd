@@ -46,20 +46,32 @@ func has_chunk(coord: Vector3i) -> bool:
 	return FileAccess.file_exists(chunk_path(coord))
 
 
-## 已落盘区块数（HUD/诊断用；目录扫描，低频调用）。
+## 已落盘区块数（HUD 每 0.25s 查询）。目录扫描只在首查/erase 后做
+## 一次（审查二轮 D1：2000 文件目录 ≈1ms/次 ×4 次/s），之后由
+## save_chunk 的文件集合增量维护。
+var _saved_files := {}  # path -> true（未初始化 = 空）
+var _saved_files_ready := false
+
+
 func saved_chunk_count() -> int:
-	var dir := DirAccess.open(chunks_dir())
-	if dir == null:
-		return 0
-	var count := 0
-	dir.list_dir_begin()
-	var entry := dir.get_next()
-	while entry != "":
-		if not dir.current_is_dir() and entry.ends_with(".bin"):
-			count += 1
-		entry = dir.get_next()
-	dir.list_dir_end()
-	return count
+	if not _saved_files_ready:
+		_saved_files = {}
+		var dir := DirAccess.open(chunks_dir())
+		if dir != null:
+			dir.list_dir_begin()
+			var entry := dir.get_next()
+			while entry != "":
+				if not dir.current_is_dir() and entry.ends_with(".bin"):
+					_saved_files[chunks_dir() + "/" + entry] = true
+				entry = dir.get_next()
+			dir.list_dir_end()
+		_saved_files_ready = true
+	return _saved_files.size()
+
+
+func _note_saved(path: String) -> void:
+	if _saved_files_ready:
+		_saved_files[path] = true
 
 
 func ensure_dirs() -> bool:
@@ -78,6 +90,8 @@ func ensure_dirs() -> bool:
 ## 删除整个存档目录（开新世界 / 测试隔离用）。仅允许 user:// 路径。
 func erase_all() -> void:
 	_remove_tree(root)
+	_saved_files = {}
+	_saved_files_ready = false  # 下次查询重新扫描
 
 
 static func _remove_tree(path: String) -> void:
@@ -193,6 +207,7 @@ func save_chunk(chunk: ChunkData) -> bool:
 	var ok := _atomic_write(path, container.data_array, verify)
 	if ok:
 		chunk.save_needed = false
+		_note_saved(path)
 	else:
 		push_error("保存区块失败: %s" % path)
 	return ok

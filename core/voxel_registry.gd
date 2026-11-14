@@ -8,6 +8,10 @@ extends RefCounted
 ## 注册顺序即数值 ID。注册表一旦发布，顺序不可重排。
 var _blocks: Array[Dictionary] = []
 var _id_by_name := {}
+## collision 预计算表（审查二轮 D8：掉落物 _solid_at 每帧 13-25 次
+## "definition_for_id 字典查"的热路径替代）。发布后只读——register
+## 时置空，collides() 惰性重建
+var _collision_table := PackedByteArray()
 
 
 ## 注册一个方块定义（结构见 §7.2），返回分配的数值 ID。
@@ -24,6 +28,7 @@ func register_block(definition: Dictionary) -> int:
 	var numeric_id := _blocks.size()
 	_blocks.append(definition)
 	_id_by_name[block_name] = numeric_id
+	_collision_table = PackedByteArray()  # 注册期失效，下次查询惰性重建
 	return numeric_id
 
 
@@ -53,6 +58,19 @@ func definition_for_id(id: int) -> Dictionary:
 ## 该方块是否完全遮挡相邻面（用于可见面剔除，§6.1）。
 func occludes(id: int) -> bool:
 	return definition_for_id(id).get("occludes_neighbors", false)
+
+
+## 该方块是否参与掉落/物理碰撞（预计算表热路径——等价
+## definition_for_id(id).get("collision", false)）
+func collides(id: int) -> bool:
+	if _collision_table.is_empty() and not _blocks.is_empty():
+		_collision_table.resize(_blocks.size())
+		for i in _blocks.size():
+			_collision_table[i] = 1 \
+					if _blocks[i].get("collision", false) else 0
+	if id < 0 or id >= _blocks.size():
+		return false
+	return _collision_table[id] == 1
 
 
 ## 该方块是否产生可见几何（空气为 false；水为 true，走独立水面）。

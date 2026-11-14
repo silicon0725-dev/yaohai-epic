@@ -43,14 +43,27 @@ var _scan_active := false
 const SCAN_BUDGET_USEC := 2500
 
 
+## 编辑标脏带窗过滤（审查二轮 B8）：任意编辑曾无条件 _dirty=true
+## → 全洞重扫（441 柱，成本 2.5ms/帧摊进 16-40 帧）。只有影响区
+## （上次扫描中心 XZ ±SCAN_RADIUS+簇半径、y ±(窗+顶盖高度)）内的
+## 编辑才可能改变雾；窗外的挖掘/放置/水流不触发
+func _mark_edited(pos: Vector3i) -> void:
+	var d := pos - _last_center
+	if absi(d.x) <= SCAN_RADIUS + 2 and absi(d.z) <= SCAN_RADIUS + 2 \
+			and absi(d.y) <= SCAN_WINDOW + CEILING_RANGE:
+		_dirty = true
+
+
 func setup(p_world: VoxelWorld, follow: Node3D,
 		p_env: Environment = null) -> void:
 	world = p_world
 	_target = follow
 	_environment = p_env
-	world.block_changed.connect(func(_p, _o, _n): _dirty = true)
+	world.block_changed.connect(func(p, _o, _n): _mark_edited(p))
 	# 批量通道（树占位清理）同样标脏——挖空树干位置的洞口光要重扫
-	world.blocks_changed_batch.connect(func(_cells): _dirty = true)
+	world.blocks_changed_batch.connect(func(cells):
+		for c in cells:
+			_mark_edited(c))
 	var shader := load("res://presentation/cave_fog.gdshader")
 	for i in MAX_VOLUMES:
 		var vol := FogVolume.new()

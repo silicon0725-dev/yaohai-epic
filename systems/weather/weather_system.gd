@@ -64,6 +64,18 @@ var _rain_volume_base := 0.0
 ## 批 2：雨粒子 / 闪电 / 雷声
 var _rain_particles: GPUParticles3D
 var _rain_process: ParticleProcessMaterial
+var _rain_streak_mat: ShaderMaterial  # 雨丝着色器（u_tilt/u_wind_dir 下发）
+## 雨遮蔽（用户需求：方块/树叶下无雨）：玩家周围 OCCL_N×OCCL_N 列
+## 表面高度图（R8 编码），雨丝 shader 采样裁剪。逐行轮转重建
+##（每帧 1 行 ≈ 21 列查询——整图一次性重建 9k+ get_block 会卡帧）
+const OCCL_N := 21  # 奇数（中心格对玩家）；±20m 覆盖发射盒
+const OCCL_STEP := 2.0  # 格距（米）——树叶边缘线性插值过渡
+const OCCL_RANGE := 80.0  # R8 编码高度范围
+var _occl_img: Image
+var _occl_tex: ImageTexture
+var _occl_row := 0  # 下一个待重建行（轮转游标）
+var _occl_center := Vector2.ZERO  # 高度图世界中心（行重建基准）
+var _occl_base := 0.0  # R8 编码基准 Y（重建周期内锁定）
 var _player: Node3D
 var _hide_rain := false  # 探针/测试用强制隐藏
 ## 闪电亮度（0-1 指数衰减；main 乘入太阳能量/环境光/天空能量
@@ -78,13 +90,30 @@ var _thunder_streams: Array[AudioStreamWAV] = []
 ## 雷击 bolt（批 2 修复）：程序锯齿亮带（lightning_bolt.gdshader，
 ## gameidea.org 思路）——只调太阳能量观感≈没有（天空自发光不跟），
 ## 必须有可见雷击点 + main 侧天空爆白
-var _bolt_mesh: MeshInstance3D
+var _bolt_root: Node3D  # 十字双面片父节点（抬头/任意水平角可见）
 var _bolt_mat: ShaderMaterial
 var _bolt_life := 0.0
+var _strike_light: OmniLight3D  # 触地光爆（击中点 0.3s 亮闪）
+var _strike_light_life := 0.0
+## 地形查询（main 注入）：(x, z, hint_y) -> 列表面高度——雷击点
+## 贴地形（劈在方块上）+焦痕贴地。无注入时回落玩家高度
+var _terrain_query: Callable
+## 焦痕（用户需求：雷击方块留烧焦痕迹，~1 分钟后淡出消失）
+const BOLT_LIFE := 0.5  # 0.3 太短（实机"没看到闪电"）——放慢一档
+const SCORCH_LIFETIME := 60.0
+const SCORCH_FADE := 2.0
+const SCORCH_POOL := 8
+var _scorch_tex: ImageTexture
+var _scorches: Array = []  # [{mesh, mat, age}]
 
 
 func setup_player(p_player: Node3D) -> void:
 	_player = p_player
+
+
+## 地形列表面查询注入（main 提供：从上向下找第一个实心方块顶面）
+func setup_terrain_query(p_query: Callable) -> void:
+	_terrain_query = p_query
 
 
 func _ready() -> void:
@@ -104,13 +133,15 @@ func _process(delta: float) -> void:
 	_smooth_params(delta)
 	_update_rain_audio(delta)
 	_update_rain_particles()
+	_update_rain_occlusion()
 	_update_lightning(delta)
+	_update_scorches(delta)
 
 
 ## 雨粒子（批 2）：盒发射器跟随玩家上方（40×26×40 覆盖视野近场），
-## 世界竖直细条面片（BILLBOARD_FIXED_Y：侧视可见+抬头仍竖直）；
-## 密度随雨强（amount_ratio）、风偏随风力（发射方向向量倾斜）。
-## 参数参考 TCA_Weather_System（MIT）：速度 15、量级 3000
+## 世界竖直细条面片（自写 shader billboard：绕 Y 朝相机+风偏倾斜
+## +随机角）；密度随雨强（amount_ratio）、风偏随风力（发射方向
+## 向量倾斜 + u_tilt 下发）。参数参考 TCA_Weather_System（MIT）
 func _setup_rain_particles() -> void:
 	_rain_particles = GPUParticles3D.new()
 	_rain_particles.amount = 4000
@@ -128,20 +159,27 @@ func _setup_rain_particles() -> void:
 	_rain_process.gravity = Vector3(0.0, -26.0, 0.0)
 	_rain_process.initial_velocity_min = 15.0
 	_rain_process.initial_velocity_max = 19.0
+	# 随机倾斜角：写入 CUSTOM.x 由 rain_streak.gdshader 应用——
+	# StandardMaterial 的 BILLBOARD_FIXED_Y 强制 Y 对齐会忽略粒子
+	# angle（第四轮实机反馈"雨还是竖直的"根因）
+	_rain_process.angle_min = -6.0
+	_rain_process.angle_max = 18.0
 	_rain_particles.process_material = _rain_process
 	var quad := QuadMesh.new()
-	quad.size = Vector2(0.045, 1.1)
-	var mat := StandardMaterial3D.new()
-	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	# BILLBOARD_FIXED_Y（实机观感反馈第三轮）：面片绕世界 Y 朝玩家
-	#（侧视仍可见）但竖边沿世界竖直——抬头看雨丝依然竖直（物理
-	# 正确）。BILLBOARD_PARTICLES 贴屏幕对齐，抬头时屏幕竖直≠世界
-	# 竖直，雨丝全变横且朝向乱
-	mat.billboard_mode = BaseMaterial3D.BILLBOARD_FIXED_Y
-	mat.albedo_color = Color(0.78, 0.84, 0.94, 0.35)
-	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
-	mat.no_depth_test = false
+	quad.size = Vector2(0.085, 1.25)
+	var mat := ShaderMaterial.new()
+	mat.shader = preload("res://presentation/rain_streak.gdshader")
+	# 条纹纹理（实机反馈：纯色矩形硬边不自然）：中心亮线横向高斯
+	# 柔边 + 纵向两端渐隐（社区标准做法，端部 fade 在贴图不在引擎）
+	mat.set_shader_parameter("u_tex", _make_rain_streak_texture())
+	mat.set_shader_parameter("u_tint", Color(0.78, 0.84, 0.94, 1.0))
+	# 遮蔽高度图（先建 1×1 占位——无地形查询时全 0=不遮蔽）
+	_occl_img = Image.create(1, 1, false, Image.FORMAT_R8)
+	_occl_img.set_pixel(0, 0, Color(0.0, 0.0, 0.0))
+	_occl_tex = ImageTexture.create_from_image(_occl_img)
+	mat.set_shader_parameter("u_hm_tex", _occl_tex)
+	mat.set_shader_parameter("u_hm_base", -4000.0)  # 占位不遮蔽
+	_rain_streak_mat = mat
 	quad.material = mat
 	_rain_particles.draw_pass_1 = quad
 	add_child(_rain_particles)
@@ -161,8 +199,53 @@ func _update_rain_particles() -> void:
 				+ Vector3(0.0, 14.0, 0.0)
 	# 风偏融进发射方向（ParticleProcessMaterial 无常量风加速度属性
 	# ——风分量加进 direction 向量，重力叠加后雨幕整体倾斜）
-	_rain_process.direction = Vector3(
-			6.0 * wind_strength, -26.0, 3.0 * wind_strength).normalized()
+	var wind := Vector3(
+			6.0 * wind_strength, -26.0, 3.0 * wind_strength)
+	_rain_process.direction = wind.normalized()
+	# 雨丝视觉倾斜同步下发（shader 侧运动模糊拖影角）：风向水平
+	# 分量/落速的 atan（风强 1≈14°、微风≈4°），方向与世界风向一致
+	if _rain_streak_mat != null:
+		var horiz := Vector2(wind.x, wind.z)
+		_rain_streak_mat.set_shader_parameter("u_tilt",
+				atan2(horiz.length(), 26.0))
+		if horiz.length() > 0.001:
+			_rain_streak_mat.set_shader_parameter("u_wind_dir",
+					horiz.normalized())
+
+
+## 雨遮蔽重建：每帧 1 行轮转（21 帧一圈 ≈0.35s@60fps）。玩家跨
+## 8m 重锁中心与编码基准（之后轮转自然覆盖全图）。无地形查询
+## 时保持占位（base -4000 = 全不遮蔽）
+func _update_rain_occlusion() -> void:
+	if _player == null or not is_instance_valid(_player):
+		return
+	var pp: Vector3 = _player.global_position
+	# 首建（尺寸 1×1 占位）或玩家跨 8m：重锁中心/基准。首建判断
+	# 不能只看跨距——玩家在原点 ±8m 内时初始 center=ZERO 距离不足
+	#（单测抓出：图永不升级、遮蔽失灵）
+	if _occl_img.get_width() != OCCL_N \
+			or _occl_center.distance_to(Vector2(pp.x, pp.z)) > 8.0:
+		_occl_center = Vector2(pp.x, pp.z)
+		_occl_base = pp.y - OCCL_RANGE * 0.5
+		if _occl_img.get_width() != OCCL_N:
+			_occl_img = Image.create(
+					OCCL_N, OCCL_N, false, Image.FORMAT_R8)
+			_occl_tex = ImageTexture.create_from_image(_occl_img)
+			_rain_streak_mat.set_shader_parameter("u_hm_tex", _occl_tex)
+	if not _terrain_query.is_valid():
+		return
+	_rain_streak_mat.set_shader_parameter("u_hm_center", _occl_center)
+	_rain_streak_mat.set_shader_parameter("u_hm_base", _occl_base)
+	var half := (OCCL_N - 1) * 0.5
+	for ix in OCCL_N:
+		var wx := _occl_center.x + (float(ix) - half) * OCCL_STEP
+		var wz := _occl_center.y \
+				+ (float(_occl_row) - half) * OCCL_STEP
+		var h: float = _terrain_query.call(wx, wz, pp.y)
+		var v := clampf((h - _occl_base) / OCCL_RANGE, 0.0, 1.0)
+		_occl_img.set_pixel(ix, _occl_row, Color(v, 0.0, 0.0))
+	_occl_row = (_occl_row + 1) % OCCL_N
+	_occl_tex.update(_occl_img)
 
 
 ## 闪电（批 2）：雷暴态随机触发主闪（flash01=1）→ ~0.4s 衰减，
@@ -185,9 +268,15 @@ func _update_lightning(delta: float) -> void:
 	if _bolt_life > 0.0:
 		_bolt_life = maxf(_bolt_life - delta, 0.0)
 		if _bolt_mat != null:
-			_bolt_mat.set_shader_parameter("u_fade", _bolt_life / 0.3)
-		if _bolt_life <= 0.0 and _bolt_mesh != null:
-			_bolt_mesh.visible = false
+			_bolt_mat.set_shader_parameter("u_fade",
+					_bolt_life / BOLT_LIFE)
+		if _bolt_life <= 0.0 and _bolt_root != null:
+			_bolt_root.visible = false
+	if _strike_light_life > 0.0:
+		_strike_light_life = maxf(_strike_light_life - delta, 0.0)
+		_strike_light.light_energy = 26.0 * _strike_light_life / 0.35
+		if _strike_light_life <= 0.0:
+			_strike_light.visible = false
 
 
 ## 一次雷击：主闪 + 频闪排程 + 雷声 + bolt 雷击点
@@ -199,35 +288,124 @@ func _trigger_strike() -> void:
 	_spawn_bolt()
 
 
-## bolt：玩家 20-45m 外随机方位、云底（+55m）到地面的竖直锯齿
-## 亮带，look_at 玩家（0.3s 生命周期内静态朝向够用）。距离收窄
-## ——默认深度雾 10-100m 在 70m 处透射仅 33%，远处 bolt 被洗淡
+## bolt：玩家 20-45m 外随机方位、底端贴地形表面（劈在方块上，
+## main 注入列高查询）到云底的竖直锯齿十字亮带。距离收窄——
+## 默认深度雾 10-100m 在 70m 处透射仅 33%，远处被洗淡。
+## 触地瞬间击中点光爆（"劈到地上"的感知载体——照亮焦痕出现）
 func _spawn_bolt() -> void:
-	if _bolt_mesh == null or _player == null or not is_instance_valid(_player):
+	if _bolt_root == null or _player == null or not is_instance_valid(_player):
 		return
 	var ang := _rng.randf() * TAU
 	var dist := _rng.randf_range(20.0, 45.0)
+	_strike_at(_player.global_position + Vector3(
+			cos(ang) * dist, 0.0, sin(ang) * dist))
+
+
+## 落点执行：bolt 十字定位（中心=表面+27.5，底端贴方块）+ 光爆
+## + 焦痕。bx/bz 为落点水平坐标，表面高度走地形查询（hint=玩家）
+func _strike_at(landing: Vector3) -> void:
 	var pp: Vector3 = _player.global_position
-	_bolt_mesh.global_position = Vector3(
-			pp.x + cos(ang) * dist, pp.y + 27.0, pp.z + sin(ang) * dist)
-	_bolt_mesh.look_at(pp, Vector3.UP)
+	var surface_y := pp.y
+	if _terrain_query.is_valid():
+		surface_y = _terrain_query.call(landing.x, landing.z, pp.y)
+	_bolt_root.global_position = Vector3(
+			landing.x, surface_y + 27.5, landing.z)
 	_bolt_mat.set_shader_parameter("u_seed", _rng.randf() * 100.0)
 	_bolt_mat.set_shader_parameter("u_fade", 1.0)
-	_bolt_mesh.visible = true
-	_bolt_life = 0.3
+	_bolt_root.visible = true
+	_bolt_life = BOLT_LIFE
+	_strike_light.global_position = Vector3(
+			landing.x, surface_y + 1.5, landing.z)
+	_strike_light.light_energy = 26.0
+	_strike_light.visible = true
+	_strike_light_life = 0.35
+	_spawn_scorch(landing.x, surface_y, landing.z)
 
 
 func _setup_bolt() -> void:
 	_bolt_mat = ShaderMaterial.new()
 	_bolt_mat.shader = preload("res://presentation/lightning_bolt.gdshader")
 	var quad := QuadMesh.new()
-	quad.size = Vector2(9.0, 55.0)
+	quad.size = Vector2(12.0, 55.0)
 	quad.material = _bolt_mat
-	_bolt_mesh = MeshInstance3D.new()
-	_bolt_mesh.mesh = quad
-	_bolt_mesh.visible = false
-	_bolt_mesh.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	add_child(_bolt_mesh)
+	# 十字双面片（抬头变横根治）：单面片 look_at 玩家是静态朝向，
+	# 玩家抬头后面片侧对投影成横线；两片正交竖直面（MC 同款），
+	# 任意水平视角至少一片正对，且不再需要 look_at
+	_bolt_root = Node3D.new()
+	for i in 2:
+		var mi := MeshInstance3D.new()
+		mi.mesh = quad
+		mi.rotation.y = PI * 0.5 * float(i)
+		mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		_bolt_root.add_child(mi)
+	_bolt_root.visible = false
+	add_child(_bolt_root)
+	_strike_light = OmniLight3D.new()
+	_strike_light.light_color = Color(0.85, 0.9, 1.0)
+	_strike_light.omni_range = 26.0
+	_strike_light.light_energy = 0.0
+	_strike_light.visible = false
+	add_child(_strike_light)
+	_scorch_tex = _make_scorch_texture()
+
+
+## 焦痕（用户需求）：雷击点贴地焦黑面片（受光材质——阴影里自然
+## 变暗），60s 后 2s 淡出；池上限 8 最老先回收。抬 3cm 防 z-fight
+func _spawn_scorch(bx: float, surface_y: float, bz: float) -> void:
+	if _scorch_tex == null:
+		return
+	while _scorches.size() >= SCORCH_POOL:
+		var oldest: Dictionary = _scorches.pop_front()
+		oldest.mesh.queue_free()
+	var quad := PlaneMesh.new()  # 平躺朝上
+	quad.size = Vector2(2.4, 2.4)
+	var mat := StandardMaterial3D.new()
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	mat.albedo_texture = _scorch_tex
+	mat.albedo_color = Color(1.0, 1.0, 1.0, 0.85)
+	quad.material = mat
+	var mi := MeshInstance3D.new()
+	mi.mesh = quad
+	mi.position = Vector3(bx, surface_y + 0.03, bz)
+	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	add_child(mi)
+	_scorches.append({"mesh": mi, "mat": mat, "age": 0.0})
+
+
+func _update_scorches(delta: float) -> void:
+	var i := 0
+	while i < _scorches.size():
+		var s: Dictionary = _scorches[i]
+		s.age += delta
+		if s.age >= SCORCH_LIFETIME + SCORCH_FADE:
+			s.mesh.queue_free()
+			_scorches.remove_at(i)
+			continue
+		var fade01: float = clampf(
+				(SCORCH_LIFETIME + SCORCH_FADE - s.age) / SCORCH_FADE,
+				0.0, 1.0)
+		s.mat.albedo_color = Color(1.0, 1.0, 1.0, 0.85 * fade01)
+		i += 1
+
+
+## 程序化焦痕纹理（64×64）：径向炭黑渐变 + 随机破碎边缘（噪声
+## 半径）。素材零依赖（雨丝纹理同款先例）
+static func _make_scorch_texture() -> ImageTexture:
+	var s := 64
+	var img := Image.create(s, s, false, Image.FORMAT_RGBA8)
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 7715  # 固定：所有焦痕同款（统一感）
+	for y in s:
+		for x in s:
+			var vx := (float(x) + 0.5) / float(s) - 0.5
+			var vy := (float(y) + 0.5) / float(s) - 0.5
+			var r := Vector2(vx, vy).length()
+			var edge := 0.34 + (rng.randf() - 0.5) * 0.22  # 破碎边缘
+			var a: float = clampf((edge - r) / 0.14, 0.0, 1.0)
+			var dark := 1.0 - smoothstep(0.0, edge, r)  # 中心最深
+			img.set_pixel(x, y, Color(0.05, 0.04, 0.035,
+					a * (0.5 + 0.5 * dark)))
+	return ImageTexture.create_from_image(img)
 
 
 func _setup_thunder() -> void:
@@ -235,7 +413,7 @@ func _setup_thunder() -> void:
 		_thunder_streams.append(_make_thunder_stream(9300 + i * 17))
 	_thunder_clap_player = AudioStreamPlayer.new()
 	_thunder_clap_player.bus = "SFX"
-	_thunder_clap_player.volume_db = -6.0
+	_thunder_clap_player.volume_db = -3.0
 	add_child(_thunder_clap_player)
 
 
@@ -269,12 +447,16 @@ static func _make_thunder_stream(seed_value: int) -> AudioStreamWAV:
 	for i in n:
 		var t := float(i) / float(sample_rate)
 		var white := rng.randf_range(-1.0, 1.0)
-		lp1 += 0.045 * (white - lp1)   # ~300Hz
+		lp1 += 0.06 * (white - lp1)   # ~400Hz（中低通上移：80Hz 轰鸣
+		                              # 在笔记本扬声器不可闻——实机
+		                              # "没有打雷声"反馈）
 		lp2 += 0.012 * (lp1 - lp2)     # ~80Hz
 		lp3 += 0.0009 * (lp2 - lp3)    # ~6Hz 慢波动
-		# 起始瞬态（前 50ms 宽带）+ 轰鸣主体（指数衰减）+ 隆隆调制
-		var crack := exp(-t * 55.0) * white * 0.5
-		var boom := exp(-t * 1.15) * lp2 * 3.2
+		# 起始瞬态（宽带 crack 放长放响——可听性主载体）+ 轰鸣主体
+		#（中频贡献）+ 隆隆调制
+		var crack := exp(-t * 32.0) * white * 0.65
+		var boom := exp(-t * 1.15) * lp2 * 3.2 \
+				+ exp(-t * 2.2) * lp1 * 1.4
 		var rumble := (0.6 + 0.4 * sin(t * 9.0 + lp3 * 40.0)) \
 				* exp(-t * 0.55) * lp3 * 22.0
 		var v := int(clampf(crack + boom + rumble, -1.0, 1.0) * 31000.0)
@@ -368,6 +550,11 @@ static func _make_rain_stream() -> AudioStreamWAV:
 	wav.mix_rate = sample_rate
 	wav.stereo = false
 	wav.data = samples
+	# 循环（实机"没有雨声"真凶）：默认播完即停——4s 流在加载期
+	# 就播完，切到雨态时 player 早已停止（探针实测 playing=false）
+	wav.loop_mode = AudioStreamWAV.LOOP_FORWARD
+	wav.loop_begin = 0
+	wav.loop_end = n
 	return wav
 
 
@@ -385,6 +572,44 @@ func debug_cycle_state() -> void:
 	if state == State.THUNDER:
 		_thunder_timer = 2.0
 	_next_step = _rng.randf_range(STEP_WINDOW.x, STEP_WINDOW.y)
+
+
+## 程序化雨丝条纹纹理（8×64）：中心竖亮线横向高斯柔边 + 纵向
+## 两端渐隐（上端快入 12%、下端长尾 38%——下落运动模糊感）。
+## 素材零依赖（雨声合成同款先例）；纯色 QuadMesh 是硬边矩形
+##（实机反馈"矩形不自然"），社区标准做法=条纹贴图自带端部 fade
+static func _make_rain_streak_texture() -> ImageTexture:
+	var w := 8
+	var h := 64
+	var img := Image.create(w, h, false, Image.FORMAT_RGBA8)
+	for y in h:
+		var vy := float(y) / float(h - 1)
+		var fade: float = smoothstep(0.0, 0.12, vy) \
+				* (1.0 - smoothstep(0.62, 1.0, vy))
+		for x in w:
+			var vx := (float(x) + 0.5) / float(w) - 0.5
+			var gauss := exp(-vx * vx / 0.015)
+			img.set_pixel(x, y, Color(1.0, 1.0, 1.0,
+					clampf(gauss * fade, 0.0, 1.0)))
+	return ImageTexture.create_from_image(img)
+
+
+## 调试（main F9）：闪电劈玩家前方 8m（近到爆闪感、又不贴脸
+## ——正脚下抬头时十字面片透视极端拉伸）。全套：flash/回击/
+## 近雷/bolt/光爆/焦痕
+func debug_strike_player() -> void:
+	if _player == null or not is_instance_valid(_player):
+		return
+	flash01 = 1.0
+	_flash_pending = _rng.randi_range(1, 2)
+	_flash_gap = _rng.randf_range(0.06, 0.16)
+	_play_thunder_after(0.15)  # 近雷几乎瞬时
+	if _bolt_root == null:
+		return
+	var pp: Vector3 = _player.global_position
+	# 玩家朝向前方 8m（yaw 旋转的 -Z 前向）
+	var yaw: float = _player.rotation.y
+	_strike_at(pp + Vector3(-sin(yaw) * 8.0, 0.0, -cos(yaw) * 8.0))
 
 
 ## HUD/调试：当前状态名

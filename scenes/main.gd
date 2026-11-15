@@ -344,16 +344,20 @@ func _finish_loading() -> void:
 
 ## F8 调试指令（实机验收）：循环切换天气 晴→多云→雨→雷暴，
 ## 参数瞬时对齐（不用等 2-6 分钟自然转移）。HUD 行本就显示
-## 当前天气，这里再弹一次 hint 给切后参数即时反馈
+## 当前天气，这里再弹一次 hint 给切后参数即时反馈。
+## F9：闪电直劈玩家脚下（检测闪电全套：flash/bolt/焦痕/雷声）
 func _unhandled_input(event: InputEvent) -> void:
-	if event is InputEventKey and event.pressed and not event.echo \
-			and event.keycode == KEY_F8:
-		weather_system.debug_cycle_state()
-		show_hint("天气 → %s（云 %d%% 雨 %d%% 风 %d%%）" % [
-			weather_system.state_name(),
-			int(weather_system.cloudiness * 100.0),
-			int(weather_system.rain_intensity * 100.0),
-			int(weather_system.wind_strength * 100.0)])
+	if event is InputEventKey and event.pressed and not event.echo:
+		if event.keycode == KEY_F8:
+			weather_system.debug_cycle_state()
+			show_hint("天气 → %s（云 %d%% 雨 %d%% 风 %d%%）" % [
+				weather_system.state_name(),
+				int(weather_system.cloudiness * 100.0),
+				int(weather_system.rain_intensity * 100.0),
+				int(weather_system.wind_strength * 100.0)])
+		elif event.keycode == KEY_F9:
+			weather_system.debug_strike_player()
+			show_hint("⚡ 雷击测试：劈玩家脚下")
 
 
 func _process(delta: float) -> void:
@@ -588,7 +592,7 @@ func _update_hud() -> void:
 	var hint_line := ("[ " + _hint_text + " ]") if not _hint_text.is_empty() else ""
 	_hud_label.text = "\n".join([
 		hint_line,
-		"BUILD 2026-11-15.天气2修2 — 若无此行=旧程序未重启",
+		"BUILD 2026-11-15.天气2修9 — 若无此行=旧程序未重启",
 		"Voxel Terrain MVP - Items Layer (inventory + tools + ground drops)",
 		"chunks: %d    faces: %d    in-flight: %d    saved: %d    drops: %d" % [
 			world.chunk_count(), chunk_renderer.total_faces,
@@ -788,6 +792,9 @@ func _spawn_player(spawn_block: Vector2i) -> void:
 	# 实机"看不到雨/闪电"真凶（tmp_main_weather 探针实测 pos=(0,0,0)）
 	if weather_system != null:
 		weather_system.setup_player(player)
+		# 雷击贴地查询：bolt 底端贴方块表面 + 焦痕贴地
+		weather_system.setup_terrain_query(
+				Callable(self, "_weather_column_surface"))
 	# 脚 = 出生列最高实心方块顶面 +1（预热后数据已就绪）
 	var surface := 0
 	for y in range(config.world_height_blocks() - 1, -1, -1):
@@ -801,6 +808,20 @@ func _spawn_player(spawn_block: Vector2i) -> void:
 	player.spawn_point = player.global_position
 	_setup_water_reflection()
 	_setup_cave_fog()
+
+
+## 天气雷击地形查询：从 hint 高度 +40 向下扫 100 格找该列第一个
+## 实心方块（天然露天面——上方无遮挡），返回顶面 y；全空回落
+## hint（bolt 悬空也比插地好）。仅扫已加载格（get_block 空气=跳过）
+func _weather_column_surface(x: float, z: float, hint_y: float) -> float:
+	var cx := floori(x)
+	var cz := floori(z)
+	var top := mini(ceili(hint_y) + 40, config.world_height_blocks() - 1)
+	var bottom := maxi(ceili(hint_y) - 60, 1)
+	for y in range(top, bottom, -1):
+		if registry.is_solid(world.get_block(Vector3i(cx, y, cz))):
+			return float(y + 1)
+	return hint_y
 
 
 ## 洞口体积雾（光照阶段 2 收尾）：天光数据检测洞口光柱 → 维护洞口

@@ -22,10 +22,12 @@ float path_x(float y) {
 }
 
 void fragment() {
-	// 主干：屏幕距走线的横向距离 → 白核 + 辉光两级衰减
+	// 主干：屏幕距走线的横向距离 → 白核 + 辉光两级衰减（辉光
+	// 放宽放亮：雷暴天空本来就亮灰，additive 增量对比不足——
+	// 实机"没看到闪电"）
 	float d = abs(UV.x - 0.5 - path_x(UV.y));
-	float core = exp(-d * 36.0);
-	float glow = exp(-d * 6.0) * 0.4;
+	float core = exp(-d * 30.0) * 1.3;
+	float glow = exp(-d * 4.5) * 0.55;
 	// 分叉：中上部（每次 seed 决定起点/侧向）斜出短枝，顶端淡出
 	float branch_y = 0.4 + fract(sin(u_seed * 91.7) * 43758.5453) * 0.3;
 	float bd = 9.0;
@@ -35,6 +37,8 @@ void fragment() {
 				- (fract(sin(u_seed * 57.3) * 43758.5453) - 0.5) * 0.8 * by);
 	}
 	float bcore = exp(-bd * 44.0) * (1.0 - smoothstep(0.8, 1.0, UV.y));
+	// 触地段（底 15%）core 增亮：接触点亮感——"劈到地上"的视觉锚
+	core *= 1.0 + 0.8 * (1.0 - smoothstep(0.0, 0.15, UV.y));
 	float lum = (core + glow + bcore * 0.75) * u_fade;
 	ALBEDO = vec3(0.96, 0.97, 1.0) * core * u_fade
 			+ vec3(0.55, 0.65, 1.0) * (glow + bcore * 0.75) * u_fade;

@@ -24,7 +24,7 @@ extends RefCounted
 const NativeTerrainBridge := preload("res://meshing/native_terrain_bridge.gd")
 
 ## 生成算法版本。
-const GENERATOR_VERSION := 8
+const GENERATOR_VERSION := 9  # 9=群系批1（寒原植被/树稀疏）
 
 # ---- 地层参数（v2 语义保留）----
 ## 表层以下 3 格为泥土（草区）或砂岩（沙区）。
@@ -139,9 +139,30 @@ const ROCK_SURFACE_FRAC := 0.62
 ## 气候：温度随高度占比的递减率（高地更冷）。
 const TEMP_LAPSE := 0.9
 ## 荒漠判定：温度与干燥度阈值（低地才算，山地按裸岩处理）。
-const DESERT_TEMP := 0.30
-const DESERT_DRYNESS := -0.10
-const DESERT_MAX_FRAC := 0.45
+const DESERT_TEMP := 0.20
+const DESERT_DRYNESS := -0.05
+const DESERT_MAX_FRAC := 0.55
+## 群系（批 1）：温/湿双噪声（已有通道）→ 五档显式群系。参数域
+## 参考 BYG biome json（temperature/downfall 双轴 Whittaker；1.19
+## 规则 temp 过低降水成雪）。ALPINE=裸岩山峰；SNOWY=寒原（植被
+## 稀+雨量压）；DESERT=荒漠（已有判定复用）；FOREST=湿区密林；
+## PLAINS=现状基线。雪方块顶盖/树形参数化/草色 tint 批 2
+enum Biome { PLAINS, FOREST, DESERT, SNOWY, ALPINE }
+const SNOW_TEMP := -0.45  # 温噪声（-1..1，含海拔递减）冷极阈值
+const FOREST_RAIN := 0.35  # 湿噪声（-1..1）密林阈值
+## 植被/树密度群系乘子（草花与树各自）
+const BIOME_PLANT_SCALE := {
+	Biome.PLAINS: 1.0, Biome.FOREST: 1.15, Biome.DESERT: 0.0,
+	Biome.SNOWY: 0.35, Biome.ALPINE: 0.0,
+}
+const BIOME_TREE_SCALE := {
+	Biome.PLAINS: 1.0, Biome.FOREST: 2.2, Biome.DESERT: 0.0,
+	Biome.SNOWY: 0.45, Biome.ALPINE: 0.0,
+}
+const BIOME_NAMES := {
+	Biome.PLAINS: "平原", Biome.FOREST: "森林", Biome.DESERT: "荒漠",
+	Biome.SNOWY: "寒原", Biome.ALPINE: "高山",
+}
 
 var config: WorldConfig
 var _continental_noise: FastNoiseLite
@@ -331,11 +352,35 @@ func column_profile(world_x: int, world_z: int) -> Dictionary:
 	var rocky := frac >= ROCK_SURFACE_FRAC
 	var temp := _temp_noise.get_noise_2d(world_x, world_z) \
 			- TEMP_LAPSE * maxf(0.0, frac - 0.30)
+	var rain := _precip_noise.get_noise_2d(world_x, world_z)
 	var desert := not rocky and height > sand_max_height \
 			and temp > DESERT_TEMP and frac < DESERT_MAX_FRAC \
-			and _precip_noise.get_noise_2d(world_x, world_z) < DESERT_DRYNESS
+			and rain < DESERT_DRYNESS
 	var sandy := desert or height <= sand_max_height
-	return { "height": height, "frac": frac, "rocky": rocky, "sandy": sandy }
+	var biome: int = biome_for(temp, rain, rocky, desert)
+	return { "height": height, "frac": frac, "rocky": rocky,
+			"sandy": sandy, "temp": temp, "biome": biome }
+
+
+## 群系判定（纯函数，单测覆盖）：裸岩峰 > 寒原 > 荒漠 > 密林 >
+## 平原。desert 由列级复合条件（低地+热+干）预先算好传入
+static func biome_for(temp: float, rain: float, rocky: bool,
+		desert: bool) -> int:
+	if rocky:
+		return Biome.ALPINE
+	if temp < SNOW_TEMP:
+		return Biome.SNOWY
+	if desert:
+		return Biome.DESERT
+	if rain > FOREST_RAIN:
+		return Biome.FOREST
+	return Biome.PLAINS
+
+
+## 便捷查询（天气联动轮询用）：列级群系。column_profile 全噪声
+## 重算 ~μs 级，0.5s 一次无碍；勿在热路径调用
+func biome_at(world_x: int, world_z: int) -> int:
+	return column_profile(world_x, world_z)["biome"]
 
 
 ## 列表面方块（§5.1 气候群系 + 矿脉层）：按高度占比与气候选块。
@@ -552,12 +597,18 @@ func _scatter_plants(chunk: ChunkData, profiles: Dictionary) -> void:
 			var wx := origin.x + lx
 			var wz := origin.z + lz
 			var r := TreeScatterScript.hash01(wx, wz, PLANT_SALT)
+			# 群系批 1：寒原草花稀疏（温噪声同源；荒漠/高山已由
+			# sandy/rocky 前置 continue 挡掉）
+			var plant_scale := 1.0
+			if _temp_noise.get_noise_2d(wx, wz) < SNOW_TEMP:
+				plant_scale = 0.35
 			var plant: int = VoxelTypes.AIR_ID
-			if r < FLOWER_DENSITY:
+			if r < FLOWER_DENSITY * plant_scale:
 				plant = VoxelTypes.FLOWER_POPPY_ID
-			elif r < FLOWER_DENSITY * 2.0:
+			elif r < FLOWER_DENSITY * 2.0 * plant_scale:
 				plant = VoxelTypes.FLOWER_DANDELION_ID
-			elif r < FLOWER_DENSITY * 2.0 + TALL_GRASS_DENSITY:
+			elif r < (FLOWER_DENSITY * 2.0 + TALL_GRASS_DENSITY) \
+					* plant_scale:
 				plant = VoxelTypes.TALL_GRASS_ID
 			if plant != VoxelTypes.AIR_ID:
 				chunk.block_ids[base + size] = plant

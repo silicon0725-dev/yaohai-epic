@@ -142,9 +142,9 @@ public partial class NativeTerrain : RefCounted
     private const double MountainGateHi = 0.60;
     private const double RockSurfaceFrac = 0.62;
     private const double TempLapse = 0.9;
-    private const double DesertTemp = 0.30;
-    private const double DesertDryness = -0.10;
-    private const double DesertMaxFrac = 0.45;
+    private const double DesertTemp = 0.20;
+    private const double DesertDryness = -0.05;
+    private const double DesertMaxFrac = 0.55;
     private const int TreeReach = 4;
 
     private static readonly double[] TargetHeightFrac =

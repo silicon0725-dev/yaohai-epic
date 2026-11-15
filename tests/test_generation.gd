@@ -151,8 +151,8 @@ func run() -> void:
 	check_eq(
 		first.generation_version, TerrainGenerator.GENERATOR_VERSION,
 		"区块记录生成算法版本")
-	check_eq(TerrainGenerator.GENERATOR_VERSION, 8,
-			"生成算法已升级到 v8（v7 + Epic-Terrain 尺度配比：大陆板块/侵蚀链/河流）")
+	check_eq(TerrainGenerator.GENERATOR_VERSION, 9,
+			"生成算法已升级到 v9（v8 + 群系批1：寒原植被/树稀疏）")
 
 	# 目标高程分位表单调递增（分位匹配的前提）
 	var target := TerrainGenerator.TARGET_HEIGHT_FRAC

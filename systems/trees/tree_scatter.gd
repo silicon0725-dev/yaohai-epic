@@ -32,6 +32,10 @@ const WET_TO := 0.45
 ## MOUNTAIN_MASK_FREQ/3 octaves——同值复刻，两侧改动必须同步）
 static var _precip: FastNoiseLite
 static var _precip_seed := -1
+## 温度噪声（群系批 1：寒原树稀）：与 terrain_generator._temp 同参
+##（seed+202 / 1/2048 / 3 octaves）——同值复刻，两侧改动必须同步
+static var _temp: FastNoiseLite
+static var _temp_ready := false
 
 
 static func configure(world_seed: int) -> void:
@@ -49,6 +53,13 @@ static func configure(world_seed: int) -> void:
 	n.frequency = 1.0 / 2048.0
 	n.fractal_octaves = 3
 	_precip = n
+	var tn := FastNoiseLite.new()
+	tn.seed = world_seed + 202
+	tn.noise_type = FastNoiseLite.TYPE_SIMPLEX
+	tn.frequency = 1.0 / 2048.0
+	tn.fractal_octaves = 3
+	_temp = tn
+	_temp_ready = true
 	_precip_seed = world_seed
 
 
@@ -76,8 +87,11 @@ static func hash01(a: int, b: int, c: int) -> float:
 	return float(h) / 4294967296.0
 
 
-## 列密度（每列概率）：降水场平滑映射。cell 中心采样（6 格内
-## 密度一致——cell 判定与 jitter 无密度跳变）
+## 列密度（每列概率）：降水场平滑映射 + 寒原衰减（群系批 1：温
+## 噪声低于 SNOW_TEMP 密度×0.45——寒原稀树；海拔递减项散布侧无
+## frac 不带，山地由 rocky 挡树天然不进本函数语义）。cell 中心采样
+##（6 格内密度一致——cell 判定与 jitter 无密度跳变）
+const SNOW_TREE_TEMP := -0.45  # = terrain_generator.SNOW_TEMP（同步红线）
 static func density_at(world_seed: int, x: int, z: int) -> float:
 	configure(world_seed)
 	var n := _precip
@@ -87,7 +101,11 @@ static func density_at(world_seed: int, x: int, z: int) -> float:
 	# smoothstep(0, 0.45, precip)：负降水=0 因子（荒漠密度下限）
 	var t := clampf((p - WET_FROM) / (WET_TO - WET_FROM), 0.0, 1.0)
 	var forest := t * t * (3.0 - 2.0 * t)
-	return lerpf(DENSITY_MIN, DENSITY_MAX, forest)
+	var density := lerpf(DENSITY_MIN, DENSITY_MAX, forest)
+	if _temp_ready and _temp != null \
+			and _temp.get_noise_2d(x, z) < SNOW_TREE_TEMP:
+		density *= 0.45
+	return density
 
 
 ## 撒种判定纯函数：该水平列是否长树（确定性）。

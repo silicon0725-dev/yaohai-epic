@@ -24,6 +24,7 @@ const TEST_CASES := [
 	"res://tests/test_tree_mesh.gd",
 	"res://tests/test_water_flow.gd",
 	"res://tests/test_weather.gd",
+	"res://tests/test_biome.gd",
 	"res://tests/test_light_manager.gd",
 	"res://tests/test_voxel_light.gd",
 	"res://tests/test_light_inspector.gd",

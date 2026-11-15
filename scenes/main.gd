@@ -41,6 +41,8 @@ const DistantShellScript := preload("res://presentation/distant_shell.gd")
 var sound_manager: Node  # SoundManager（preload 绕开类缓存）
 const SoundManagerScript := preload("res://systems/sound/sound_manager.gd")
 var weather_system: Node  # WeatherSystem 天气（preload 绕开类缓存）
+var _player_biome := -1  # 玩家当前群系（0.5s 轮询，HUD+天气联动）
+var _biome_poll_timer := 0.0
 const WeatherSystemScript := preload("res://systems/weather/weather_system.gd")
 var save_system: WorldSave
 var player: PlayerController
@@ -360,6 +362,27 @@ func _unhandled_input(event: InputEvent) -> void:
 			show_hint("⚡ 雷击测试：劈玩家脚下")
 
 
+## 群系轮询（0.5s）：玩家列群系 → HUD 显示 + 天气雨量缩放
+##（荒漠≈无雨、寒原 0.55——状态机照转，只压降水观感；云/风保留）
+func _update_biome_poll(delta: float) -> void:
+	_biome_poll_timer -= delta
+	if _biome_poll_timer > 0.0 or player == null \
+			or not is_instance_valid(player):
+		return
+	_biome_poll_timer = 0.5
+	var b: int = generator.biome_at(
+			floori(player.global_position.x),
+			floori(player.global_position.z))
+	_player_biome = b
+	if weather_system != null:
+		var scale := 1.0
+		if b == TerrainGenerator.Biome.DESERT:
+			scale = 0.05
+		elif b == TerrainGenerator.Biome.SNOWY:
+			scale = 0.55
+		weather_system.set_rain_scale(scale)
+
+
 func _process(delta: float) -> void:
 	# 加载遮罩期跳过全部渲染侧子系统（审查二轮 D15）：波时钟/涟漪/
 	# HUD 文本/曝光/日夜在遮罩后面白跑（加载 7s × 每帧掉落遍历+统计
@@ -393,6 +416,7 @@ func _process(delta: float) -> void:
 	_update_hint(delta)
 	_update_exposure(delta)
 	_update_day_night(delta)
+	_update_biome_poll(delta)
 
 
 ## ---- 日夜循环 ----
@@ -592,15 +616,17 @@ func _update_hud() -> void:
 	var hint_line := ("[ " + _hint_text + " ]") if not _hint_text.is_empty() else ""
 	_hud_label.text = "\n".join([
 		hint_line,
-		"BUILD 2026-11-15.天气2修9 — 若无此行=旧程序未重启",
+		"BUILD 2026-11-15.群系1 — 若无此行=旧程序未重启",
 		"Voxel Terrain MVP - Items Layer (inventory + tools + ground drops)",
 		"chunks: %d    faces: %d    in-flight: %d    saved: %d    drops: %d" % [
 			world.chunk_count(), chunk_renderer.total_faces,
 			chunk_manager.in_flight_count(),
 			save_system.saved_chunk_count(), drop_manager.drop_count()],
-		"seed: %d    view: %d chunks    weather: %s" % [
+		"seed: %d    view: %d chunks    weather: %s    biome: %s" % [
 			config.world_seed, chunk_manager.view_distance,
-			weather_system.state_name() if weather_system != null else "-"],
+			weather_system.state_name() if weather_system != null else "-",
+			TerrainGenerator.BIOME_NAMES.get(
+					_player_biome, "?") if _player_biome >= 0 else "-"],
 		"Hold LMB mine (drops to ground) | walk over to auto-pickup | RMB place",
 		"Q drop held | Ctrl+Q drop stack | 1-8/wheel select | E inventory | R rotate while dragging",
 		"F5 camera (1st person / 3rd behind / 2nd front / shoulder) | F6 character model | F7 draw/sheathe katana",
@@ -643,15 +669,17 @@ func _update_ripples(_delta: float) -> void:
 		# 漂流尾迹：移动才注入（静止漂浮物不持续扰动水面）
 		elif Vector2(drop.velocity.x, drop.velocity.z).length() > 0.3:
 			water_ripples.add_impulse(pos_xz, 0.12, 0.4)
-	# 雨滴打水面（天气批 2）：按雨强随机采样玩家周围水格注入弱冲量
-	#（涟漪休眠会被雨唤醒——雨强低于 0.05 不注入，雨歇后水面自然
-	# 平静归零休眠）
-	if weather_system != null and weather_system.rain_intensity > 0.05:
+	# 雨滴打水面（天气批 2）：按有效雨强（群系缩放后）随机采样玩家
+	# 周围水格注入弱冲量（涟漪休眠会被雨唤醒——雨强低于 0.05 不
+	# 注入，雨歇后水面自然平静归零休眠）
+	var rain_eff: float = weather_system.rain01() \
+			if weather_system != null else 0.0
+	if rain_eff > 0.05:
 		var base_cell := Vector3i(
 				floori(player.global_position.x),
 				floori(player.global_position.y),
 				floori(player.global_position.z))
-		var drops := int(weather_system.rain_intensity * 12.0)
+		var drops := int(rain_eff * 12.0)
 		for i in drops:
 			var rx := base_cell.x + randi_range(-9, 9)
 			var rz := base_cell.z + randi_range(-9, 9)

@@ -52,6 +52,18 @@ const SMOOTH_TAU := 45.0  # 过渡 ~45s 到 63%（整体 2-3 分钟完成）
 var cloudiness := 0.05
 var rain_intensity := 0.0
 var wind_strength := 0.25
+## 群系雨量缩放（main 按 0.5s 轮询注入：荒漠≈0/寒原 0.55/常 1.0）
+## ——状态机照常运转（阴天云保留），只压降水视觉/听觉/涟漪
+var rain_scale := 1.0
+
+
+## 有效雨强（粒子/音频/涟漪统一消费口——乘群系缩放）
+func rain01() -> float:
+	return rain_intensity * rain_scale
+
+
+func set_rain_scale(scale: float) -> void:
+	rain_scale = clampf(scale, 0.0, 1.0)
 
 var state: int = State.CLEAR
 ## 综合暗度（云量驱动，main 用它压太阳/环境/天空）
@@ -188,8 +200,9 @@ func _setup_rain_particles() -> void:
 func _update_rain_particles() -> void:
 	if _rain_particles == null:
 		return
-	# 密度：雨强 0.02 以下全隐（无雨不跑粒子）
-	var density := 0.0 if rain_intensity < 0.02 else rain_intensity
+	# 密度：有效雨强（群系缩放后）0.02 以下全隐（无雨不跑粒子）
+	var effective := rain01()
+	var density := 0.0 if effective < 0.02 else effective
 	if not _hide_rain:
 		_rain_particles.amount_ratio = density
 	else:
@@ -507,12 +520,13 @@ func _setup_rain_audio() -> void:
 	_rain_player.play()
 
 
-## 雨声音量跟随雨强（60dB 动态范围，平滑防跳变）
+## 雨声音量跟随有效雨强（群系缩放；60dB 动态范围，平滑防跳变）
 func _update_rain_audio(delta: float) -> void:
 	if _rain_player == null:
 		return
+	var effective := rain01()
 	var target_db := linear_to_db(clampf(
-			0.14 + rain_intensity * 0.5, 0.0, 1.0)) if rain_intensity > 0.02 \
+			0.14 + effective * 0.5, 0.0, 1.0)) if effective > 0.02 \
 			else -60.0
 	var cur := db_to_linear(_rain_player.volume_db)
 	var want := db_to_linear(target_db)
